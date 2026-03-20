@@ -1,0 +1,27 @@
+[direction]
+horizon = 5
+n_estimators = 200
+num_leaves = 31
+learning_rate = 0.05
+min_child_samples = 20
+subsample = 0.8
+colsample_bytree = 0.8
+reg_alpha = 0.1
+reg_lambda = 0.1
+
+[regime]
+n_states = 4
+n_iter = 100
+
+[volatility]
+horizon = 5
+p = 1
+q = 1
+
+[freshness]
+direction_hours = 24.0
+regime_hours = 24.0
+volatility_hours = 24.0
+
+[optuna]
+n_trials = 50

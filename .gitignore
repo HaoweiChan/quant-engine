@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# IDE
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Environment / secrets
+.env
+.env.*
+secrets.json
+credentials.json
+*.pem
+*.key
+
+# Data and databases
+db/
+data/
+*.db
+*.sqlite
+*.duckdb
+*.parquet
+*.arrow
+*.csv
+
+# Config (may contain secrets)
+config/secrets.toml
+
+# Docs (internal architecture notes, not for public consumption)
+docs/
+
+# MLflow / experiment tracking
+mlruns/
+mlartifacts/
+
+# Logs
+*.log
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb

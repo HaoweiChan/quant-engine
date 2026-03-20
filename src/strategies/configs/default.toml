@@ -1,0 +1,28 @@
+# Default strategy configuration
+# Edit these values to tune strategy performance without changing code.
+
+[pyramid]
+# Maximum dollar loss before the engine halts
+max_loss = 500_000
+# Maximum number of pyramid levels (1 = no pyramiding)
+max_levels = 4
+# ATR multiplier for initial stop distance
+stop_atr_mult = 1.5
+# ATR multiplier for trailing stop (chandelier)
+trail_atr_mult = 3.0
+# Lookback period for trailing stop high/low
+trail_lookback = 22
+# Margin utilization cap (0.0 - 1.0)
+margin_limit = 0.50
+# Kelly criterion fraction for position sizing
+kelly_fraction = 0.25
+# Minimum model confidence to enter (0.0 - 1.0)
+entry_conf_threshold = 0.65
+
+[engine]
+# Maximum dollar loss for engine-level risk
+max_loss = 500_000
+# Margin utilization limit (0.0 - 1.0)
+margin_limit = 0.50
+# Lookback bars for trailing calculations
+trail_lookback = 22

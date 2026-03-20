@@ -1,0 +1,25 @@
+schema: spec-driven
+
+context: |
+  Project: quant-engine — a market-agnostic quantitative trading platform
+  Tech stack: Python 3.12+, uv, polars, LightGBM, arch (GARCH), hmmlearn, pandas-ta, VectorBT, structlog
+  Brokers: Sinopac (TW futures), Schwab (US equities), Binance (crypto)
+  Architecture: Prediction Engine → Position Engine → Execution Engine, with independent Risk Monitor
+  Core design: market-agnostic engine + market-specific adapters, one-way signal flow, 3-layer stop-loss
+  Testing: pytest, synthetic data for unit tests, Monte Carlo for strategy validation
+  Style: ruff, mypy strict, PEP 8, single-line spacing, imports sorted by length
+
+rules:
+  proposal:
+    - Reference existing docs in docs/ (ARCHITECTURE.md, SPECS.md, ROADMAP.md, TASKS.md, TECH_STACK.md, STRUCTURE.md)
+    - Keep scope to one development phase or week
+  specs:
+    - Use Python dataclass signatures for interface definitions
+    - Include edge cases and error handling scenarios
+  design:
+    - Include ASCII architecture diagrams where helpful
+    - Reference module boundaries from ARCHITECTURE.md
+  tasks:
+    - Each task should be atomic and independently testable
+    - Include acceptance criteria for each task
+    - Group by module (core/types, core/position_engine, tests)

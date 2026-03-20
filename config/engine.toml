@@ -1,0 +1,39 @@
+[pyramid]
+max_loss = 500000.0
+max_levels = 4
+add_trigger_atr = [4.0, 8.0, 12.0]
+stop_atr_mult = 1.5
+trail_atr_mult = 3.0
+trail_lookback = 22
+margin_limit = 0.50
+kelly_fraction = 0.25
+entry_conf_threshold = 0.65
+
+[pyramid.lot_schedule]
+levels = [[3, 4], [2, 0], [1, 4], [1, 4]]
+
+[risk]
+margin_ratio_threshold = 0.30
+signal_staleness_hours = 2.0
+feed_staleness_minutes = 5.0
+spread_spike_multiplier = 10.0
+max_loss = 500000.0
+check_interval_seconds = 30
+
+[execution]
+slippage_points = 1.0
+max_retries = 3
+
+[rollout]
+enabled = false
+max_contracts_per_order = 2
+max_total_contracts = 10
+
+[alerting]
+telegram_chat_id = ""
+daily_summary_time = "15:00"
+
+[reconciliation]
+interval_seconds = 60
+equity_threshold_pct = 0.02
+policy = "alert_only"

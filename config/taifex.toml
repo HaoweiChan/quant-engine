@@ -1,0 +1,57 @@
+[trading_hours.day]
+open_time = "08:45"
+close_time = "13:45"
+timezone = "Asia/Taipei"
+
+[trading_hours.night]
+open_time = "15:00"
+close_time = "05:00"
+timezone = "Asia/Taipei"
+
+[contracts.TX]
+symbol = "TX"
+exchange = "TAIFEX"
+currency = "TWD"
+point_value = 200.0
+margin_initial = 184000.0
+margin_maintenance = 141000.0
+min_tick = 1.0
+fee_per_contract = 60.0
+tax_rate = 0.00002
+
+[contracts.TX.lot_types]
+large = 200.0
+small = 50.0
+
+[contracts.MTX]
+symbol = "MTX"
+exchange = "TAIFEX"
+currency = "TWD"
+point_value = 50.0
+margin_initial = 46000.0
+margin_maintenance = 35250.0
+min_tick = 1.0
+fee_per_contract = 30.0
+tax_rate = 0.00002
+
+[contracts.MTX.lot_types]
+mini = 50.0
+
+[contracts.TMF]
+symbol = "TMF"
+exchange = "TAIFEX"
+currency = "TWD"
+point_value = 2000.0
+margin_initial = 35000.0
+margin_maintenance = 27000.0
+min_tick = 0.001
+fee_per_contract = 30.0
+tax_rate = 0.00002
+
+[contracts.TMF.lot_types]
+standard = 2000.0
+
+[lot_translation]
+large = "TX"
+small = "MTX"
+micro = "MTX"
