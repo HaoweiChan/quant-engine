@@ -17,6 +17,8 @@ app = Dash(
     __name__,
     suppress_callback_exceptions=True,
     title="Quant Engine Dashboard",
+    compress=True,        # gzip all assets and responses
+    update_title=None,    # skip "Updating…" browser title flicker on callbacks
 )
 server = app.server
 app.index_string = th.INDEX_STRING
@@ -26,6 +28,50 @@ _DD_STYLE: dict = {
     "background": th.INPUT_BG, "border": f"1px solid {th.INPUT_BORDER}",
     "borderRadius": 3, "color": th.TEXT, "fontSize": 11,
 }
+
+
+def build_param_grid_inputs(strategy_slug: str) -> list:
+    """Build param input components for a given strategy."""
+    grid = helpers.get_param_grid_for_strategy(strategy_slug)
+    inputs = []
+    for key, cfg in grid.items():
+        defaults = cfg.get("default", [])
+        ptype = cfg.get("type", "float")
+        default_str = ",".join(str(int(v) if ptype == "int" else v) for v in defaults)
+        inputs.append(th.param_input(
+            cfg.get("label", key),
+            dcc.Input(
+                id={"type": "sp-param", "key": key},
+                type="text",
+                value=default_str,
+                placeholder="e.g. 15,20,25",
+                style={**th.INPUT_STYLE, "fontSize": 10},
+            ),
+        ))
+    if not inputs:
+        inputs.append(html.Div("No tunable parameters found.", style={
+            "fontSize": 9, "color": th.DIM, "fontFamily": th.MONO, "padding": "8px 0",
+        }))
+    return inputs
+
+
+def build_axis_dropdowns(strategy_slug: str) -> list:
+    """Build X/Y axis dropdowns for heatmap based on strategy params."""
+    grid = helpers.get_param_grid_for_strategy(strategy_slug)
+    param_opts = [{"label": v.get("label", k), "value": k} for k, v in grid.items()]
+    keys = list(grid.keys())
+    x_default = keys[0] if keys else ""
+    y_default = keys[1] if len(keys) > 1 else (keys[0] if keys else "")
+    return [
+        th.param_input("X-axis", dcc.Dropdown(
+            id="sp-x-axis", options=param_opts, value=x_default,
+            clearable=False, style=_DD_STYLE,
+        )),
+        th.param_input("Y-axis", dcc.Dropdown(
+            id="sp-y-axis", options=param_opts, value=y_default,
+            clearable=False, style=_DD_STYLE,
+        )),
+    ]
 
 # ── Page layout builders (sidebar + main skeleton) ──────────────────────────
 
@@ -60,7 +106,7 @@ def build_data_hub_page() -> html.Div:
             id="dh-tf", options=tf_opts, value="60", clearable=False, style=_DD_STYLE,
         )),
         th.param_input("From", dcc.Input(
-            id="dh-start", type="text", value="2024-01-01",
+            id="dh-start", type="text", value="2025-03-01",
             placeholder="YYYY-MM-DD", style=th.INPUT_STYLE,
         )),
         th.param_input("To", dcc.Input(
@@ -117,6 +163,15 @@ def build_live_page() -> html.Div:
 
 
 def build_backtest_page() -> html.Div:
+    strat_opts = [
+        {"label": info.name, "value": slug}
+        for slug, info in helpers.STRATEGY_REGISTRY.items()
+    ]
+    default_strat = next(iter(helpers.STRATEGY_REGISTRY), "atr_mean_reversion")
+    contract_opts = [
+        {"label": f"{c.display}", "value": c.db_symbol}
+        for c in helpers.FUTURES_CONTRACTS
+    ]
     reentry_opts = [
         {"label": "Immediate", "value": "Immediate"},
         {"label": "Cooldown (20 bars)", "value": "Cooldown (20 bars)"},
@@ -124,6 +179,24 @@ def build_backtest_page() -> html.Div:
         {"label": "Breakout (20-bar high)", "value": "Breakout (20-bar high)"},
     ]
     sidebar = html.Div([
+        th.section_label("STRATEGY"),
+        th.param_input("Strategy", dcc.Dropdown(
+            id="bt-strategy", options=strat_opts, value=default_strat,
+            clearable=False, style=_DD_STYLE,
+        )),
+        th.param_input("Contract", dcc.Dropdown(
+            id="bt-contract", options=contract_opts, value="TX",
+            clearable=False, style=_DD_STYLE,
+        )),
+        th.param_input("From", dcc.Input(
+            id="bt-start", type="text", value="2025-08-01",
+            placeholder="YYYY-MM-DD", style=th.INPUT_STYLE,
+        )),
+        th.param_input("To", dcc.Input(
+            id="bt-end", type="text", value="2026-03-14",
+            placeholder="YYYY-MM-DD", style=th.INPUT_STYLE,
+        )),
+        html.Hr(style={"borderColor": th.CARD_BORDER, "margin": "10px 0"}),
         th.section_label("POSITION ENGINE"),
         th.param_input("Max Pyramid Levels", dcc.Input(
             id="bt-max-levels", type="number", value=4, min=1, max=8, step=1, style=th.INPUT_STYLE,
@@ -156,15 +229,29 @@ def build_backtest_page() -> html.Div:
         th.run_btn("▶ Run Backtest", "bt-run"),
     ], style=th.SIDEBAR_STYLE)
     main = html.Div([
-        html.Div(id="bt-content", children=[th.info_msg("Configure parameters and click ▶ Run Backtest.")]),
+        dcc.Loading(
+            html.Div(id="bt-content", children=[th.info_msg("Configure parameters and click ▶ Run Backtest.")]),
+            type="dot", color=th.BLUE,
+        ),
     ], style=th.MAIN_STYLE)
     return html.Div([sidebar, main], style={"display": "flex"})
 
 
 def build_grid_search_page() -> html.Div:
+    strat_opts = [
+        {"label": info.name, "value": slug}
+        for slug, info in helpers.STRATEGY_REGISTRY.items()
+    ]
+    default_strat = next(iter(helpers.STRATEGY_REGISTRY), "atr_mean_reversion")
     param_names = list(helpers.GRID_PARAMS.keys())
     param_opts = [{"label": p, "value": p} for p in param_names]
     sidebar = html.Div([
+        th.section_label("STRATEGY"),
+        th.param_input("Strategy", dcc.Dropdown(
+            id="gs-strategy", options=strat_opts, value=default_strat,
+            clearable=False, style=_DD_STYLE,
+        )),
+        html.Hr(style={"borderColor": th.CARD_BORDER, "margin": "10px 0"}),
         th.section_label("AXES"),
         th.param_input("X-axis Parameter", dcc.Dropdown(
             id="gs-x-param", options=param_opts, value=param_names[0], clearable=False, style=_DD_STYLE,
@@ -229,12 +316,36 @@ def build_grid_search_page() -> html.Div:
 
 
 def build_monte_carlo_page() -> html.Div:
-    scenario_opts = [
-        {"label": "Base Case", "value": "base"},
-        {"label": "Stress (-2σ)", "value": "stress"},
-        {"label": "Bull (+1σ)", "value": "bull"},
+    strat_opts = [
+        {"label": info.name, "value": slug}
+        for slug, info in helpers.STRATEGY_REGISTRY.items()
+    ]
+    default_strat = next(iter(helpers.STRATEGY_REGISTRY), "atr_mean_reversion")
+    contract_opts = [
+        {"label": f"{c.display}", "value": c.db_symbol}
+        for c in helpers.FUTURES_CONTRACTS
     ]
     sidebar = html.Div([
+        th.section_label("STRATEGY"),
+        th.param_input("Strategy", dcc.Dropdown(
+            id="mc-strategy", options=strat_opts, value=default_strat,
+            clearable=False, style=_DD_STYLE,
+        )),
+        html.Hr(style={"borderColor": th.CARD_BORDER, "margin": "10px 0"}),
+        th.section_label("DATA  (backtest period)"),
+        th.param_input("Contract", dcc.Dropdown(
+            id="mc-contract", options=contract_opts, value="TX",
+            clearable=False, style=_DD_STYLE,
+        )),
+        th.param_input("From", dcc.Input(
+            id="mc-start", type="text", value="2025-08-01",
+            placeholder="YYYY-MM-DD", style=th.INPUT_STYLE,
+        )),
+        th.param_input("To", dcc.Input(
+            id="mc-end", type="text", value="2026-03-14",
+            placeholder="YYYY-MM-DD", style=th.INPUT_STYLE,
+        )),
+        html.Hr(style={"borderColor": th.CARD_BORDER, "margin": "10px 0"}),
         th.section_label("SIMULATION"),
         th.param_input("Number of Paths", dcc.Input(
             id="mc-paths", type="number", value=1000, min=100, max=5000, step=100, style=th.INPUT_STYLE,
@@ -242,13 +353,14 @@ def build_monte_carlo_page() -> html.Div:
         th.param_input("Simulation Days", dcc.Input(
             id="mc-days", type="number", value=252, min=30, max=504, step=10, style=th.INPUT_STYLE,
         )),
-        th.param_input("Scenario", dcc.Dropdown(
-            id="mc-scenario", options=scenario_opts, value="base", clearable=False, style=_DD_STYLE,
-        )),
         th.run_btn("◆ Run Simulation", "mc-run", bg="#5A2A8A"),
     ], style=th.SIDEBAR_STYLE)
     main = html.Div([
-        html.Div(id="mc-content", children=[th.info_msg("Configure parameters and click ◆ Run Simulation.")]),
+        dcc.Loading(html.Div(id="mc-content", children=[
+            th.info_msg("Select a strategy & data range, then click ◆ Run Simulation.\n"
+                        "Runs a backtest to extract return statistics, then simulates "
+                        "equity paths vs buy-and-hold."),
+        ]), type="dot", color=th.BLUE),
     ], style=th.MAIN_STYLE)
     return html.Div([sidebar, main], style={"display": "flex"})
 
@@ -331,14 +443,84 @@ def build_strategy_page() -> html.Div:
     return html.Div([sidebar, main], style={"display": "flex"})
 
 
-def build_optimization_page() -> html.Div:
+def build_strategy_page_container() -> html.Div:
+    """Strategy primary tab with sub-tabs: Code Editor, Optimizer, Grid Search, Monte Carlo."""
     return html.Div([
-        dcc.Tabs(id="opt-tabs", value="opt-gs", children=[
-            dcc.Tab(label="Grid Search", value="opt-gs", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
-            dcc.Tab(label="Monte Carlo", value="opt-mc", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
+        dcc.Tabs(id="strat-tabs", value="strat-editor", children=[
+            dcc.Tab(label="Code Editor", value="strat-editor", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
+            dcc.Tab(label="Optimizer", value="strat-opt", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
+            dcc.Tab(label="Grid Search", value="strat-gs", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
+            dcc.Tab(label="Monte Carlo", value="strat-mc", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
         ], style={"borderBottom": f"1px solid {th.CARD_BORDER}", "background": th.BG}),
-        html.Div(id="opt-content"),
+        html.Div(id="strat-content"),
     ])
+
+
+def build_strategy_optimizer_page() -> html.Div:
+    strat_opts = [
+        {"label": info.name, "value": slug}
+        for slug, info in helpers.STRATEGY_REGISTRY.items()
+    ]
+    default_strat = next(iter(helpers.STRATEGY_REGISTRY), "atr_mean_reversion")
+    contract_opts = [
+        {"label": f"{c.display}", "value": c.db_symbol}
+        for c in helpers.FUTURES_CONTRACTS
+    ]
+    obj_opts = helpers.OPT_OBJECTIVES
+    sidebar = html.Div([
+        th.section_label("STRATEGY"),
+        th.param_input("Strategy", dcc.Dropdown(
+            id="sp-strategy", options=strat_opts, value=default_strat,
+            clearable=False, style=_DD_STYLE,
+        )),
+        html.Hr(style={"borderColor": th.CARD_BORDER, "margin": "10px 0"}),
+        th.section_label("DATA"),
+        th.param_input("Contract", dcc.Dropdown(
+            id="sp-contract", options=contract_opts, value="TX",
+            clearable=False, style=_DD_STYLE,
+        )),
+        th.param_input("From", dcc.Input(
+            id="sp-start", type="text", value="2025-08-01",
+            placeholder="YYYY-MM-DD", style=th.INPUT_STYLE,
+        )),
+        th.param_input("To", dcc.Input(
+            id="sp-end", type="text", value="2026-03-14",
+            placeholder="YYYY-MM-DD", style=th.INPUT_STYLE,
+        )),
+        th.param_input("IS Fraction", dcc.Input(
+            id="sp-is-fraction", type="number", value=0.8,
+            min=0.5, max=0.95, step=0.05, style=th.INPUT_STYLE,
+        )),
+        th.param_input("Objective", dcc.Dropdown(
+            id="sp-objective", options=obj_opts, value="sharpe",
+            clearable=False, style=_DD_STYLE,
+        )),
+        html.Hr(style={"borderColor": th.CARD_BORDER, "margin": "10px 0"}),
+        th.section_label("PARAM GRID  (comma-separated values)"),
+        html.Div(id="sp-param-grid-container", children=build_param_grid_inputs(default_strat)),
+        html.Hr(style={"borderColor": th.CARD_BORDER, "margin": "10px 0"}),
+        th.section_label("HEATMAP AXES"),
+        html.Div(id="sp-axis-dropdowns-container", children=build_axis_dropdowns(default_strat)),
+        html.Hr(style={"borderColor": th.CARD_BORDER, "margin": "10px 0"}),
+        th.param_input("Parallel Jobs", dcc.Input(
+            id="sp-n-jobs", type="number", value=2,
+            min=1, max=8, step=1, style=th.INPUT_STYLE,
+        )),
+        th.run_btn("⊞ Run Optimizer", "sp-run-btn", bg="#2A6A4A"),
+        dcc.Interval(id="sp-poll", interval=2_000, disabled=True),
+    ], style=th.SIDEBAR_STYLE)
+
+    main = html.Div([
+        dcc.Store(id="sp-store"),
+        html.Div(id="sp-status-bar", style={
+            "fontSize": 9, "fontFamily": th.MONO, "color": th.MUTED,
+            "marginBottom": 10, "minHeight": 16,
+        }),
+        html.Div(id="sp-content", children=[
+            th.info_msg("Configure param grid and click ⊞ Run Optimizer.")
+        ]),
+    ], style=th.MAIN_STYLE)
+    return html.Div([sidebar, main], style={"display": "flex"})
 
 
 def build_trading_page() -> html.Div:
@@ -476,7 +658,6 @@ app.layout = html.Div([
         dcc.Tab(label="Data Hub", value="datahub", style=_TAB_STYLE, selected_style=_TAB_SELECTED_STYLE),
         dcc.Tab(label="Strategy", value="strategy", style=_TAB_STYLE, selected_style=_TAB_SELECTED_STYLE),
         dcc.Tab(label="Backtest", value="backtest", style=_TAB_STYLE, selected_style=_TAB_SELECTED_STYLE),
-        dcc.Tab(label="Optimization", value="optimization", style=_TAB_STYLE, selected_style=_TAB_SELECTED_STYLE),
         dcc.Tab(label="Trading", value="trading", style=_TAB_STYLE, selected_style=_TAB_SELECTED_STYLE),
     ], style={"borderBottom": f"1px solid {th.CARD_BORDER}", "background": th.BG}),
 

@@ -85,7 +85,7 @@ _FONTS_URL = (
 
 _GLOBAL_CSS = f"""
 *, *::before, *::after {{ box-sizing: border-box; }}
-body {{ background: {BG}; color: {TEXT}; font-family: {SANS}; margin: 0; padding: 0; min-height: 100vh; }}
+body {{ background: {BG}; color: {TEXT}; font-family: {SANS}; margin: 0; padding: 0; min-height: 100vh; color-scheme: dark; }}
 ::-webkit-scrollbar {{ width: 6px; height: 6px; }}
 ::-webkit-scrollbar-track {{ background: {BG}; }}
 ::-webkit-scrollbar-thumb {{ background: {INPUT_BORDER}; border-radius: 3px; }}
@@ -123,6 +123,15 @@ input[type="number"], input[type="text"] {{
     font-size: 11px !important; padding: 4px 6px !important; width: 100% !important; outline: none !important;
 }}
 [id*="editor-file-item"]:hover {{ background: {INPUT_BG}; color: {TEXT} !important; }}
+.Select-input input {{ background: {INPUT_BG} !important; color: {TEXT} !important; }}
+.Select-input {{ background: {INPUT_BG} !important; }}
+input[type="search"] {{ background-color: {INPUT_BG} !important; color: {TEXT} !important; caret-color: {TEXT} !important; border: none !important; }}
+.dash-dropdown input {{ background-color: {INPUT_BG} !important; color: {TEXT} !important; caret-color: {TEXT} !important; }}
+input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus {{
+    -webkit-box-shadow: 0 0 0 30px {INPUT_BG} inset !important;
+    -webkit-text-fill-color: {TEXT} !important;
+    transition: background-color 5000s ease-in-out 0s;
+}}
 """
 
 INDEX_STRING = (

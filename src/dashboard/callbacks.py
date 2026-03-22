@@ -24,34 +24,38 @@ def render_page(tab: str) -> object:
     from src.dashboard.app import (  # noqa: PLC0415
         build_backtest_page,
         build_data_hub_page,
-        build_optimization_page,
-        build_strategy_page,
+        build_strategy_page_container,
         build_trading_page,
     )
     builders = {
-        "datahub":      build_data_hub_page,
-        "strategy":     build_strategy_page,
-        "backtest":     build_backtest_page,
-        "optimization": build_optimization_page,
-        "trading":      build_trading_page,
+        "datahub":  build_data_hub_page,
+        "strategy": build_strategy_page_container,
+        "backtest": build_backtest_page,
+        "trading":  build_trading_page,
     }
     builder = builders.get(tab, build_data_hub_page)
     return builder()
 
 
-# ── Sub-tab routing: Optimization ─────────────────────────────────────────────
+# ── Sub-tab routing: Strategy ────────────────────────────────────────────────
 @callback(
-    Output("opt-content", "children"),
-    Input("opt-tabs", "value"),
+    Output("strat-content", "children"),
+    Input("strat-tabs", "value"),
 )
-def render_optimization_sub(tab: str) -> object:
+def render_strategy_sub(tab: str) -> object:
     from src.dashboard.app import (  # noqa: PLC0415
         build_grid_search_page,
         build_monte_carlo_page,
+        build_strategy_optimizer_page,
+        build_strategy_page,
     )
-    if tab == "opt-mc":
+    if tab == "strat-opt":
+        return build_strategy_optimizer_page()
+    if tab == "strat-gs":
+        return build_grid_search_page()
+    if tab == "strat-mc":
         return build_monte_carlo_page()
-    return build_grid_search_page()
+    return build_strategy_page()
 
 
 # ── Sub-tab routing: Trading ──────────────────────────────────────────────────
@@ -240,54 +244,84 @@ def update_live(n_intervals: int) -> object:
     Output("bt-content", "children"),
     Output("editor-modified-files", "data", allow_duplicate=True),
     Input("bt-run", "n_clicks"),
-    State("bt-max-levels", "value"),
-    State("bt-stop-atr",   "value"),
-    State("bt-trail-atr",  "value"),
+    State("bt-strategy",    "value"),
+    State("bt-contract",    "value"),
+    State("bt-start",       "value"),
+    State("bt-end",         "value"),
+    State("bt-max-levels",  "value"),
+    State("bt-stop-atr",    "value"),
+    State("bt-trail-atr",   "value"),
     State("bt-add-trigger", "value"),
-    State("bt-margin",     "value"),
-    State("bt-kelly",      "value"),
-    State("bt-entry-conf", "value"),
-    State("bt-max-loss",   "value"),
-    State("bt-reentry",    "value"),
+    State("bt-margin",      "value"),
+    State("bt-kelly",       "value"),
+    State("bt-entry-conf",  "value"),
+    State("bt-max-loss",    "value"),
+    State("bt-reentry",     "value"),
     prevent_initial_call=True,
 )
-def run_backtest(n_clicks: int, *_: object) -> tuple[object, list]:
-    eq = helpers.generate_equity_curve(252, seed=42)
-    trades = helpers.generate_trades(40, seed=42)
-    returns = eq["equity"].pct_change().dropna()
-    total_trades = len(trades)
-    winners = int((trades["pnl"] > 0).sum())
-    sharpe = float(returns.mean() / returns.std() * np.sqrt(252))
-    max_dd = float((eq["equity"] / eq["equity"].cummax() - 1).min() * 100)
-    total_pnl = float(eq["equity"].iloc[-1] - 2_000_000)
-    win_rate = winners / total_trades * 100
-    drawdown = (eq["equity"] / eq["equity"].cummax() - 1) * 100
-    bnh = helpers.generate_buy_and_hold(252, seed=42)
-    bnh_pnl = float(bnh["equity"].iloc[-1] - 2_000_000)
+def run_backtest(
+    n_clicks: int,
+    strategy_slug: str,
+    symbol: str,
+    start: str,
+    end: str,
+    *_: object,
+) -> tuple[object, list]:
+    try:
+        bt = helpers.run_strategy_backtest(
+            strategy_slug or "atr_mean_reversion",
+            symbol or "TX",
+            start or "2025-08-01",
+            end or "2026-03-14",
+        )
+    except Exception as exc:
+        return th.error_card(f"Backtest error: {exc}"), []
+
+    equity = bt["equity_curve"]
+    bnh_equity = bt["bnh_equity"]
+    metrics = bt["metrics"]
+    strat_returns = bt["daily_returns"]
+    initial = equity[0] if equity else 2_000_000
+    eq_arr = np.array(equity)
+    total_pnl = float(eq_arr[-1] - initial) if len(eq_arr) > 0 else 0.0
+    bnh_pnl = float(bnh_equity[-1] - initial) if bnh_equity else 0.0
     alpha = total_pnl - bnh_pnl
+    sharpe = metrics.get("sharpe", 0)
+    max_dd = metrics.get("max_drawdown_pct", 0)
+    win_rate = metrics.get("win_rate", 0) * 100
+    trade_count = int(metrics.get("trade_count", 0))
+
+    x_range = list(range(len(equity)))
     eq_fig = go.Figure(layout={**th.DARK_CHART_LAYOUT, "showlegend": True,
                                 "legend": {"font": {"family": th.MONO, "size": 8, "color": th.MUTED}}})
     eq_fig.add_trace(go.Scatter(
-        x=eq["date"].tolist(), y=eq["equity"].tolist(),
-        mode="lines", line=dict(color=th.GREEN, width=1.5), name="Strategy",
+        x=x_range, y=equity, mode="lines",
+        line=dict(color=th.GREEN, width=1.5), name="Strategy",
     ))
+    bnh_x = list(range(len(bnh_equity)))
     eq_fig.add_trace(go.Scatter(
-        x=bnh["date"].tolist(), y=bnh["equity"].tolist(),
-        mode="lines", line=dict(color=th.DIM, width=1, dash="dot"), name="Buy & Hold",
+        x=bnh_x, y=bnh_equity, mode="lines",
+        line=dict(color=th.DIM, width=1, dash="dot"), name="Buy & Hold",
     ))
-    dd_fig = _area_fig(eq["date"].tolist(), drawdown.tolist(), th.RED, "rgba(255,82,82,0.15)", y_suffix="%")
-    ret_mids, ret_counts = helpers.histogram_data(returns * 100, bins=30)
+
+    drawdown = (eq_arr / np.maximum.accumulate(eq_arr) - 1) * 100 if len(eq_arr) > 0 else [0]
+    dd_fig = _area_fig(x_range, drawdown.tolist(), th.RED, "rgba(255,82,82,0.15)", y_suffix="%")
+
+    ret_pct = strat_returns * 100
+    ret_mids, ret_counts = helpers.histogram_data(ret_pct, bins=30)
     dist_fig = _bar_hist_fig(ret_mids, ret_counts)
-    reason_cond = [
-        {"if": {"filter_query": '{reason} = "stop_loss" || {reason} = "trail_stop"'}, "color": th.RED},
-        {"if": {"filter_query": '{reason} = "take_profit" || {reason} = "pyramid_add"'}, "color": th.GREEN},
-    ]
+
+    info = helpers.STRATEGY_REGISTRY.get(strategy_slug or "")
+    label = info.name if info else strategy_slug
+
     return html.Div([
+        html.Div(f"{label} on {symbol} ({start} → {end})  •  {bt['bars_count']:,} bars",
+                 style={"fontSize": 9, "fontFamily": th.MONO, "color": th.DIM, "marginBottom": 10}),
         th.stat_row([
             th.stat_card("SHARPE RATIO", f"{sharpe:.2f}", th.GREEN if sharpe > 1 else th.GOLD),
             th.stat_card("MAX DRAWDOWN", f"{max_dd:.1f}%", th.RED),
             th.stat_card("WIN RATE", f"{win_rate:.0f}%", th.GREEN if win_rate >= 50 else th.ORANGE),
-            th.stat_card("TOTAL TRADES", str(total_trades), th.CYAN),
+            th.stat_card("TOTAL TRADES", str(trade_count), th.CYAN),
             th.stat_card("TOTAL PnL", f"${total_pnl:+,.0f}", th.GREEN if total_pnl >= 0 else th.RED),
             th.stat_card("B&H PnL", f"${bnh_pnl:+,.0f}", th.MUTED),
             th.stat_card("ALPHA", f"${alpha:+,.0f}", th.GREEN if alpha >= 0 else th.RED),
@@ -297,9 +331,6 @@ def run_backtest(n_clicks: int, *_: object) -> tuple[object, list]:
             html.Div([th.chart_card("DRAWDOWN", th.dark_graph(dd_fig))], style={"flex": 1}),
             html.Div([th.chart_card("RETURN DISTRIBUTION", th.dark_graph(dist_fig))], style={"flex": 1}),
         ], style={"display": "flex", "gap": 10}),
-        th.chart_card("TRADE LOG", _make_table(
-            trades.to_dict("records"), list(trades.columns), cond_style=reason_cond,
-        )),
     ]), []
 
 
@@ -418,51 +449,129 @@ def update_grid_heatmap(store: dict | None, metric_str: str) -> object:
 @callback(
     Output("mc-content", "children"),
     Input("mc-run", "n_clicks"),
-    State("mc-paths",    "value"),
-    State("mc-days",     "value"),
-    State("mc-scenario", "value"),
+    State("mc-strategy",  "value"),
+    State("mc-contract",  "value"),
+    State("mc-start",     "value"),
+    State("mc-end",       "value"),
+    State("mc-paths",     "value"),
+    State("mc-days",      "value"),
     prevent_initial_call=True,
 )
 def run_monte_carlo(  # noqa: PLR0913
-    n_clicks: int, n_paths: int | None, n_days: int | None, scenario: str | None,
+    n_clicks: int,
+    strategy_slug: str | None,
+    symbol: str | None,
+    start: str | None,
+    end: str | None,
+    n_paths: int | None,
+    n_days: int | None,
 ) -> object:
     n_paths = int(n_paths or 1000)
     n_days = int(n_days or 252)
-    drift_adj = {"base": 0.0, "stress": -0.0004, "bull": 0.0002}.get(scenario or "base", 0.0)
+    initial_equity = 2_000_000.0
+
+    try:
+        bt = helpers.run_strategy_backtest(
+            strategy_slug or "atr_mean_reversion",
+            symbol or "TX",
+            start or "2025-08-01",
+            end or "2026-03-14",
+        )
+    except Exception as exc:
+        return th.error_card(f"Backtest failed: {exc}")
+
+    strat_rets = bt["daily_returns"]
+    bnh_rets = bt["bnh_returns"]
+    if len(strat_rets) < 10:
+        return th.error_card("Not enough data for simulation. Widen the date range.")
+    strat_mu = float(np.mean(strat_rets))
+    strat_sigma = float(np.std(strat_rets))
+    bnh_mu = float(np.mean(bnh_rets))
+    bnh_sigma = float(np.std(bnh_rets))
+
     rng = np.random.default_rng(42)
-    paths = np.zeros((n_paths, n_days))
+    strat_paths = np.zeros((n_paths, n_days))
+    bnh_paths = np.zeros((n_paths, n_days))
     for i in range(n_paths):
-        returns = rng.normal(0.0003 + drift_adj, 0.015, n_days)
-        paths[i] = 2_000_000 * np.cumprod(1 + returns)
-    final_equity = paths[:, -1]
-    pnl = final_equity - 2_000_000
+        sr = rng.normal(strat_mu, strat_sigma, n_days)
+        strat_paths[i] = initial_equity * np.cumprod(1 + sr)
+        br = rng.normal(bnh_mu, bnh_sigma, n_days)
+        bnh_paths[i] = initial_equity * np.cumprod(1 + br)
+
+    strat_final = strat_paths[:, -1]
+    bnh_final = bnh_paths[:, -1]
+    strat_pnl = strat_final - initial_equity
+    bnh_pnl = bnh_final - initial_equity
+
     percentiles = [5, 10, 25, 50, 75, 90, 95]
-    vals = np.percentile(pnl, percentiles)
-    prob_loss = float((pnl < 0).mean() * 100)
+    s_vals = np.percentile(strat_pnl, percentiles)
+    b_vals = np.percentile(bnh_pnl, percentiles)
+    s_prob_loss = float((strat_pnl < 0).mean() * 100)
+    b_prob_loss = float((bnh_pnl < 0).mean() * 100)
+
+    strat_sharpe = strat_mu / strat_sigma * np.sqrt(252) if strat_sigma > 0 else 0
+    bnh_sharpe = bnh_mu / bnh_sigma * np.sqrt(252) if bnh_sigma > 0 else 0
+
     n_show = min(50, n_paths)
     x_range = list(range(n_days))
     paths_fig = go.Figure(layout=th.DARK_CHART_LAYOUT)
-    for path in paths[:n_show]:
+    for path in strat_paths[:n_show]:
         paths_fig.add_trace(go.Scatter(
             x=x_range, y=path.tolist(), mode="lines",
-            line=dict(color="rgba(90,138,242,0.3)", width=1), showlegend=False,
+            line=dict(color="rgba(90,138,242,0.25)", width=1), showlegend=False,
         ))
-    pnl_mids, pnl_counts = helpers.histogram_data(pnl, bins=50)
-    dist_fig = _bar_hist_fig(pnl_mids, pnl_counts)
+    for path in bnh_paths[:n_show]:
+        paths_fig.add_trace(go.Scatter(
+            x=x_range, y=path.tolist(), mode="lines",
+            line=dict(color="rgba(255,180,60,0.15)", width=1), showlegend=False,
+        ))
+    paths_fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+                                   name="Strategy", line=dict(color=th.BLUE, width=2)))
+    paths_fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines",
+                                   name="Buy & Hold", line=dict(color=th.GOLD, width=2)))
+    paths_fig.update_layout(showlegend=True,
+                            legend=dict(font=dict(family=th.MONO, size=8, color=th.DIM)))
+
+    s_mids, s_counts = helpers.histogram_data(strat_pnl, bins=50)
+    b_mids, b_counts = helpers.histogram_data(bnh_pnl, bins=50)
+    dist_fig = go.Figure(layout=th.DARK_CHART_LAYOUT)
+    dist_fig.add_trace(go.Bar(x=s_mids, y=s_counts, name="Strategy",
+                              marker_color=th.BLUE, opacity=0.7, width=(s_mids[1] - s_mids[0]) * 0.85 if len(s_mids) > 1 else 1))
+    dist_fig.add_trace(go.Bar(x=b_mids, y=b_counts, name="Buy & Hold",
+                              marker_color=th.GOLD, opacity=0.5, width=(b_mids[1] - b_mids[0]) * 0.85 if len(b_mids) > 1 else 1))
+    dist_fig.update_layout(barmode="overlay", showlegend=True,
+                           legend=dict(font=dict(family=th.MONO, size=8, color=th.DIM)))
+
     perc_data = [
-        {"Percentile": f"P{p}", "PnL": f"${v:+,.0f}", "Final Equity": f"${v + 2_000_000:,.0f}"}
-        for p, v in zip(percentiles, vals, strict=True)
+        {
+            "Percentile": f"P{p}",
+            "Strategy PnL": f"${sv:+,.0f}",
+            "B&H PnL": f"${bv:+,.0f}",
+            "Edge": f"${sv - bv:+,.0f}",
+        }
+        for p, sv, bv in zip(percentiles, s_vals, b_vals, strict=True)
     ]
+
+    strat_info = helpers.STRATEGY_REGISTRY.get(strategy_slug or "")
+    strat_label = strat_info.name if strat_info else strategy_slug
+
     return html.Div([
+        html.Div(f"Based on {len(strat_rets):,} bars backtest of {strat_label} on {symbol} "
+                 f"({start} → {end})  •  μ={strat_mu*100:.4f}%/bar  σ={strat_sigma*100:.4f}%",
+                 style={"fontSize": 9, "fontFamily": th.MONO, "color": th.DIM, "marginBottom": 10}),
         th.stat_row([
-            th.stat_card("MEDIAN PnL",  f"${vals[3]:+,.0f}", th.GREEN if vals[3] >= 0 else th.RED),
-            th.stat_card("P5 (WORST 5%)", f"${vals[0]:+,.0f}", th.RED),
-            th.stat_card("P95 (BEST 5%)", f"${vals[6]:+,.0f}", th.GREEN),
-            th.stat_card("P(LOSS)", f"{prob_loss:.1f}%", th.RED if prob_loss > 30 else th.GOLD),
+            th.stat_card("STRAT MEDIAN PnL", f"${s_vals[3]:+,.0f}", th.GREEN if s_vals[3] >= 0 else th.RED),
+            th.stat_card("B&H MEDIAN PnL", f"${b_vals[3]:+,.0f}", th.GREEN if b_vals[3] >= 0 else th.RED),
+            th.stat_card("STRAT P(LOSS)", f"{s_prob_loss:.1f}%", th.RED if s_prob_loss > 30 else th.GOLD),
+            th.stat_card("B&H P(LOSS)", f"{b_prob_loss:.1f}%", th.RED if b_prob_loss > 30 else th.GOLD),
+            th.stat_card("STRAT SHARPE", f"{strat_sharpe:.3f}", th.GREEN if strat_sharpe > 0.5 else th.MUTED),
+            th.stat_card("B&H SHARPE", f"{bnh_sharpe:.3f}", th.GREEN if bnh_sharpe > 0.5 else th.MUTED),
         ]),
-        th.chart_card(f"SIMULATION PATHS — {n_show}/{n_paths} shown", th.dark_graph(paths_fig, height=280)),
-        th.chart_card("FINAL PnL DISTRIBUTION", th.dark_graph(dist_fig, height=220)),
-        th.chart_card("PERCENTILE TABLE", _make_table(perc_data, ["Percentile", "PnL", "Final Equity"])),
+        th.chart_card(f"MC PATHS — {n_show}/{n_paths} shown  (blue=Strategy, gold=Buy&Hold)",
+                      th.dark_graph(paths_fig, height=280)),
+        th.chart_card("PnL DISTRIBUTION — Strategy vs Buy & Hold", th.dark_graph(dist_fig, height=220)),
+        th.chart_card("PERCENTILE TABLE — Strategy vs Buy & Hold",
+                      _make_table(perc_data, ["Percentile", "Strategy PnL", "B&H PnL", "Edge"])),
     ])
 
 
@@ -698,6 +807,308 @@ def update_backtest_indicator(modified: list) -> str:
     if modified:
         return " \u2022 files modified — re-run backtest"
     return ""
+
+
+# ── Strategy Optimizer ───────────────────────────────────────────────────────
+
+@callback(
+    Output("sp-param-grid-container", "children"),
+    Output("sp-axis-dropdowns-container", "children"),
+    Input("sp-strategy", "value"),
+    prevent_initial_call=True,
+)
+def sp_update_param_grid(strategy_slug: str) -> tuple:
+    from src.dashboard.app import build_axis_dropdowns, build_param_grid_inputs
+    return build_param_grid_inputs(strategy_slug), build_axis_dropdowns(strategy_slug)
+
+
+@callback(
+    Output("sp-poll", "disabled"),
+    Output("sp-status-bar", "children"),
+    Output("sp-content", "children", allow_duplicate=True),
+    Input("sp-run-btn", "n_clicks"),
+    State("sp-strategy", "value"),
+    State("sp-contract", "value"),
+    State("sp-start", "value"),
+    State("sp-end", "value"),
+    State("sp-is-fraction", "value"),
+    State("sp-objective", "value"),
+    State({"type": "sp-param", "key": ALL}, "value"),
+    State({"type": "sp-param", "key": ALL}, "id"),
+    State("sp-n-jobs", "value"),
+    prevent_initial_call=True,
+)
+def sp_run_optimizer(
+    n_clicks: int,
+    strategy_slug: str,
+    symbol: str,
+    start: str,
+    end: str,
+    is_fraction: float,
+    objective: str,
+    param_values: list[str],
+    param_ids: list[dict],
+    n_jobs: int,
+) -> tuple:
+    info = helpers.STRATEGY_REGISTRY.get(strategy_slug)
+    if not info:
+        return True, f"⚠ Unknown strategy: {strategy_slug}", no_update
+
+    grid_def = helpers.get_param_grid_for_strategy(strategy_slug)
+
+    def _parse_floats(s: str) -> list[float]:
+        return [float(v.strip()) for v in s.split(",") if v.strip()]
+
+    def _parse_ints(s: str) -> list[int]:
+        return [int(float(v.strip())) for v in s.split(",") if v.strip()]
+
+    try:
+        param_grid: dict[str, list] = {"max_loss": [100_000]}
+        for pid, val in zip(param_ids, param_values, strict=True):
+            key = pid["key"]
+            ptype = grid_def.get(key, {}).get("type", "float")
+            if ptype == "int":
+                param_grid[key] = _parse_ints(val or "0")
+            else:
+                param_grid[key] = _parse_floats(val or "0")
+    except Exception as exc:
+        return True, f"⚠ Param parse error: {exc}", no_update
+
+    started = helpers.start_optimizer_run(
+        symbol=symbol or "TX",
+        start_str=start or "2025-08-01",
+        end_str=end or "2026-03-14",
+        param_grid=param_grid,
+        is_fraction=float(is_fraction or 0.8),
+        objective=objective or "sharpe",
+        n_jobs=int(n_jobs or 1),
+        factory_module=info.module,
+        factory_name=info.factory,
+    )
+    if not started:
+        return True, "⚠ Optimizer already running…", no_update
+    msg = f"⟳ Starting optimizer for {info.name}…"
+    return False, msg, th.info_msg(msg)
+
+
+@callback(
+    Output("sp-content", "children"),
+    Output("sp-status-bar", "children", allow_duplicate=True),
+    Output("sp-poll", "disabled", allow_duplicate=True),
+    Input("sp-poll", "n_intervals"),
+    State("sp-x-axis", "value"),
+    State("sp-y-axis", "value"),
+    prevent_initial_call=True,
+)
+def sp_poll(n_intervals: int, x_axis: str, y_axis: str) -> tuple:
+    state = helpers.get_optimizer_state()
+
+    if state["error"]:
+        return (
+            th.error_card(f"Optimizer error: {state['error']}"),
+            f"✗ {state['error']}",
+            True,
+        )
+
+    if not state["finished"] and state["running"]:
+        return (
+            no_update,
+            f"⟳ {state['progress']}",
+            False,
+        )
+
+    if not state["finished"]:
+        return no_update, no_update, no_update
+
+    # Build results display
+    rd = state["result_data"]
+    if not rd:
+        return th.error_card("No result data."), "No result data.", True
+
+    content = _build_optimizer_results(rd, x_axis or "bb_len", y_axis or "atr_sl_multi")
+    n_combos = len(rd["trials"])
+    best_obj = rd["is_metrics"].get(rd["objective"], 0)
+    status = f"✓ {n_combos} trials — best IS {rd['objective']}: {best_obj:.4f}"
+    return content, status, True
+
+
+def _build_optimizer_results(rd: dict, x_axis: str, y_axis: str) -> html.Div:
+    import plotly.graph_objects as go
+
+    trials = rd["trials"]
+    objective = rd["objective"]
+    param_keys = rd["param_keys"]
+    is_m = rd["is_metrics"]
+    oos_m = rd.get("oos_metrics") or {}
+    best_p = rd["best_params"]
+
+    # ── Stat row ────────────────────────────────────────────────────────────
+    is_sharpe = is_m.get("sharpe", 0)
+    oos_sharpe = oos_m.get("sharpe", 0) if oos_m else None
+    sharpe_delta = f"{oos_sharpe - is_sharpe:+.3f}" if oos_sharpe is not None else "N/A"
+    stat_items = [
+        th.stat_card("IS SHARPE", f"{is_sharpe:.3f}", th.GREEN if is_sharpe > 0.5 else th.MUTED),
+        th.stat_card("OOS SHARPE", f"{oos_sharpe:.3f}" if oos_sharpe is not None else "N/A",
+                     th.GREEN if (oos_sharpe or 0) > 0 else th.RED),
+        th.stat_card("IS/OOS Δ SHARPE", sharpe_delta,
+                     th.GOLD if oos_sharpe is not None and abs(oos_sharpe - is_sharpe) < 0.3 else th.RED),
+        th.stat_card("IS PROFIT FACTOR", f"{is_m.get('profit_factor', 0):.2f}", th.MUTED),
+        th.stat_card("IS WIN RATE", f"{is_m.get('win_rate', 0) * 100:.1f}%", th.MUTED),
+        th.stat_card("IS TRADES", str(int(is_m.get("trade_count", 0))), th.MUTED),
+    ]
+
+    # ── IS/OOS equity curves ─────────────────────────────────────────────────
+    eq_fig = go.Figure(layout=th.DARK_CHART_LAYOUT)
+    is_eq = rd.get("is_equity", [])
+    oos_eq = rd.get("oos_equity", [])
+    if is_eq:
+        eq_fig.add_trace(go.Scatter(
+            x=list(range(len(is_eq))), y=is_eq, mode="lines",
+            name="IS equity", line=dict(color=th.BLUE, width=1.5),
+        ))
+    if oos_eq:
+        eq_fig.add_trace(go.Scatter(
+            x=list(range(len(is_eq), len(is_eq) + len(oos_eq))), y=oos_eq, mode="lines",
+            name="OOS equity", line=dict(color=th.GREEN, width=1.5, dash="dot"),
+        ))
+    if is_eq and oos_eq:
+        split_idx = len(is_eq) - 1
+        eq_fig.add_shape(type="line", x0=split_idx, x1=split_idx,
+                         y0=0, y1=1, yref="paper",
+                         line=dict(color=th.GOLD, width=1, dash="dash"))
+    eq_fig.update_layout(showlegend=True,
+                         legend=dict(font=dict(family=th.MONO, size=8, color=th.DIM)))
+
+    # ── Sharpe heatmap ──────────────────────────────────────────────────────
+    heatmap_content = _build_heatmap(trials, x_axis, y_axis, objective)
+
+    # ── Top-10 parameters table ──────────────────────────────────────────────
+    display_cols = [k for k in param_keys if k != "max_loss"] + [objective, "profit_factor", "win_rate", "trade_count"]
+    display_cols = [c for c in display_cols if c in (trials[0] if trials else {})]
+    top10 = sorted(trials, key=lambda r: r.get(objective, 0), reverse=True)[:10]
+    table_data = []
+    for i, row in enumerate(top10):
+        d = {"#": i + 1}
+        for c in display_cols:
+            v = row.get(c, "")
+            if isinstance(v, float):
+                d[c] = f"{v:.4f}" if abs(v) < 100 else f"{v:.1f}"
+            else:
+                d[c] = str(v)
+        table_data.append(d)
+    table_cols = ["#"] + display_cols
+    ts = th.dark_table_style()
+    top10_table = dash_table.DataTable(
+        data=table_data,
+        columns=[{"name": c, "id": c} for c in table_cols],
+        **ts, page_size=10, style_as_list_view=True,
+    )
+
+    # ── Best params display ──────────────────────────────────────────────────
+    best_lines = [
+        html.Div(f"  {k}: {v}", style={"fontFamily": th.MONO, "fontSize": 10, "color": th.TEXT, "lineHeight": 1.8})
+        for k, v in best_p.items() if k != "max_loss"
+    ]
+    save_btn = html.Button(
+        "💾 Save as Default Params",
+        id="sp-save-params-btn",
+        n_clicks=0,
+        style={
+            "marginTop": 8, "padding": "6px 14px", "fontSize": 10,
+            "fontFamily": th.MONO, "background": "#2A6A4A", "color": th.TEXT,
+            "border": "none", "borderRadius": 3, "cursor": "pointer", "width": "100%",
+        },
+    )
+    save_msg = html.Div(id="sp-save-msg", style={"marginTop": 4, "fontSize": 9, "fontFamily": th.MONO})
+    warnings_div = html.Div()
+    if rd.get("warnings"):
+        w_items = [html.Div(f"⚠ {w}", style={"fontSize": 9, "color": th.GOLD, "fontFamily": th.MONO, "lineHeight": 1.6})
+                   for w in rd["warnings"][:5]]
+        warnings_div = html.Div(w_items, style={"marginTop": 8})
+
+    return html.Div([
+        dcc.Store(id="sp-best-params-store", data=best_p),
+        th.stat_row(stat_items),
+        th.chart_card("EQUITY CURVE — IN-SAMPLE (blue) vs OUT-OF-SAMPLE (green)", th.dark_graph(eq_fig, height=220)),
+        html.Div([
+            html.Div([
+                th.chart_card(f"{objective.upper()} HEATMAP  ({x_axis} × {y_axis})", heatmap_content),
+            ], style={"flex": "1 1 55%"}),
+            html.Div([
+                th.chart_card("BEST PARAMS", html.Div([*best_lines, save_btn, save_msg])),
+                warnings_div,
+            ], style={"flex": "1 1 40%"}),
+        ], style={"display": "flex", "gap": 10}),
+        th.chart_card(f"TOP 10 COMBINATIONS — sorted by {objective}", top10_table),
+    ])
+
+
+def _build_heatmap(
+    trials: list[dict],
+    x_key: str,
+    y_key: str,
+    objective: str,
+) -> object:
+    import plotly.graph_objects as go
+
+    if not trials or x_key not in trials[0] or y_key not in trials[0]:
+        return th.info_msg("Select valid X/Y axes for the heatmap.")
+
+    x_vals = sorted(set(r[x_key] for r in trials))
+    y_vals = sorted(set(r[y_key] for r in trials))
+
+    if len(x_vals) < 2 or len(y_vals) < 2:
+        return th.info_msg("Need ≥2 values for each heatmap axis. Expand your param grid.")
+
+    z = []
+    for yv in y_vals:
+        row_vals = []
+        for xv in x_vals:
+            # Average across all other params
+            matching = [r[objective] for r in trials if r[x_key] == xv and r[y_key] == yv]
+            row_vals.append(float(sum(matching) / len(matching)) if matching else 0.0)
+        z.append(row_vals)
+
+    fig = go.Figure(layout={**th.DARK_CHART_LAYOUT})
+    fig.add_trace(go.Heatmap(
+        x=[str(v) for v in x_vals],
+        y=[str(v) for v in y_vals],
+        z=z,
+        colorscale="RdYlGn",
+        colorbar=dict(
+            tickfont=dict(family=th.MONO, size=8, color=th.DIM),
+            thickness=10,
+        ),
+        text=[[f"{v:.3f}" for v in row] for row in z],
+        texttemplate="%{text}",
+        textfont=dict(size=9, family=th.MONO),
+        hovertemplate=f"{x_key}=%{{x}}<br>{y_key}=%{{y}}<br>{objective}=%{{z:.4f}}<extra></extra>",
+    ))
+    fig.update_layout(
+        xaxis=dict(title=x_key, **th.DARK_CHART_LAYOUT.get("xaxis", {})),
+        yaxis=dict(title=y_key, **th.DARK_CHART_LAYOUT.get("yaxis", {})),
+    )
+    return th.dark_graph(fig, height=280)
+
+
+# ── Save optimized params ────────────────────────────────────────────────────
+@callback(
+    Output("sp-save-msg", "children"),
+    Input("sp-save-params-btn", "n_clicks"),
+    State("sp-strategy", "value"),
+    State("sp-best-params-store", "data"),
+    prevent_initial_call=True,
+)
+def sp_save_params(n_clicks: int, strategy_slug: str, best_params: dict | None) -> str:
+    if not best_params:
+        return "⚠ No params to save."
+    try:
+        from src.strategies.param_loader import save_strategy_params
+        clean = {k: v for k, v in best_params.items() if k != "max_loss"}
+        path = save_strategy_params(strategy_slug or "unknown", clean)
+        return f"✓ Saved to {path.name}"
+    except Exception as exc:
+        return f"✗ {exc}"
 
 
 def _crawl_header(state: dict) -> html.Div:

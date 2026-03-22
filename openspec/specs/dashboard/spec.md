@@ -1,6 +1,6 @@
 ## Purpose
 
-A Dash-based monitoring and analysis dashboard for the quant engine. Organized into five lifecycle-ordered tabs — Data Hub, Strategy, Backtest, Optimization, Trading — with sub-navigation for multi-view tabs. Renders dark-themed charts, stat cards, and data tables for market data browsing/export, in-browser strategy editing, backtesting, parameter grid search, Monte Carlo simulation, live/paper trading, and risk monitoring.
+A Dash-based monitoring and analysis dashboard for the quant engine. Organized into four lifecycle-ordered primary tabs — Data Hub, Strategy, Backtest, Trading — with the Strategy tab containing Code Editor, Optimizer, and Monte Carlo sub-views, and sub-navigation on Trading. Renders dark-themed charts, stat cards, and data tables for market data browsing/export, in-browser strategy editing, backtesting, parameter grid search, Monte Carlo simulation, live/paper trading, and risk monitoring.
 
 ## Requirements
 
@@ -27,7 +27,7 @@ The dashboard SHALL load IBM Plex Serif (headings), IBM Plex Sans (body text), a
 - **THEN** the title "Quant Engine Dashboard" SHALL use IBM Plex Serif at 17px weight 600
 
 ### Requirement: Tab navigation
-The dashboard SHALL provide a horizontal primary tab bar with five tabs in lifecycle order: Data Hub, Strategy, Backtest, Optimization, Trading. The active tab SHALL be indicated by a `#5a8af2` bottom border. Inactive tabs SHALL use `#445` text color. The Optimization and Trading tabs SHALL each contain a secondary tab bar for sub-navigation. Secondary tabs SHALL use a lighter visual weight (9px font, `#6B7280` text, subtler border) to differentiate from primary navigation.
+The dashboard SHALL provide a horizontal primary tab bar with four tabs in lifecycle order: Data Hub, Strategy, Backtest, Trading. The active tab SHALL be indicated by a `#5a8af2` bottom border. Inactive tabs SHALL use `#445` text color. The Strategy tab SHALL contain a secondary tab bar with three sub-tabs: Code Editor, Optimizer, Monte Carlo. The Trading tab SHALL contain a secondary tab bar for sub-navigation. Secondary tabs SHALL use a lighter visual weight (9px font, `#6B7280` text, subtler border) to differentiate from primary navigation. The Optimization primary tab is removed.
 
 #### Scenario: Tab switches page content
 - **WHEN** the user clicks a primary tab
@@ -37,10 +37,10 @@ The dashboard SHALL provide a horizontal primary tab bar with five tabs in lifec
 - **WHEN** the dashboard first loads
 - **THEN** the Data Hub tab SHALL be active
 
-#### Scenario: Sub-tab navigation within Optimization
-- **WHEN** the user clicks the Optimization primary tab
-- **THEN** a secondary tab bar SHALL appear with two sub-tabs: Grid Search and Monte Carlo
-- **THEN** Grid Search SHALL be the default active sub-tab
+#### Scenario: Sub-tab navigation within Strategy
+- **WHEN** the user clicks the Strategy primary tab
+- **THEN** a secondary tab bar SHALL appear with three sub-tabs: Code Editor, Optimizer, Monte Carlo
+- **THEN** Code Editor SHALL be the default active sub-tab
 
 #### Scenario: Sub-tab navigation within Trading
 - **WHEN** the user clicks the Trading primary tab
@@ -48,8 +48,49 @@ The dashboard SHALL provide a horizontal primary tab bar with five tabs in lifec
 - **THEN** Live/Paper SHALL be the default active sub-tab
 
 #### Scenario: Sub-tab preserves state on primary tab switch
-- **WHEN** the user selects the Monte Carlo sub-tab under Optimization, switches to Backtest, then switches back to Optimization
+- **WHEN** the user selects the Monte Carlo sub-tab under Strategy, switches to Backtest, then switches back to Strategy
 - **THEN** the Monte Carlo sub-tab SHALL still be selected
+
+### Requirement: Dropdown search bar dark theme
+All Dash dropdown components with search enabled SHALL render the search input with the dashboard's dark background (`INPUT_BG`), dark text color (`TEXT`), and a dark `color-scheme` to suppress browser autofill light backgrounds.
+
+#### Scenario: Search bar matches dark theme
+- **WHEN** the user opens a dropdown with a search input
+- **THEN** the search input background SHALL be `INPUT_BG` (#1E2130), text color SHALL be `TEXT` (#E0E0E0), and caret SHALL be visible against the dark background
+
+#### Scenario: Browser autofill does not flash white
+- **WHEN** the browser applies autofill styling to a dropdown search input
+- **THEN** the background SHALL remain dark due to `color-scheme: dark` on the root element
+
+### Requirement: Strategy selector in Optimizer
+The Optimizer sub-tab (under Strategy) SHALL include a "Strategy" dropdown in the sidebar that lists all discoverable strategy factories from `src/strategies/`. Each option SHALL display the strategy's human-readable name. Selecting a strategy SHALL load its param grid definition into the sidebar inputs.
+
+#### Scenario: Strategy dropdown populates at startup
+- **WHEN** the Optimizer sub-tab loads
+- **THEN** the Strategy dropdown SHALL list all strategies discovered from `src/strategies/` via `create_*_engine` factory function pattern
+
+#### Scenario: Selecting a strategy loads its param grid
+- **WHEN** the user selects a different strategy from the dropdown
+- **THEN** the sidebar param inputs SHALL update to show that strategy's tunable parameters with their default values
+
+#### Scenario: Only one strategy available
+- **WHEN** only one strategy factory exists in `src/strategies/`
+- **THEN** that strategy SHALL be pre-selected in the dropdown
+
+### Requirement: Save optimized params from results
+The Optimizer results view SHALL include a "Save as Default Params" button that writes the best parameter set to a TOML config file. A success or error message SHALL appear after the save.
+
+#### Scenario: Save button appears after optimization
+- **WHEN** optimization results are displayed
+- **THEN** a "Save as Default Params" button SHALL appear in the best-params section
+
+#### Scenario: Save confirms success
+- **WHEN** the user clicks "Save as Default Params"
+- **THEN** the TOML file SHALL be written and a green "Saved to configs/<name>.toml" message SHALL appear
+
+#### Scenario: Save shows error on failure
+- **WHEN** the TOML write fails (e.g., permission error)
+- **THEN** a red error message SHALL appear with the failure reason
 
 ### Requirement: Stat card component
 Every page that displays metrics SHALL render them as stat cards arranged in a horizontal flex row. Each card SHALL have: an uppercase label in `#445` at 7px, a colored value at 15px weight 700 in JetBrains Mono, and an optional sub-label in `#444` at 7px. Card background SHALL be `#0d0d26` with border `1px solid #1a1a38` and `border-radius: 5px`.
@@ -145,7 +186,7 @@ The Backtest page SHALL expose position engine settings in the sidebar (Max Pyra
 - **THEN** the stat card value SHALL be `#69f0ae`; when negative it SHALL be `#ff5252`
 
 ### Requirement: Grid Search page
-The Grid Search page (sub-tab under Optimization) SHALL allow selecting X-axis and Y-axis parameters from the 7 position engine parameters. It SHALL expose search range controls (min, max, steps) for each axis and a MC sims/cell input. A metric selector (E[Return %], Sharpe, Win Rate %, Std Dev) SHALL control the heatmap coloring. The heatmap SHALL use green for positive Sharpe/Return values and red for negative, with white text and hover details. Best and Worst cells SHALL be highlighted in annotated cards.
+The Grid Search page (Optimizer sub-tab under Strategy) SHALL allow selecting X-axis and Y-axis parameters from the 7 position engine parameters. It SHALL expose search range controls (min, max, steps) for each axis and a MC sims/cell input. A metric selector (E[Return %], Sharpe, Win Rate %, Std Dev) SHALL control the heatmap coloring. The heatmap SHALL use green for positive Sharpe/Return values and red for negative, with white text and hover details. Best and Worst cells SHALL be highlighted in annotated cards.
 
 #### Scenario: Heatmap cell hover
 - **WHEN** the user hovers over a heatmap cell
@@ -156,7 +197,7 @@ The Grid Search page (sub-tab under Optimization) SHALL allow selecting X-axis a
 - **THEN** the heatmap color scale SHALL update without re-running the simulation
 
 ### Requirement: Monte Carlo page
-The Monte Carlo page (sub-tab under Optimization) SHALL expose Number of Paths (100–5000), Simulation Days (30–504), and Scenario selector. It SHALL display: a sample paths line chart (max 50 paths), a PnL distribution histogram, 4 stat cards (Median PnL, P5, P95, P(Loss)), and a percentile table.
+The Monte Carlo page (sub-tab under Strategy) SHALL expose Number of Paths (100–5000), Simulation Days (30–504), and Scenario selector. It SHALL display: a sample paths line chart (max 50 paths), a PnL distribution histogram, 4 stat cards (Median PnL, P5, P95, P(Loss)), and a percentile table.
 
 #### Scenario: Sample paths chart
 - **WHEN** 1000 paths are simulated
@@ -166,11 +207,15 @@ The Monte Carlo page (sub-tab under Optimization) SHALL expose Number of Paths (
 - **WHEN** the PnL distribution histogram renders
 - **THEN** bins with positive midpoints SHALL be `#1a5a3a` and negative bins SHALL be `#5a1a1a`
 
-### Requirement: Optimization tab structure
-The Optimization primary tab SHALL contain a secondary `dcc.Tabs` bar with two sub-tabs: Grid Search and Monte Carlo. Each sub-tab SHALL render its own sidebar and main content layout. The secondary tab bar SHALL appear below the primary tab bar with visually lighter styling.
+### Requirement: Strategy tab structure
+The Strategy primary tab SHALL contain a secondary `dcc.Tabs` bar with three sub-tabs: Code Editor, Optimizer, and Monte Carlo. The Optimizer sub-tab SHALL host Grid Search; each of Optimizer and Monte Carlo SHALL render its own sidebar and main content layout. The Code Editor sub-tab SHALL render the embedded strategy file editor. The secondary tab bar SHALL appear below the primary tab bar with visually lighter styling.
+
+#### Scenario: Code Editor sub-tab content
+- **WHEN** the Code Editor sub-tab is active
+- **THEN** the page SHALL display the full code editor interface (file browser sidebar, Ace editor, validation panel) with its own sidebar
 
 #### Scenario: Grid Search sub-tab content
-- **WHEN** the Grid Search sub-tab is active
+- **WHEN** the Optimizer sub-tab is active
 - **THEN** the page SHALL display the full Grid Search interface (axis parameter selectors, range controls, heatmap, results table) with its own sidebar
 
 #### Scenario: Monte Carlo sub-tab content

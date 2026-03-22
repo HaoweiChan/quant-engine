@@ -23,11 +23,14 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
     "dash>=4.0.0",
+    "flask-compress>=1.23",
+    "tomli-w>=1.2.0",
 ]
 
 [project.optional-dependencies]
 taifex = ["shioaji>=1.0"]
 dashboard = ["dash>=2.18", "plotly>=5.0", "dash-ace>=0.2.1"]
+mcp = ["mcp>=1.26"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",

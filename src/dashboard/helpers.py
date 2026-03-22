@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import io
+import json
+import os
 import sqlite3
+import subprocess
+import sys
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -167,22 +172,37 @@ def _crawl_worker(db_symbol: str, start_str: str, end_str: str) -> None:
 
 
 # ── Data coverage & export ──────────────────────────────────────────────────
-def get_db_coverage() -> list[dict]:
-    """Return per-symbol coverage stats from the database."""
+_coverage_cache: list[dict] = []
+_coverage_cache_ts: float = 0.0
+_COVERAGE_TTL_SECS: float = 60.0
+
+
+def get_db_coverage(force: bool = False) -> list[dict]:
+    """Return per-symbol coverage stats from the database (cached for 60s)."""
+    import time as _time
+
+    global _coverage_cache, _coverage_cache_ts
+    now = _time.monotonic()
+    if not force and _coverage_cache and (now - _coverage_cache_ts) < _COVERAGE_TTL_SECS:
+        return _coverage_cache
+
     if not _DB_PATH.exists():
         return []
     try:
         with sqlite3.connect(str(_DB_PATH)) as conn:
+            # Use the (symbol, timestamp) index: scan only the index leaf pages
             rows = conn.execute(
                 "SELECT symbol, COUNT(*), MIN(timestamp), MAX(timestamp) "
                 "FROM ohlcv_bars GROUP BY symbol ORDER BY symbol"
             ).fetchall()
-        return [
+        _coverage_cache = [
             {"symbol": r[0], "bars": r[1], "from": r[2], "to": r[3]}
             for r in rows
         ]
+        _coverage_cache_ts = now
+        return _coverage_cache
     except Exception:
-        return []
+        return _coverage_cache  # return stale cache on error
 
 
 def export_ohlcv_csv(symbol: str, start: datetime, end: datetime, tf_minutes: int) -> str:
@@ -205,6 +225,216 @@ GRID_PARAMS: dict[str, dict[str, float]] = {
     "Margin Limit": {"min": 0.1, "max": 1.0, "default_min": 0.2, "default_max": 0.8},
 }
 
+# ── Strategy Optimizer ──────────────────────────────────────────────────────
+# ── Strategy discovery ───────────────────────────────────────────────────────
+@dataclass
+class StrategyInfo:
+    name: str          # human-readable: "ATR Mean Reversion"
+    module: str        # e.g. "src.strategies.atr_mean_reversion"
+    factory: str       # e.g. "create_atr_mean_reversion_engine"
+    param_grid: dict[str, dict] | None = None
+
+
+_STRATEGIES_DIR = Path(__file__).resolve().parent.parent / "strategies"
+
+
+def discover_strategies() -> dict[str, StrategyInfo]:
+    """Scan src/strategies/*.py for `create_*_engine` factory functions."""
+    import importlib
+    import inspect
+    import re
+    result: dict[str, StrategyInfo] = {}
+    for py in sorted(_STRATEGIES_DIR.glob("*.py")):
+        if py.name.startswith("_"):
+            continue
+        mod_name = f"src.strategies.{py.stem}"
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        for attr_name in dir(mod):
+            if not re.match(r"create_\w+_engine$", attr_name):
+                continue
+            fn = getattr(mod, attr_name)
+            if not callable(fn):
+                continue
+            slug = py.stem
+            label = slug.replace("_", " ").title()
+            info = StrategyInfo(name=label, module=mod_name, factory=attr_name)
+            sig = inspect.signature(fn)
+            grid: dict[str, dict] = {}
+            for pname, param in sig.parameters.items():
+                if pname in ("max_loss", "lots", "contract_type"):
+                    continue
+                default = param.default
+                if default is inspect.Parameter.empty:
+                    continue
+                if isinstance(default, (int, float)):
+                    ptype = "int" if isinstance(default, int) else "float"
+                    grid[pname] = {
+                        "label": pname.replace("_", " ").title(),
+                        "type": ptype,
+                        "default": [default],
+                    }
+            if grid:
+                info.param_grid = grid
+            result[slug] = info
+    return result
+
+
+STRATEGY_REGISTRY: dict[str, StrategyInfo] = discover_strategies()
+
+
+# Per-strategy curated param grids (override auto-discovered single defaults)
+CURATED_PARAM_GRIDS: dict[str, dict[str, dict]] = {
+    "atr_mean_reversion": {
+        "bb_len":         {"label": "BB Length",         "type": "int",   "default": [15, 20, 25]},
+        "rsi_oversold":   {"label": "RSI Oversold",      "type": "float", "default": [25, 30]},
+        "rsi_overbought": {"label": "RSI Overbought",    "type": "float", "default": [70, 75]},
+        "atr_sl_multi":   {"label": "ATR SL Multiplier", "type": "float", "default": [2.0, 2.5, 3.0]},
+        "atr_tp_multi":   {"label": "ATR TP Multiplier", "type": "float", "default": [1.5, 2.0, 2.5]},
+    },
+}
+
+
+def get_param_grid_for_strategy(slug: str) -> dict[str, dict]:
+    """Return the param grid for a strategy: curated if available, else auto-discovered."""
+    if slug in CURATED_PARAM_GRIDS:
+        return CURATED_PARAM_GRIDS[slug]
+    info = STRATEGY_REGISTRY.get(slug)
+    return info.param_grid or {} if info else {}
+
+# Objectives available in the optimizer (maps display label → metric key)
+OPT_OBJECTIVES: list[dict[str, str]] = [
+    {"label": "Sharpe Ratio", "value": "sharpe"},
+    {"label": "Profit Factor", "value": "profit_factor"},
+    {"label": "Calmar Ratio", "value": "calmar"},
+    {"label": "Win Rate", "value": "win_rate"},
+    {"label": "Sortino Ratio", "value": "sortino"},
+]
+
+
+@dataclass
+class OptimizerState:
+    running: bool = False
+    finished: bool = False
+    error: str | None = None
+    progress: str = ""
+    result_data: dict | None = None
+    _proc: subprocess.Popen | None = field(default=None, repr=False, compare=False)
+    _output_path: str | None = field(default=None, repr=False, compare=False)
+
+
+_opt_state = OptimizerState()
+_opt_lock = threading.Lock()
+
+
+def get_optimizer_state() -> dict:
+    """Return a copy of the current optimizer state (also polls subprocess)."""
+    with _opt_lock:
+        _poll_subprocess()
+        return {
+            "running": _opt_state.running,
+            "finished": _opt_state.finished,
+            "error": _opt_state.error,
+            "progress": _opt_state.progress,
+            "result_data": _opt_state.result_data,
+        }
+
+
+def _poll_subprocess() -> None:
+    """Called under _opt_lock. Check if the subprocess has finished."""
+    proc = _opt_state._proc
+    if proc is None or _opt_state.finished:
+        return
+    rc = proc.poll()
+    if rc is None:
+        return  # still running
+
+    output_path = _opt_state._output_path
+    if output_path and Path(output_path).exists():
+        try:
+            data = json.loads(Path(output_path).read_text())
+            if data.get("status") == "ok":
+                n_combos = len(data.get("trials", []))
+                obj = data.get("objective", "sharpe")
+                best_val = data.get("is_metrics", {}).get(obj, 0)
+                _opt_state.result_data = data
+                _opt_state.progress = (
+                    f"Done — {n_combos} trials, best {obj}: {best_val:.4f}"
+                )
+            else:
+                _opt_state.error = data.get("error", "Unknown error in optimizer process")
+                _opt_state.progress = "Failed"
+        except Exception as exc:
+            _opt_state.error = f"Failed to read result: {exc}"
+            _opt_state.progress = "Failed"
+    elif rc != 0:
+        _opt_state.error = f"Optimizer process exited with code {rc}"
+        _opt_state.progress = "Failed"
+    else:
+        _opt_state.error = "Optimizer process finished but no output file found"
+        _opt_state.progress = "Failed"
+
+    _opt_state.running = False
+    _opt_state.finished = True
+    _opt_state._proc = None
+
+
+def start_optimizer_run(
+    symbol: str,
+    start_str: str,
+    end_str: str,
+    param_grid: dict[str, list],
+    is_fraction: float,
+    objective: str,
+    n_jobs: int = 1,
+    factory_module: str = "src.strategies.atr_mean_reversion",
+    factory_name: str = "create_atr_mean_reversion_engine",
+) -> bool:
+    """Spawn the optimizer as a subprocess. Returns False if already running."""
+    with _opt_lock:
+        if _opt_state.running:
+            return False
+
+        config = {
+            "symbol": symbol,
+            "start": start_str,
+            "end": end_str,
+            "param_grid": param_grid,
+            "is_fraction": is_fraction,
+            "objective": objective,
+            "n_jobs": n_jobs,
+            "factory_module": factory_module,
+            "factory_name": factory_name,
+        }
+        tmpdir = tempfile.mkdtemp(prefix="qe_opt_")
+        config_path = os.path.join(tmpdir, "config.json")
+        output_path = os.path.join(tmpdir, "result.json")
+        Path(config_path).write_text(json.dumps(config, default=str))
+
+        n_combos = 1
+        for v in param_grid.values():
+            n_combos *= len(v)
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "src.simulator.optimizer_cli",
+             "--config", config_path, "--output", output_path],
+            cwd=str(Path(_DB_PATH).parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        _opt_state.running = True
+        _opt_state.finished = False
+        _opt_state.error = None
+        _opt_state.result_data = None
+        _opt_state.progress = f"Running {n_combos} combos on {symbol} ({start_str} → {end_str})…"
+        _opt_state._proc = proc
+        _opt_state._output_path = output_path
+
+    return True
+
 
 def load_symbols() -> list[str]:
     if not _DB_PATH.exists():
@@ -219,28 +449,69 @@ def load_symbols() -> list[str]:
 
 
 def load_ohlcv(symbol: str, start: datetime, end: datetime, tf_minutes: int) -> pd.DataFrame:
-    """Load 1-min OHLCV bars from SQLite and aggregate to the requested timeframe."""
+    """Load OHLCV bars from SQLite, aggregating to the requested timeframe in SQL.
+
+    For tf_minutes > 1, uses a CTE with MIN/MAX(rowid) to get correct open and
+    close prices without loading all 1-min rows into Python.
+    """
     if not _DB_PATH.exists():
         return pd.DataFrame()
     conn = sqlite3.connect(str(_DB_PATH))
-    query = (
-        "SELECT timestamp, open, high, low, close, volume "
-        "FROM ohlcv_bars WHERE symbol = ? AND timestamp >= ? AND timestamp <= ? "
-        "ORDER BY timestamp"
-    )
-    df = pd.read_sql_query(
-        query, conn,
-        params=(symbol, start.isoformat(), end.isoformat()),
-        parse_dates=["timestamp"],
-    )
-    conn.close()
-    if df.empty or tf_minutes <= 1:
-        return df
-    df = df.set_index("timestamp")
-    agg = df.resample(f"{tf_minutes}min").agg({
-        "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum",
-    }).dropna(subset=["open"])
-    return agg.reset_index()
+    try:
+        if tf_minutes <= 1:
+            query = (
+                "SELECT timestamp, open, high, low, close, volume "
+                "FROM ohlcv_bars WHERE symbol = ? AND timestamp >= ? AND timestamp <= ? "
+                "ORDER BY timestamp"
+            )
+            df = pd.read_sql_query(
+                query, conn,
+                params=(symbol, start.isoformat(), end.isoformat()),
+                parse_dates=["timestamp"],
+            )
+        else:
+            # Aggregate in SQL: bucket = floor(unix_ts / bucket_secs)
+            bucket_secs = tf_minutes * 60
+            query = """
+            WITH buckets AS (
+                SELECT
+                    CAST(strftime('%s', timestamp) / :bkt AS INTEGER) AS bkt,
+                    MIN(rowid) AS first_rid,
+                    MAX(rowid) AS last_rid,
+                    MAX(high)  AS high,
+                    MIN(low)   AS low,
+                    SUM(volume) AS volume
+                FROM ohlcv_bars
+                WHERE symbol = :sym
+                  AND timestamp >= :ts_start
+                  AND timestamp <= :ts_end
+                GROUP BY bkt
+            )
+            SELECT
+                datetime(b.bkt * :bkt, 'unixepoch') AS timestamp,
+                f.open,
+                b.high,
+                b.low,
+                l.close,
+                b.volume
+            FROM buckets b
+            JOIN ohlcv_bars f ON f.rowid = b.first_rid
+            JOIN ohlcv_bars l ON l.rowid = b.last_rid
+            ORDER BY timestamp
+            """
+            df = pd.read_sql_query(
+                query, conn,
+                params={
+                    "bkt": bucket_secs,
+                    "sym": symbol,
+                    "ts_start": start.isoformat(),
+                    "ts_end": end.isoformat(),
+                },
+                parse_dates=["timestamp"],
+            )
+    finally:
+        conn.close()
+    return df
 
 
 def generate_equity_curve(n: int = 252, seed: int = 42) -> pd.DataFrame:
@@ -282,6 +553,74 @@ def histogram_data(values: Any, bins: int = 30) -> tuple[list[float], list[int]]
     counts, edges = np.histogram(values, bins=bins)
     mids = [(edges[i] + edges[i + 1]) / 2 for i in range(len(counts))]
     return mids, counts.tolist()
+
+
+def run_strategy_backtest(
+    strategy_slug: str,
+    symbol: str,
+    start_str: str,
+    end_str: str,
+    initial_equity: float = 2_000_000.0,
+) -> dict:
+    """Run a quick backtest and return return statistics + equity curve.
+
+    Returns dict with keys: daily_returns (np.ndarray), equity_curve (list),
+    bnh_returns (np.ndarray), bnh_equity (list), metrics (dict), bars_count (int).
+    """
+    import importlib
+    from statistics import mean as _mean
+
+    info = STRATEGY_REGISTRY.get(strategy_slug)
+    if not info:
+        raise ValueError(f"Unknown strategy: {strategy_slug}")
+
+    mod = importlib.import_module(info.module)
+    factory = getattr(mod, info.factory)
+
+    from src.adapters.taifex import TaifexAdapter
+    from src.data.db import Database
+    from src.simulator.backtester import BacktestRunner
+    from src.simulator.fill_model import ClosePriceFillModel
+
+    db = Database(f"sqlite:///{_DB_PATH}")
+    start_dt = datetime.fromisoformat(start_str)
+    end_dt = datetime.fromisoformat(end_str)
+    raw = db.get_ohlcv(symbol, start_dt, end_dt)
+    if not raw:
+        raise ValueError(f"No data for {symbol} in {start_str}–{end_str}")
+
+    daily_atr = _mean(b.high - b.low for b in raw)
+    adapter = TaifexAdapter()
+    runner = BacktestRunner(
+        config=lambda: factory(max_loss=100_000),
+        adapter=adapter,
+        fill_model=ClosePriceFillModel(slippage_points=1.0),
+        initial_equity=initial_equity,
+    )
+    bars = [
+        {"symbol": symbol, "price": b.close, "open": b.open, "high": b.high,
+         "low": b.low, "close": b.close, "daily_atr": daily_atr, "timestamp": b.timestamp}
+        for b in raw
+    ]
+    timestamps = [b.timestamp for b in raw]
+    result = runner.run(bars, timestamps)
+
+    eq = np.array(result.equity_curve)
+    strat_returns = np.diff(eq) / eq[:-1] if len(eq) > 1 else np.array([0.0])
+    strat_returns = strat_returns[np.isfinite(strat_returns)]
+
+    closes = np.array([b.close for b in raw], dtype=float)
+    bnh_returns = np.diff(closes) / closes[:-1] if len(closes) > 1 else np.array([0.0])
+    bnh_eq = initial_equity * np.cumprod(np.concatenate([[1.0], 1 + bnh_returns]))
+
+    return {
+        "daily_returns": strat_returns,
+        "equity_curve": result.equity_curve,
+        "bnh_returns": bnh_returns,
+        "bnh_equity": bnh_eq.tolist(),
+        "metrics": result.metrics,
+        "bars_count": len(bars),
+    }
 
 
 def run_grid_mc(
