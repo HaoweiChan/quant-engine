@@ -160,19 +160,41 @@ Simulator SHALL run PositionEngine on real historical data and produce comprehen
 - **THEN** it SHALL produce a bar-by-bar equity curve and peak-to-trough drawdown series
 
 ### Requirement: Parameter scanner
-Simulator SHALL sweep parameter combinations and identify robust regions in the parameter space. Scanner uses engine factory pattern.
+Simulator SHALL sweep parameter combinations and identify robust regions in the parameter space. Scanner SHALL accept any engine factory callable and any parameter grid, not just `PyramidConfig` fields.
 
-#### Scenario: Grid search with factory
-- **WHEN** `grid_search()` is called with a parameter grid
-- **THEN** for each combination, it SHALL construct a `PyramidConfig`, create an engine via factory, and run the backtest
+```python
+def grid_search(
+    engine_factory: Callable[..., PositionEngine],
+    param_grid: dict[str, list[Any]],
+    adapter: BaseAdapter,
+    bars: list[dict[str, Any]],
+    timestamps: list[datetime],
+    fill_model: FillModel | None = None,
+    initial_equity: float = 2_000_000.0,
+    objective: str = "sharpe",
+    is_fraction: float = 0.8,
+) -> pl.DataFrame: ...
+```
 
-#### Scenario: Sweep ranges
-- **WHEN** scanning default parameters
+#### Scenario: Grid search with generic factory
+- **WHEN** `grid_search()` is called with any callable `engine_factory(**kwargs) -> PositionEngine` and a `param_grid` dict
+- **THEN** for each parameter combination it SHALL call `engine_factory(**combo)`, run `BacktestRunner`, and collect the resulting metrics into a row of the output DataFrame
+
+#### Scenario: Sweep ranges for PyramidConfig (backward compatibility)
+- **WHEN** the caller passes `create_pyramid_engine` as the factory and a `PyramidConfig`-compatible param grid
+- **THEN** it SHALL behave identically to the previous `SweepRange`-based API
+
+#### Scenario: Common PyramidConfig sweep ranges
+- **WHEN** scanning default Pyramid parameters
 - **THEN** it SHALL support sweeping: `stop_atr_mult` [1.0–2.5], `trail_atr_mult` [2.0–4.0], `add_trigger_atr[0]` [2.0–6.0], `kelly_fraction` [0.10–0.50]
 
 #### Scenario: Robust region identification
 - **WHEN** the scan completes
-- **THEN** the result SHALL identify parameter regions (not just single best points) where performance is stable across neighboring values
+- **THEN** the result SHALL identify parameter regions (not just single best points) where the objective metric is stable across neighboring parameter values
+
+#### Scenario: IS/OOS split
+- **WHEN** `is_fraction < 1.0`
+- **THEN** only the first `is_fraction` portion of bars SHALL be used for parameter ranking; the OOS tail is reported separately but not used for optimization
 
 ### Requirement: Robustness testing
 Simulator SHALL verify that strategy performance degrades gracefully when prediction model accuracy is artificially reduced.
@@ -238,3 +260,72 @@ The price path generator SHALL provide named presets for common market scenarios
 #### Scenario: Custom config
 - **WHEN** a `PathConfig` is constructed with custom parameters
 - **THEN** the generator SHALL use those parameters regardless of presets
+
+### Requirement: MCP-compatible facade functions
+The simulator module SHALL provide facade functions that accept flat dictionary parameters and return serializable dictionaries, suitable for delegation from the MCP tool layer.
+
+```python
+def run_backtest_for_mcp(
+    scenario: str,
+    strategy_params: dict | None = None,
+    strategy: str = "pyramid",
+    date_range: dict | None = None,
+) -> dict: ...
+
+def run_monte_carlo_for_mcp(
+    scenario: str,
+    strategy_params: dict | None = None,
+    strategy: str = "pyramid",
+    n_paths: int = 200,
+) -> dict: ...
+
+def run_sweep_for_mcp(
+    base_params: dict,
+    sweep_params: dict,
+    strategy: str = "pyramid",
+    n_samples: int | None = None,
+    metric: str = "sharpe",
+    scenario: str = "strong_bull",
+) -> dict: ...
+
+def run_stress_for_mcp(
+    scenarios: list[str] | None = None,
+    strategy_params: dict | None = None,
+    strategy: str = "pyramid",
+) -> dict: ...
+```
+
+#### Scenario: Dict-in dict-out interface
+- **WHEN** a facade function is called with dictionary parameters
+- **THEN** it SHALL resolve the strategy factory, build the appropriate config objects, delegate to the existing simulator APIs, and return a plain dictionary (JSON-serializable) with the results
+
+#### Scenario: Strategy factory resolution
+- **WHEN** `strategy="pyramid"` is specified
+- **THEN** the facade SHALL resolve to `create_pyramid_engine(config)` with params merged into default PyramidConfig
+
+#### Scenario: Custom strategy factory resolution
+- **WHEN** `strategy="atr_mean_reversion"` is specified
+- **THEN** the facade SHALL resolve to `create_atr_mean_reversion_engine(**params)` from the strategies module
+
+#### Scenario: Dynamic factory via module path
+- **WHEN** `strategy` is in `"module.path:factory_name"` format
+- **THEN** the facade SHALL dynamically import the module and call the named factory
+
+#### Scenario: Unknown strategy error
+- **WHEN** `strategy` specifies a factory that cannot be resolved
+- **THEN** the facade SHALL raise `ValueError` with available strategy names
+
+### Requirement: Parameter schema extraction
+The simulator module SHALL provide a function to extract parameter schemas from strategy factories and configs.
+
+```python
+def get_strategy_parameter_schema(strategy: str = "pyramid") -> dict: ...
+```
+
+#### Scenario: Pyramid schema extraction
+- **WHEN** `get_strategy_parameter_schema("pyramid")` is called
+- **THEN** it SHALL return a dictionary with each PyramidConfig field as a key, containing `current_value`, `type`, `min`, `max`, and `description`
+
+#### Scenario: Scenario presets included
+- **WHEN** `get_strategy_parameter_schema` is called
+- **THEN** the result SHALL include a `scenarios` key listing all PathConfig preset names with their descriptions (drift, volatility characteristics)
