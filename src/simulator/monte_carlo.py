@@ -126,3 +126,84 @@ def _path_to_bars(
         })
         timestamps.append(base_ts + timedelta(days=i))
     return bars, timestamps
+
+
+_TAIFEX_SESSIONS = [
+    (9, 0, 255),    # Day session: 09:00–13:15 (255 minutes)
+    (15, 15, 795),  # Night session: 15:15–04:30+1 (795 minutes)
+]
+TAIFEX_BARS_PER_DAY = sum(s[2] for s in _TAIFEX_SESSIONS)  # 1050
+
+
+def _generate_taifex_timestamps(n_bars: int) -> list[datetime]:
+    """Generate timestamps cycling through TAIFEX day + night sessions."""
+    timestamps: list[datetime] = []
+    day = datetime(2024, 1, 2, tzinfo=UTC)
+    bar_idx = 0
+    while bar_idx < n_bars:
+        if day.weekday() >= 5:
+            day += timedelta(days=1)
+            continue
+        for start_h, start_m, duration in _TAIFEX_SESSIONS:
+            session_start = day.replace(hour=start_h, minute=start_m)
+            for minute in range(duration):
+                if bar_idx >= n_bars:
+                    break
+                timestamps.append(session_start + timedelta(minutes=minute))
+                bar_idx += 1
+        day += timedelta(days=1)
+    return timestamps
+
+
+def _add_microstructure(
+    prices: npt.NDArray[np.float64],
+    halflife: int = 2,
+    amplitude_frac: float = 0.003,
+) -> npt.NDArray[np.float64]:
+    """Overlay price-level mean reversion (bid-ask bounce + microstructure).
+
+    Generates an OU noise process on prices that mean-reverts around zero
+    with the given halflife (in bars). amplitude_frac controls the noise
+    size relative to price level (~3 ticks for TAIFEX TX at 20000).
+    """
+    rng = np.random.default_rng()
+    n = len(prices)
+    theta = np.log(2) / halflife
+    noise = np.empty(n)
+    noise[0] = 0.0
+    for i in range(1, n):
+        amplitude = prices[i] * amplitude_frac
+        noise[i] = (1 - theta) * noise[i - 1] + amplitude * rng.standard_normal()
+    return prices + noise
+
+
+def _path_to_intraday_bars(
+    price_path: npt.NDArray[np.float64], config: PathConfig
+) -> tuple[list[dict[str, Any]], list[datetime]]:
+    """Convert a price path to 1-min bars with TAIFEX session timestamps.
+
+    Adds microstructure noise (bid-ask bounce, OU at the bar level) so
+    mean-reversion strategies have realistic short-term reversal patterns.
+    """
+    adjusted = _add_microstructure(price_path)
+    n = len(adjusted) - 1
+    timestamps = _generate_taifex_timestamps(n)
+    bars: list[dict[str, Any]] = []
+    atr_window: list[float] = []
+    for i in range(1, len(adjusted)):
+        p = float(adjusted[i])
+        prev = float(adjusted[i - 1])
+        atr_window.append(abs(p - prev))
+        if len(atr_window) > 14:
+            atr_window.pop(0)
+        daily_atr = sum(atr_window) / len(atr_window) * 14
+        bars.append({
+            "price": p,
+            "symbol": "TX",
+            "daily_atr": daily_atr,
+            "open": prev,
+            "high": max(p, prev) * 1.0002,
+            "low": min(p, prev) * 0.9998,
+            "close": p,
+        })
+    return bars, timestamps
