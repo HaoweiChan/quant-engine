@@ -1,8 +1,11 @@
 """Simulator result types and configuration dataclasses."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
+
+import polars as pl
 
 
 @dataclass
@@ -25,6 +28,36 @@ class BacktestResult:
     metrics: dict[str, float]
     monthly_returns: dict[str, float]
     yearly_returns: dict[str, float]
+
+
+@dataclass
+class OptimizerResult:
+    """Result of a strategy parameter optimization run (grid or random search)."""
+    trials: pl.DataFrame
+    best_params: dict[str, Any]
+    best_is_result: BacktestResult
+    best_oos_result: BacktestResult | None
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class WindowResult:
+    """Per-window result from a walk-forward run."""
+    window_idx: int
+    is_bars: int
+    oos_bars: int
+    best_params: dict[str, Any]
+    is_result: BacktestResult
+    oos_result: BacktestResult
+    low_trade_count: bool = False
+
+
+@dataclass
+class WalkForwardResult:
+    """Aggregated result of a walk-forward optimization run."""
+    windows: list[WindowResult]
+    efficiency: float
+    combined_oos_metrics: dict[str, float]
 
 
 @dataclass
