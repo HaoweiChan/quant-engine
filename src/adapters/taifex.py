@@ -125,6 +125,24 @@ class TaifexAdapter(BaseAdapter):
             result.append((str(contract_code), qty))
         return result
 
+    def get_point_value(self, symbol: str) -> float:
+        """Return the monetary value per point for a given contract symbol."""
+        contracts = self._cfg.get("contracts", {})
+        if symbol in contracts:
+            return float(contracts[symbol].get("point_value", 1.0))
+        logger.warning("unknown_symbol_point_value", symbol=symbol, default=1.0)
+        return 1.0
+
+    def account_info(self) -> dict[str, Any]:
+        contracts = self._cfg.get("contracts", {})
+        multipliers = {sym: float(c.get("point_value", 1.0)) for sym, c in contracts.items()}
+        return {
+            "exchange": "TAIFEX",
+            "currency": "TWD",
+            "session_type": "futures",
+            "contract_multipliers": multipliers,
+        }
+
     def _lot_type_to_symbol(self, contract_type: str) -> str:
         mapping = self._cfg.get("lot_translation", {})
         return str(mapping.get(contract_type, "TX"))

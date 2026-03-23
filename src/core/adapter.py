@@ -29,3 +29,7 @@ class BaseAdapter(ABC):
     def translate_lots(
         self, abstract_lots: list[tuple[str, float]]
     ) -> list[tuple[str, float]]: ...
+
+    def account_info(self) -> dict[str, Any] | None:
+        """Return broker-specific account metadata. Override in subclass."""
+        return None
