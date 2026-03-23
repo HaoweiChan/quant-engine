@@ -248,7 +248,7 @@ def run_backtest_realdata_for_mcp(
 
     import numpy as np
 
-    db_path = Path(__file__).resolve().parent.parent.parent / "taifex_data.db"
+    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "taifex_data.db"
     if not db_path.exists():
         return {"error": f"Database not found at {db_path}"}
 

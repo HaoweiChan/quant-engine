@@ -6,7 +6,7 @@ from pathlib import Path
 
 from src.broker_gateway.types import AccountConfig
 
-_DB_PATH = Path(__file__).resolve().parent.parent.parent / "trading.db"
+_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "trading.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (

@@ -116,7 +116,7 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
     objective: str = cfg.get("objective", "sharpe")
     n_jobs: int = int(cfg.get("n_jobs", 1))
 
-    db_path = Path(__file__).resolve().parent.parent.parent / "taifex_data.db"
+    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "taifex_data.db"
     db = Database(f"sqlite:///{db_path}")
     raw = db.get_ohlcv(symbol, start_dt, end_dt)
 

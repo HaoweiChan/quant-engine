@@ -18,7 +18,7 @@ from src.simulator.types import OptimizerResult
 
 logger = structlog.get_logger(__name__)
 
-_DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent / "param_registry.db"
+_DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "param_registry.db"
 _DEFAULT_PARETO_OBJECTIVES = ["sharpe", "calmar"]
 _METRIC_COLS = [
     "sharpe", "calmar", "sortino", "profit_factor",

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from src.trading_session.session import SessionSnapshot
 
-_DB_PATH = Path(__file__).resolve().parent.parent.parent / "trading.db"
+_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "trading.db"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS session_snapshots (
