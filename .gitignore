@@ -29,6 +29,11 @@ env/
 *.swp
 *.swo
 
+# Ignore editor-specific generated configs to prevent Netcup/WSL path conflicts
+.cursor/mcp.json
+opencode.json
+.antigravity/settings.json
+
 # macOS
 .DS_Store
 .AppleDouble

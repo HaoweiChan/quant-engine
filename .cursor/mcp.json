@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "backtest-engine": {
-      "command": "uv",
-      "args": ["run", "python", "-m", "src.mcp_server.server"],
-      "cwd": "/home/openclaw/.openclaw/workspace/quant-engine"
-    }
-  }
-}

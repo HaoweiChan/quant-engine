@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "backtest-engine": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--extra",
+        "mcp",
+        "python",
+        "-m",
+        "src.mcp_server.server"
+      ]
+    }
+  }
+}
