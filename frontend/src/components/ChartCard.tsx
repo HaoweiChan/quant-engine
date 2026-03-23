@@ -13,7 +13,7 @@ export function ChartCard({ title, children }: ChartCardProps) {
       }}
     >
       <div
-        className="text-[9px] tracking-wider mb-1.5 pl-1"
+        className="text-[11px] tracking-wide mb-2 pl-1"
         style={{ color: "var(--color-qe-muted)", fontFamily: "var(--font-mono)" }}
       >
         {title}

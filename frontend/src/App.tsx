@@ -43,12 +43,12 @@ export default function App() {
         }}
       >
         <h1
-          className="m-0 text-[17px] font-semibold"
+          className="m-0 text-[19px] font-semibold"
           style={{ fontFamily: "var(--font-serif)", color: "var(--color-qe-text)" }}
         >
           Quant Engine Dashboard{" "}
           <span
-            className="text-[10px] font-normal"
+            className="text-[11px] font-normal"
             style={{ fontFamily: "var(--font-mono)", color: "var(--color-qe-muted)" }}
           >
             v2 — FastAPI + React
@@ -69,7 +69,7 @@ export default function App() {
             <TabsTrigger
               key={t.value}
               value={t.value}
-              className="rounded-none border-b-2 border-transparent px-3.5 py-2 text-[10px] font-normal data-[state=active]:border-qe-blue data-[state=active]:font-semibold data-[state=active]:shadow-none"
+              className="rounded-none border-b-2 border-transparent px-4 py-2.5 text-[12px] font-normal data-[state=active]:border-qe-blue data-[state=active]:font-semibold data-[state=active]:shadow-none"
               style={{
                 fontFamily: "var(--font-mono)",
                 color:

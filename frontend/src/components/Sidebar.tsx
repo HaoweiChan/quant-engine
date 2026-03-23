@@ -19,7 +19,7 @@ export function Sidebar({ children }: SidebarProps) {
 export function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div
-      className="text-[8px] uppercase tracking-[1.5px] font-bold mb-1.5"
+      className="text-[10px] uppercase tracking-[1px] font-bold mb-2"
       style={{ color: "var(--color-qe-muted)", fontFamily: "var(--font-mono)" }}
     >
       {children}
@@ -29,9 +29,9 @@ export function SectionLabel({ children }: { children: React.ReactNode }) {
 
 export function ParamInput({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="mb-1.5">
+    <div className="mb-2">
       <div
-        className="text-[9px] mb-0.5"
+        className="text-[11px] mb-0.5"
         style={{ color: "var(--color-qe-dim)", fontFamily: "var(--font-mono)" }}
       >
         {label}
