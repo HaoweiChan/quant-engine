@@ -9,6 +9,9 @@ from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from src.mcp_server.facade import (
+    activate_candidate_for_mcp,
+    get_active_params_for_mcp,
+    get_run_history_for_mcp,
     get_strategy_parameter_schema,
     run_backtest_for_mcp,
     run_backtest_realdata_for_mcp,
@@ -350,6 +353,64 @@ TOOLS: list[Tool] = [
             },
         },
     ),
+    Tool(
+        name="get_run_history",
+        description=(
+            "Query persisted optimization runs from the param registry. "
+            "Returns run metadata, best trial metrics, and candidate counts. "
+            "Use to review past optimizations across sessions."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "strategy": {
+                    "type": "string",
+                    "description": "Filter by strategy name (omit for all strategies)",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max runs to return (default 10)",
+                    "default": 10,
+                },
+            },
+        },
+    ),
+    Tool(
+        name="activate_candidate",
+        description=(
+            "Activate a parameter candidate as the active set for a strategy. "
+            "Deactivates any previously active candidate for the same strategy. "
+            "Use after reviewing run history to select the best param set."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "candidate_id": {
+                    "type": "integer",
+                    "description": "ID of the candidate to activate",
+                },
+            },
+            "required": ["candidate_id"],
+        },
+    ),
+    Tool(
+        name="get_active_params",
+        description=(
+            "Get the currently active optimized parameters for a strategy. "
+            "Returns the params dict, activation metadata, and run context. "
+            "Falls back to PARAM_SCHEMA defaults if no active candidate exists."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "strategy": {
+                    "type": "string",
+                    "description": "Strategy name: pyramid|atr_mean_reversion",
+                    "default": "pyramid",
+                },
+            },
+        },
+    ),
 ]
 
 
@@ -496,13 +557,43 @@ def register_tools(app: Server) -> None:
                 })
 
             if name == "get_optimization_history":
-                runs = history.get_all()
-                return _json_response({"runs": runs, "count": history.count})
+                # Combine session history with persistent registry
+                session_runs = history.get_all()
+                try:
+                    db_result = get_run_history_for_mcp(limit=20)
+                    db_runs = db_result.get("runs", [])
+                except Exception:
+                    db_runs = []
+                return _json_response({
+                    "session_runs": session_runs,
+                    "session_count": history.count,
+                    "persisted_runs": db_runs,
+                    "persisted_count": len(db_runs),
+                })
 
             if name == "get_parameter_schema":
                 strategy = arguments.get("strategy", "pyramid")
                 schema = get_strategy_parameter_schema(strategy)
                 return _json_response(schema)
+
+            if name == "get_run_history":
+                result = get_run_history_for_mcp(
+                    strategy=arguments.get("strategy"),
+                    limit=arguments.get("limit", 10),
+                )
+                return _json_response(result)
+
+            if name == "activate_candidate":
+                result = activate_candidate_for_mcp(
+                    candidate_id=arguments["candidate_id"],
+                )
+                return _json_response(result)
+
+            if name == "get_active_params":
+                result = get_active_params_for_mcp(
+                    strategy=arguments.get("strategy", "pyramid"),
+                )
+                return _json_response(result)
 
             return _json_response({"error": f"Unknown tool: {name}"})
 

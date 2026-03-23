@@ -20,6 +20,10 @@ _BUILTIN_FACTORIES: dict[str, tuple[str, str]] = {
         "src.strategies.atr_mean_reversion",
         "create_atr_mean_reversion_engine",
     ),
+    "ta_orb": (
+        "src.strategies.ta_orb",
+        "create_ta_orb_engine",
+    ),
 }
 
 
@@ -491,7 +495,26 @@ def run_sweep_for_mcp(
         )
 
     trials_data = result.trials.to_dicts() if len(result.trials) > 0 else []
-    return {
+    # Persist to param registry
+    run_id = None
+    pareto_candidates = []
+    try:
+        from src.strategies.param_registry import ParamRegistry
+        registry = ParamRegistry()
+        search = "random" if n_samples is not None else "grid"
+        run_id = registry.save_run(
+            result=result, strategy=strategy, symbol=f"synthetic:{scenario}",
+            objective=metric, search_type=search, source="mcp",
+        )
+        pareto = registry.get_pareto_frontier(run_id)
+        pareto_candidates = [
+            {"params": p["params"], "sharpe": p.get("sharpe"), "calmar": p.get("calmar")}
+            for p in pareto
+        ]
+        registry.close()
+    except Exception:
+        pass
+    out: dict[str, Any] = {
         "scenario": scenario,
         "strategy": strategy,
         "metric": metric,
@@ -502,6 +525,10 @@ def run_sweep_for_mcp(
         "top_5": trials_data[:5],
         "warnings": result.warnings,
     }
+    if run_id is not None:
+        out["run_id"] = run_id
+        out["pareto_candidates"] = pareto_candidates
+    return out
 
 
 def run_stress_for_mcp(
@@ -608,3 +635,78 @@ def _scenario_descriptions() -> dict[str, str]:
         "volatile_bull": "Bull with GARCH vol clustering: drift=0.0005, vol=0.03",
         "flash_crash": "Bull with rare large negative jumps",
     }
+
+
+# ---------------------------------------------------------------------------
+# Param registry facade functions (for MCP tools)
+# ---------------------------------------------------------------------------
+
+def get_run_history_for_mcp(
+    strategy: str | None = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Query persisted optimization runs from the registry."""
+    from src.strategies.param_registry import ParamRegistry
+    registry = ParamRegistry()
+    if strategy:
+        runs = registry.get_run_history(strategy, limit=limit)
+    else:
+        # Cross-strategy: query each known strategy
+        from src.strategies.registry import get_all
+        runs = []
+        for slug in get_all():
+            runs.extend(registry.get_run_history(slug, limit=limit))
+        runs.sort(key=lambda r: r["run_at"], reverse=True)
+        runs = runs[:limit]
+    registry.close()
+    return {"runs": runs, "count": len(runs)}
+
+
+def activate_candidate_for_mcp(candidate_id: int) -> dict[str, Any]:
+    """Activate a parameter candidate for production use."""
+    from src.strategies.param_registry import ParamRegistry
+    registry = ParamRegistry()
+    try:
+        registry.activate(candidate_id)
+    except ValueError as e:
+        registry.close()
+        return {"error": str(e)}
+    detail = registry._conn.execute(
+        """SELECT c.strategy, c.params, c.label, c.activated_at,
+                  r.objective, r.tag
+           FROM param_candidates c
+           JOIN param_runs r ON r.id = c.run_id
+           WHERE c.id = ?""",
+        (candidate_id,),
+    ).fetchone()
+    registry.close()
+    import json
+    return {
+        "status": "activated",
+        "candidate_id": candidate_id,
+        "strategy": detail["strategy"],
+        "params": json.loads(detail["params"]),
+        "label": detail["label"],
+        "activated_at": detail["activated_at"],
+        "objective": detail["objective"],
+        "tag": detail["tag"],
+    }
+
+
+def get_active_params_for_mcp(strategy: str = "pyramid") -> dict[str, Any]:
+    """Return currently active optimized params, or schema defaults."""
+    from src.strategies.param_registry import ParamRegistry
+    registry = ParamRegistry()
+    detail = registry.get_active_detail(strategy)
+    registry.close()
+    if detail:
+        return {**detail, "source": "registry"}
+    # Fallback to schema defaults
+    slug = "pyramid_wrapper" if strategy == "pyramid" else strategy
+    try:
+        from src.strategies.registry import get_defaults
+        defaults = get_defaults(slug)
+        return {"params": defaults, "source": "defaults",
+                "note": "No optimized params found; returning PARAM_SCHEMA defaults."}
+    except KeyError:
+        return {"error": f"Unknown strategy '{strategy}'"}
