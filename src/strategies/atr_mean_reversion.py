@@ -42,6 +42,55 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
+# Parameter schema — single source of truth for defaults, types, and ranges
+# ---------------------------------------------------------------------------
+
+PARAM_SCHEMA: dict[str, dict] = {
+    "bb_len":         {"type": "int",   "default": 40,   "min": 5,    "max": 60,
+                       "description": "Bollinger Bands lookback length.",
+                       "grid": [15, 20, 25]},
+    "bb_upper_mult":  {"type": "float", "default": 3.0,  "min": 1.0,  "max": 4.0,
+                       "description": "BB upper band std multiplier."},
+    "bb_lower_mult":  {"type": "float", "default": 1.0,  "min": 0.5,  "max": 4.0,
+                       "description": "BB lower band std multiplier."},
+    "rsi_len":        {"type": "int",   "default": 5,    "min": 3,    "max": 30,
+                       "description": "RSI lookback period."},
+    "atr_len":        {"type": "int",   "default": 14,   "min": 5,    "max": 30,
+                       "description": "ATR calculation length."},
+    "atr_sl_multi":   {"type": "float", "default": 3.5,  "min": 1.0,  "max": 5.0,
+                       "description": "ATR multiplier for stop loss.",
+                       "grid": [2.0, 2.5, 3.0]},
+    "atr_tp_multi":   {"type": "float", "default": 1.5,  "min": 0.5,  "max": 5.0,
+                       "description": "ATR multiplier for take profit.",
+                       "grid": [1.5, 2.0, 2.5]},
+    "trend_ma_len":   {"type": "int",   "default": 60,   "min": 20,   "max": 200,
+                       "description": "Trend MA lookback for extreme-trend filter."},
+    "rsi_oversold":   {"type": "float", "default": 45.0, "min": 10.0, "max": 50.0,
+                       "description": "RSI threshold for oversold (long entry).",
+                       "grid": [25, 30]},
+    "rsi_overbought": {"type": "float", "default": 60.0, "min": 55.0, "max": 90.0,
+                       "description": "RSI threshold for overbought (short entry).",
+                       "grid": [70, 75]},
+}
+
+STRATEGY_META: dict = {
+    "recommended_timeframe": "intraday",
+    "bars_per_day": 1050,
+    "presets": {
+        "quick": {"n_bars": 21000, "note": "~1 month (20 trading days)"},
+        "standard": {"n_bars": 63000, "note": "~3 months (60 trading days)"},
+        "full_year": {"n_bars": 264600, "note": "~1 year (252 trading days)"},
+    },
+    "note": (
+        "ATR Mean Reversion is a 1-min intraday strategy. "
+        "TAIFEX has ~1050 1-min bars/day (day 09:00-13:15 + night 15:15-04:30). "
+        "Use timeframe='intraday'. For Monte Carlo, use 'quick' preset "
+        "for iteration and 'standard' for validation."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Shared indicator state
 # ---------------------------------------------------------------------------
 
