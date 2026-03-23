@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from src.dashboard.helpers import get_db_coverage
+from src.api.helpers import get_db_coverage
 
 router = APIRouter(prefix="/api", tags=["data"])
 

@@ -22,10 +22,7 @@ dependencies = [
     "google-cloud-secret-manager>=2.20",
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
-    "dash>=4.0.0",
-    "flask-compress>=1.23",
     "tomli-w>=1.2.0",
-    "dash-ace>=0.2.1",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "websockets>=14.0",
@@ -33,7 +30,6 @@ dependencies = [
 
 [project.optional-dependencies]
 taifex = ["shioaji>=1.0"]
-dashboard = ["dash>=2.18", "plotly>=5.0", "dash-ace>=0.2.1"]
 mcp = ["mcp>=1.26"]
 dev = [
     "pytest>=8.0",
@@ -57,7 +53,6 @@ line-length = 100
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
-"src/dashboard/*.py" = ["E501"]
 "src/api/*.py" = ["E501"]
 
 [tool.mypy]
@@ -77,8 +72,6 @@ module = [
     "pandas_ta.*",
     "shioaji.*",
     "streamlit.*",
-    "dash.*",
-    "plotly.*",
     "structlog.*",
     "google.cloud.*",
     "google.api_core.*",
@@ -86,10 +79,6 @@ module = [
     "uvicorn.*",
 ]
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["src.dashboard.*"]
-ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

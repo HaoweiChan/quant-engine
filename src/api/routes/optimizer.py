@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from src.dashboard.helpers import (
+from src.api.helpers import (
     STRATEGY_REGISTRY,
     get_optimizer_state,
     get_param_grid_for_strategy,

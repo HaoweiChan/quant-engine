@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from src.dashboard.editor import (
+from src.api.editor import (
     check_syntax,
     list_editable_files,
     read_file,

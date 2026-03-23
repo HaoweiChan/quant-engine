@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from src.dashboard.helpers import STRATEGY_REGISTRY, get_param_grid_for_strategy
+from src.api.helpers import STRATEGY_REGISTRY, get_param_grid_for_strategy
 
 router = APIRouter(prefix="/api", tags=["strategies"])
 

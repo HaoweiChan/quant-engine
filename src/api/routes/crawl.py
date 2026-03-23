@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from src.dashboard.helpers import get_crawl_state, start_crawl
+from src.api.helpers import get_crawl_state, start_crawl
 
 router = APIRouter(prefix="/api", tags=["data"])
 

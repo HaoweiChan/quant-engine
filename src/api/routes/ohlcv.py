@@ -5,7 +5,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Query
 
-from src.dashboard.helpers import load_ohlcv
+from src.api.helpers import load_ohlcv
 
 router = APIRouter(prefix="/api", tags=["data"])
 

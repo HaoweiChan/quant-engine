@@ -1,4 +1,4 @@
-"""Computation helpers for the dashboard (no Dash dependencies)."""
+"""Computation helpers for the API layer."""
 from __future__ import annotations
 
 import io
@@ -639,7 +639,13 @@ def get_war_room_data() -> dict:
             equity_curve = _account_equity_store.get_equity_curve(config.id, days=30)
         except Exception:
             pass
-        accounts[config.id] = {"config": config, "snapshot": snap, "equity_curve": equity_curve}
+        connect_error = getattr(gw, "_connect_error", None) if gw else "Gateway not loaded"
+        accounts[config.id] = {
+            "config": config,
+            "snapshot": snap,
+            "equity_curve": equity_curve,
+            "connect_error": connect_error,
+        }
     sessions = _session_manager.get_all_sessions()
     sessions_by_account: dict[str, list] = {}
     for s in sessions:

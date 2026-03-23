@@ -1,9 +1,9 @@
-"""Tests for src/dashboard/editor.py — path validation, file I/O, and validation."""
+"""Tests for src/api/editor.py — path validation, file I/O, and validation."""
 from __future__ import annotations
 
 import pytest
 
-from src.dashboard.editor import (
+from src.api.editor import (
     _validate_path,
     check_syntax,
     list_editable_files,
