@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from src.dashboard.helpers import get_war_room_data
+from src.api.helpers import get_war_room_data
 
 router = APIRouter(prefix="/api", tags=["trading"])
 
@@ -24,6 +24,7 @@ async def war_room() -> dict:
             "display_name": config.display_name if config else acct_id,
             "broker": config.broker if config else "",
             "connected": bool(snap and snap.connected),
+            "connect_error": info.get("connect_error"),
             "equity": snap.equity if snap and snap.connected else 0,
             "margin_used": snap.margin_used if snap and snap.connected else 0,
             "margin_available": snap.margin_available if snap and snap.connected else 0,

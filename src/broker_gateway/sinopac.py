@@ -11,12 +11,22 @@ from src.broker_gateway.types import AccountSnapshot, Fill, LivePosition
 
 logger = structlog.get_logger(__name__)
 
-try:
-    import shioaji as sj
-except ImportError as _exc:
-    raise ImportError(
-        "shioaji is required for SinopacGateway. Install with: uv sync --extra taifex"
-    ) from _exc
+sj: Any = None
+
+
+def _ensure_shioaji() -> Any:
+    """Lazy-import shioaji so the gateway class can register without it installed."""
+    global sj
+    if sj is None:
+        try:
+            import shioaji as _sj
+            sj = _sj
+        except ImportError as exc:
+            raise ImportError(
+                "shioaji is required for SinopacGateway. "
+                "Install with: uv sync --extra taifex"
+            ) from exc
+    return sj
 
 
 class SinopacGateway(BrokerGateway):
@@ -26,6 +36,7 @@ class SinopacGateway(BrokerGateway):
         super().__init__(cache_ttl=cache_ttl)
         self._api: Any = None
         self._connected = False
+        self._connect_error: str | None = None
 
     @property
     def broker_name(self) -> str:
@@ -48,17 +59,21 @@ class SinopacGateway(BrokerGateway):
         2. Account-ID-based GSM secrets  (ACCOUNT_ID_API_KEY, ACCOUNT_ID_API_SECRET)
         3. Legacy group-based GSM lookup via secrets.toml [sinopac] section
         """
+        try:
+            _sj = _ensure_shioaji()
+        except ImportError as exc:
+            self._connect_error = str(exc)
+            logger.warning("sinopac_shioaji_missing", error=str(exc))
+            return
         if api_key is None or api_secret is None:
             from src.broker_gateway.registry import load_credentials
             from src.secrets.manager import get_secret_manager
             sm = get_secret_manager()
             if account_id:
-                # Primary path: per-account GSM secrets saved by the dashboard
                 creds = load_credentials(account_id)
                 api_key = creds.get("api_key") or api_key
                 api_secret = creds.get("api_secret") or api_secret
             if not api_key or not api_secret:
-                # Fallback: legacy group-based lookup (SHIOAJI_API_KEY etc.)
                 try:
                     group = sm.get_group("sinopac")
                     api_key = api_key or group.get("api_key")
@@ -66,14 +81,21 @@ class SinopacGateway(BrokerGateway):
                 except Exception:
                     pass
         if not api_key or not api_secret:
-            raise ValueError(
-                f"No credentials found for Sinopac account '{account_id}'. "
+            self._connect_error = (
+                f"No credentials found for account '{account_id}'. "
                 "Enter them in Trading → Accounts."
             )
-        self._api = sj.Shioaji()
-        self._api.login(api_key=api_key, secret_key=api_secret)
-        self._connected = True
-        logger.info("sinopac_gateway_connected", account_id=account_id)
+            logger.warning("sinopac_no_credentials", account_id=account_id)
+            return
+        try:
+            self._api = _sj.Shioaji()
+            self._api.login(api_key=api_key, secret_key=api_secret)
+            self._connected = True
+            self._connect_error = None
+            logger.info("sinopac_gateway_connected", account_id=account_id)
+        except Exception as exc:
+            self._connect_error = f"Login failed: {exc}"
+            logger.warning("sinopac_login_failed", account_id=account_id, error=str(exc))
 
     def disconnect(self) -> None:
         if self._api:
@@ -183,8 +205,8 @@ class SinopacGateway(BrokerGateway):
 
     def _reconnect(self) -> None:
         logger.info("sinopac_attempting_reconnect")
-        self._api = sj.Shioaji()
-        # Re-use the same connect logic (account_id unknown at this point, falls back to group)
+        _sj = _ensure_shioaji()
+        self._api = _sj.Shioaji()
         self.connect()
         logger.info("sinopac_reconnected")
 

@@ -39,16 +39,18 @@ async def list_accounts() -> list[dict]:
         accounts = _get_db().load_all_accounts()
     except Exception:
         return []
-    return [
-        {
+    result = []
+    for a in accounts:
+        entry: dict = {
             "id": a.id,
             "broker": a.broker,
             "display_name": a.display_name,
             "guards": a.guards,
             "strategies": a.strategies,
+            "credential_status": _check_credentials(a.id),
         }
-        for a in accounts
-    ]
+        result.append(entry)
+    return result
 
 
 @router.get("/accounts/{account_id}")

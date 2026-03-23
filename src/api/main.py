@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routes import accounts, backtest, coverage, crawl, editor, ohlcv, optimizer, strategies, war_room
+from src.api.routes import accounts, backtest, coverage, crawl, editor, ohlcv, optimizer, params, strategies, war_room
 from src.api.ws import backtest as ws_backtest
 from src.api.ws import live_feed, risk
 
@@ -36,6 +36,7 @@ app.include_router(accounts.router)
 app.include_router(war_room.router)
 app.include_router(crawl.router)
 app.include_router(editor.router)
+app.include_router(params.router)
 
 
 # WebSocket routes

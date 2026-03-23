@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from src.dashboard.helpers import run_strategy_backtest
+from src.api.helpers import run_strategy_backtest
 
 router = APIRouter(prefix="/api", tags=["backtest"])
 
