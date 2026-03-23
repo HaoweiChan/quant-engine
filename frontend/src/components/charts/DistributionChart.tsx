@@ -1,0 +1,59 @@
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
+import { colors } from "@/lib/theme";
+
+interface DistributionChartProps {
+  values: number[];
+  bins?: number;
+  height?: number;
+}
+
+function histogram(values: number[], bins: number) {
+  if (values.length === 0) return [];
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const binWidth = (max - min) / bins || 1;
+  const counts = new Array(bins).fill(0);
+  for (const v of values) {
+    const idx = Math.min(Math.floor((v - min) / binWidth), bins - 1);
+    counts[idx]++;
+  }
+  return counts.map((count, i) => ({
+    mid: min + (i + 0.5) * binWidth,
+    count,
+  }));
+}
+
+export function DistributionChart({ values, bins = 30, height = 200 }: DistributionChartProps) {
+  const data = histogram(values, bins);
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+        <XAxis
+          dataKey="mid"
+          tick={{ fontSize: 8, fill: colors.dim, fontFamily: "'JetBrains Mono'" }}
+          tickFormatter={(v: number) => v.toFixed(1)}
+          axisLine={{ stroke: colors.cardBorder }}
+        />
+        <YAxis
+          tick={{ fontSize: 8, fill: colors.dim, fontFamily: "'JetBrains Mono'" }}
+          axisLine={{ stroke: colors.cardBorder }}
+        />
+        <Tooltip
+          contentStyle={{
+            background: colors.sidebar,
+            border: `1px solid ${colors.cardBorder}`,
+            fontFamily: "'JetBrains Mono'",
+            fontSize: 10,
+            color: colors.text,
+          }}
+        />
+        <Bar dataKey="count" radius={[1, 1, 0, 0]}>
+          {data.map((entry, i) => (
+            <Cell key={i} fill={entry.mid >= 0 ? "#1a5a3a" : "#5a1a1a"} />
+          ))}
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
