@@ -162,6 +162,31 @@ def build_live_page() -> html.Div:
     return html.Div([sidebar, main], style={"display": "flex"})
 
 
+def _build_bt_strategy_params(strategy_slug: str) -> list:
+    """Build single-value parameter inputs for backtest sidebar."""
+    info = helpers.STRATEGY_REGISTRY.get(strategy_slug)
+    if not info or not info.param_grid:
+        return [html.Div("No tunable parameters.", style={
+            "fontSize": 9, "color": th.DIM, "fontFamily": th.MONO, "padding": "4px 0",
+        })]
+    inputs = []
+    for key, cfg in info.param_grid.items():
+        default = cfg["default"][0] if cfg.get("default") else 0
+        ptype = cfg.get("type", "float")
+        step = 1 if ptype == "int" else 0.1
+        inputs.append(th.param_input(
+            cfg.get("label", key),
+            dcc.Input(
+                id={"type": "bt-param", "key": key},
+                type="number",
+                value=default,
+                step=step,
+                style=th.INPUT_STYLE,
+            ),
+        ))
+    return inputs
+
+
 def build_backtest_page() -> html.Div:
     strat_opts = [
         {"label": info.name, "value": slug}
@@ -171,12 +196,6 @@ def build_backtest_page() -> html.Div:
     contract_opts = [
         {"label": f"{c.display}", "value": c.db_symbol}
         for c in helpers.FUTURES_CONTRACTS
-    ]
-    reentry_opts = [
-        {"label": "Immediate", "value": "Immediate"},
-        {"label": "Cooldown (20 bars)", "value": "Cooldown (20 bars)"},
-        {"label": "Vol Gate", "value": "Vol Gate"},
-        {"label": "Breakout (20-bar high)", "value": "Breakout (20-bar high)"},
     ]
     sidebar = html.Div([
         th.section_label("STRATEGY"),
@@ -197,40 +216,18 @@ def build_backtest_page() -> html.Div:
             placeholder="YYYY-MM-DD", style=th.INPUT_STYLE,
         )),
         html.Hr(style={"borderColor": th.CARD_BORDER, "margin": "10px 0"}),
-        th.section_label("POSITION ENGINE"),
-        th.param_input("Max Pyramid Levels", dcc.Input(
-            id="bt-max-levels", type="number", value=4, min=1, max=8, step=1, style=th.INPUT_STYLE,
-        )),
-        th.param_input("Stop ATR Mult (λ)", dcc.Input(
-            id="bt-stop-atr", type="number", value=1.5, min=0.5, max=5.0, step=0.1, style=th.INPUT_STYLE,
-        )),
-        th.param_input("Trail ATR Mult", dcc.Input(
-            id="bt-trail-atr", type="number", value=3.0, min=1.0, max=10.0, step=0.5, style=th.INPUT_STYLE,
-        )),
-        th.param_input("Add Trigger ATR (Δ)", dcc.Input(
-            id="bt-add-trigger", type="number", value=4.0, min=1.0, max=20.0, step=0.5, style=th.INPUT_STYLE,
-        )),
-        th.param_input("Margin Limit", dcc.Input(
-            id="bt-margin", type="number", value=0.50, min=0.1, max=1.0, step=0.05, style=th.INPUT_STYLE,
-        )),
-        th.param_input("Kelly Fraction", dcc.Input(
-            id="bt-kelly", type="number", value=0.25, min=0.05, max=1.0, step=0.05, style=th.INPUT_STYLE,
-        )),
-        th.param_input("Entry Conf Threshold", dcc.Input(
-            id="bt-entry-conf", type="number", value=0.65, min=0.0, max=1.0, step=0.05, style=th.INPUT_STYLE,
-        )),
+        th.section_label("STRATEGY PARAMETERS"),
+        html.Div(id="bt-param-container", children=_build_bt_strategy_params(default_strat)),
+        html.Hr(style={"borderColor": th.CARD_BORDER, "margin": "10px 0"}),
         th.param_input("Max Loss ($)", dcc.Input(
-            id="bt-max-loss", type="number", value=500_000, min=100_000, max=2_000_000,
-            step=50_000, style=th.INPUT_STYLE,
+            id="bt-max-loss", type="number", value=100_000, min=10_000, max=2_000_000,
+            step=10_000, style=th.INPUT_STYLE,
         )),
-        th.param_input("Re-Entry Strategy", dcc.Dropdown(
-            id="bt-reentry", options=reentry_opts, value="Immediate", clearable=False, style=_DD_STYLE,
-        )),
-        th.run_btn("▶ Run Backtest", "bt-run"),
+        th.run_btn("Run Backtest", "bt-run"),
     ], style=th.SIDEBAR_STYLE)
     main = html.Div([
         dcc.Loading(
-            html.Div(id="bt-content", children=[th.info_msg("Configure parameters and click ▶ Run Backtest.")]),
+            html.Div(id="bt-content", children=[th.info_msg("Configure parameters and click Run Backtest.")]),
             type="dot", color=th.BLUE,
         ),
     ], style=th.MAIN_STYLE)
@@ -525,9 +522,11 @@ def build_strategy_optimizer_page() -> html.Div:
 
 def build_trading_page() -> html.Div:
     return html.Div([
-        dcc.Tabs(id="trd-tabs", value="trd-live", children=[
-            dcc.Tab(label="Live / Paper", value="trd-live", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
-            dcc.Tab(label="Risk Monitor", value="trd-risk", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
+        dcc.Tabs(id="trd-tabs", value="trd-accounts", children=[
+            dcc.Tab(label="Accounts", value="trd-accounts", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
+            dcc.Tab(label="War Room", value="trd-warroom", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
+            dcc.Tab(label="Blotter", value="trd-blotter", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
+            dcc.Tab(label="Risk", value="trd-risk", style=SUB_TAB_STYLE, selected_style=SUB_TAB_SELECTED_STYLE),
         ], style={"borderBottom": f"1px solid {th.CARD_BORDER}", "background": th.BG}),
         html.Div(id="trd-content"),
     ])
@@ -625,6 +624,249 @@ def build_risk_page() -> html.Div:
     return html.Div([sidebar, main], style={"display": "flex"})
 
 
+# ── Trading tab page builders (War Room) ──────────────────────────────────
+
+_BROKER_TYPES = [
+    {"label": "Sinopac (TAIFEX)", "value": "sinopac"},
+    {"label": "Binance (Crypto)", "value": "binance"},
+    {"label": "Schwab (US Equities)", "value": "schwab"},
+    {"label": "CCXT (Generic)", "value": "ccxt"},
+]
+
+_GATEWAY_CLASSES = {
+    "sinopac": "src.broker_gateway.sinopac.SinopacGateway",
+    "binance": "src.broker_gateway.mock.MockGateway",
+    "schwab": "src.broker_gateway.mock.MockGateway",
+    "ccxt": "src.broker_gateway.mock.MockGateway",
+    "mock": "src.broker_gateway.mock.MockGateway",
+}
+
+_AVATAR_COLORS = {
+    "sinopac": "#3A6BA5", "binance": "#F0B90B", "schwab": "#00A3E0",
+    "ccxt": "#7C3AED", "mock": "#4FC3F7",
+}
+
+
+def build_accounts_page() -> html.Div:
+    """Accounts management page — table of accounts + add/edit modal."""
+    sidebar = html.Div([
+        th.section_label("ACCOUNTS"),
+        html.Div("Manage broker connections, credentials, and risk guards.", style={
+            "fontSize": 8, "color": th.DIM, "fontFamily": th.MONO, "marginBottom": 12, "lineHeight": 1.6,
+        }),
+    ], style=th.SIDEBAR_STYLE)
+    main = html.Div([
+        html.Div([
+            html.Div("Trading", style={"fontSize": 16, "fontFamily": th.SERIF, "color": th.TEXT, "fontWeight": 600}),
+            html.Div("Configure your trading accounts.", style={
+                "fontSize": 10, "color": th.DIM, "fontFamily": th.SANS, "marginTop": 2,
+            }),
+        ], style={"marginBottom": 20}),
+        html.Div(id="accounts-table-container"),
+        html.Div(
+            "+ Add Account",
+            id="accounts-add-btn",
+            n_clicks=0,
+            style={
+                "fontSize": 11, "color": th.BLUE, "fontFamily": th.MONO, "cursor": "pointer",
+                "marginTop": 12, "padding": "6px 0",
+            },
+        ),
+        # Account detail modal
+        html.Div(id="account-modal", style={"display": "none"}, children=[
+            html.Div([
+                html.Div([
+                    html.Span(id="modal-title", style={
+                        "fontSize": 14, "fontFamily": th.SANS, "color": th.TEXT, "fontWeight": 600,
+                    }),
+                    html.Span("✕", id="modal-close-btn", n_clicks=0, style={
+                        "cursor": "pointer", "color": th.MUTED, "fontSize": 16, "float": "right",
+                    }),
+                ], style={"marginBottom": 16, "display": "flex", "justifyContent": "space-between"}),
+                # CONNECTION
+                th.section_label("CONNECTION"),
+                th.param_input("Type", dcc.Dropdown(
+                    id="modal-broker-type", options=_BROKER_TYPES,
+                    clearable=False, style=_DD_STYLE,
+                )),
+                html.Div([
+                    html.Div([
+                        html.Span("Sandbox Mode", style={"fontSize": 10, "color": th.MUTED, "fontFamily": th.MONO}),
+                    ], style={"flex": 1}),
+                    dcc.Checklist(id="modal-sandbox", options=[{"label": "", "value": "on"}], value=[], style={"flex": "0 0 30px"}),
+                ], style={"display": "flex", "alignItems": "center", "marginBottom": 6}),
+                html.Div([
+                    html.Div([
+                        html.Span("Demo Trading", style={"fontSize": 10, "color": th.MUTED, "fontFamily": th.MONO}),
+                    ], style={"flex": 1}),
+                    dcc.Checklist(id="modal-demo", options=[{"label": "", "value": "on"}], value=[], style={"flex": "0 0 30px"}),
+                ], style={"display": "flex", "alignItems": "center", "marginBottom": 10}),
+                # CREDENTIALS
+                html.Div([
+                    th.section_label("CREDENTIALS"),
+                    html.Span(id="modal-cred-status", style={
+                        "fontSize": 8, "fontFamily": th.MONO, "color": th.GREEN,
+                        "marginLeft": 6, "letterSpacing": "0.5px",
+                    }),
+                ], style={"display": "flex", "alignItems": "center", "marginBottom": 6}),
+                html.Div([
+                    html.Div("API Key", style={"fontSize": 9, "color": th.DIM, "fontFamily": th.MONO, "marginBottom": 1}),
+                    html.Div([
+                        dcc.Input(
+                            id="modal-api-key", type="password", placeholder="Enter API key",
+                            style={**th.INPUT_STYLE, "fontSize": 11, "flex": 1},
+                        ),
+                        html.Span(id="modal-api-key-badge", style={
+                            "fontSize": 8, "color": th.GREEN, "fontFamily": th.MONO,
+                            "marginLeft": 6, "whiteSpace": "nowrap", "alignSelf": "center",
+                        }),
+                    ], style={"display": "flex", "alignItems": "center"}),
+                ], style={"marginBottom": 6}),
+                html.Div([
+                    html.Div("API Secret", style={"fontSize": 9, "color": th.DIM, "fontFamily": th.MONO, "marginBottom": 1}),
+                    html.Div([
+                        dcc.Input(
+                            id="modal-api-secret", type="password", placeholder="Enter API secret",
+                            style={**th.INPUT_STYLE, "fontSize": 11, "flex": 1},
+                        ),
+                        html.Span(id="modal-api-secret-badge", style={
+                            "fontSize": 8, "color": th.GREEN, "fontFamily": th.MONO,
+                            "marginLeft": 6, "whiteSpace": "nowrap", "alignSelf": "center",
+                        }),
+                    ], style={"display": "flex", "alignItems": "center"}),
+                ], style={"marginBottom": 6}),
+                html.Div([
+                    html.Div("Password (optional)", style={"fontSize": 9, "color": th.DIM, "fontFamily": th.MONO, "marginBottom": 1}),
+                    html.Div([
+                        dcc.Input(
+                            id="modal-password", type="password",
+                            placeholder="Required by some exchanges (e.g. OKX)",
+                            style={**th.INPUT_STYLE, "fontSize": 11, "flex": 1},
+                        ),
+                        html.Span(id="modal-password-badge", style={
+                            "fontSize": 8, "color": th.GREEN, "fontFamily": th.MONO,
+                            "marginLeft": 6, "whiteSpace": "nowrap", "alignSelf": "center",
+                        }),
+                    ], style={"display": "flex", "alignItems": "center"}),
+                ], style={"marginBottom": 6}),
+                # GUARDS
+                th.section_label("GUARDS"),
+                th.param_input("Max Drawdown %", dcc.Input(
+                    id="modal-guard-dd", type="number", value=15, min=1, max=50, step=1,
+                    style=th.INPUT_STYLE,
+                )),
+                th.param_input("Max Margin %", dcc.Input(
+                    id="modal-guard-margin", type="number", value=80, min=10, max=100, step=5,
+                    style=th.INPUT_STYLE,
+                )),
+                th.param_input("Max Daily Loss", dcc.Input(
+                    id="modal-guard-loss", type="number", value=100_000, min=1000, step=10_000,
+                    style=th.INPUT_STYLE,
+                )),
+                # Actions
+                html.Div([
+                    html.Button("Reconnect", id="modal-reconnect-btn", n_clicks=0, style={
+                        "padding": "6px 16px", "background": th.CARD_BG, "color": th.MUTED,
+                        "border": f"1px solid {th.CARD_BORDER}", "borderRadius": 4,
+                        "cursor": "pointer", "fontFamily": th.MONO, "fontSize": 10, "marginRight": 8,
+                    }),
+                    html.Button("Save", id="modal-save-btn", n_clicks=0, style={
+                        "padding": "6px 16px", "background": "#2A7A4A", "color": "#fff",
+                        "border": "none", "borderRadius": 4, "cursor": "pointer",
+                        "fontFamily": th.MONO, "fontSize": 10, "fontWeight": 600,
+                    }),
+                ], style={"display": "flex", "justifyContent": "flex-end", "marginTop": 16}),
+                html.Div(id="modal-status", style={
+                    "fontSize": 9, "fontFamily": th.MONO, "marginTop": 8, "minHeight": 16,
+                }),
+                dcc.Store(id="modal-account-id", data=""),
+            ], style={
+                "background": th.CARD_BG, "border": f"1px solid {th.CARD_BORDER}",
+                "borderRadius": 8, "padding": 24, "width": 480, "maxHeight": "80vh",
+                "overflowY": "auto",
+            }),
+        ]),
+        dcc.Store(id="accounts-refresh-trigger", data=0),
+    ], style=th.MAIN_STYLE)
+    return html.Div([sidebar, main], style={"display": "flex"})
+
+
+def build_war_room_page() -> html.Div:
+    """War Room — account overview + strategy session monitors."""
+    sidebar = html.Div([
+        th.section_label("POLLING"),
+        th.param_input("Interval", dcc.Dropdown(
+            id="warroom-poll-interval",
+            options=[
+                {"label": "5s", "value": "5000"},
+                {"label": "15s", "value": "15000"},
+                {"label": "30s", "value": "30000"},
+                {"label": "60s", "value": "60000"},
+            ],
+            value="15000", clearable=False, style=_DD_STYLE,
+        )),
+        html.Hr(style={"borderColor": th.CARD_BORDER, "margin": "10px 0"}),
+        th.section_label("FILTER"),
+        th.param_input("Account", dcc.Dropdown(
+            id="warroom-account-filter",
+            options=[{"label": "All Accounts", "value": "all"}],
+            value="all", clearable=False, style=_DD_STYLE,
+        )),
+        th.param_input("Status", dcc.Dropdown(
+            id="warroom-status-filter",
+            options=[
+                {"label": "All", "value": "all"},
+                {"label": "Active", "value": "active"},
+                {"label": "Paused", "value": "paused"},
+            ],
+            value="active", clearable=False, style=_DD_STYLE,
+        )),
+    ], style=th.SIDEBAR_STYLE)
+    main = html.Div([
+        dcc.Interval(id="warroom-interval", interval=15_000, n_intervals=0),
+        html.Div(id="warroom-account-overview"),
+        html.Div(id="warroom-equity-section"),
+        html.Div(id="warroom-sessions-grid"),
+    ], style=th.MAIN_STYLE)
+    return html.Div([sidebar, main], style={"display": "flex"})
+
+
+def build_blotter_page() -> html.Div:
+    """Blotter — unified activity feed across all sessions."""
+    sidebar = html.Div([
+        th.section_label("FILTER"),
+        th.param_input("Account", dcc.Dropdown(
+            id="blotter-account-filter",
+            options=[{"label": "All Accounts", "value": "all"}],
+            value="all", clearable=False, style=_DD_STYLE,
+        )),
+    ], style=th.SIDEBAR_STYLE)
+    main = html.Div([
+        dcc.Interval(id="blotter-interval", interval=15_000, n_intervals=0),
+        html.Div(id="blotter-content", children=[
+            th.info_msg("Activity feed will update when trading sessions are active."),
+        ]),
+    ], style=th.MAIN_STYLE)
+    return html.Div([sidebar, main], style={"display": "flex"})
+
+
+def build_risk_overview_page() -> html.Div:
+    """Risk Overview — aggregated risk metrics across all accounts."""
+    sidebar = html.Div([
+        th.section_label("RISK OVERVIEW"),
+        html.Div("Aggregated risk metrics across all accounts and strategies.", style={
+            "fontSize": 8, "color": th.DIM, "fontFamily": th.MONO, "lineHeight": 1.6,
+        }),
+    ], style=th.SIDEBAR_STYLE)
+    main = html.Div([
+        dcc.Interval(id="risk-interval", interval=15_000, n_intervals=0),
+        html.Div(id="risk-content", children=[
+            th.info_msg("Risk metrics will populate when accounts are connected."),
+        ]),
+    ], style=th.MAIN_STYLE)
+    return html.Div([sidebar, main], style={"display": "flex"})
+
+
 # ── App layout ───────────────────────────────────────────────────────────────
 _TAB_STYLE = {
     "fontFamily": th.MONO, "fontSize": 10, "color": th.MUTED,
@@ -676,5 +918,26 @@ app.layout = html.Div([
 # ── Register callbacks (imported for side-effect) ───────────────────────────
 import src.dashboard.callbacks  # noqa: E402, F401
 
+def _register_mock_account() -> None:
+    """Register a MockGateway account with 2 sessions for development testing."""
+    from src.broker_gateway.account_db import AccountDB
+    from src.broker_gateway.types import AccountConfig
+    db = AccountDB()
+    config = AccountConfig(
+        id="mock-dev",
+        broker="mock",
+        display_name="Mock (Dev)",
+        gateway_class="src.broker_gateway.mock.MockGateway",
+        strategies=[
+            {"slug": "atr_mean_reversion", "symbol": "TX"},
+            {"slug": "trend_follow", "symbol": "MTX"},
+        ],
+    )
+    db.save_account(config)
+
+
 if __name__ == "__main__":
+    import sys
+    if "--mock" in sys.argv:
+        _register_mock_account()
     app.run(debug=True, use_reloader=False, port=8050)

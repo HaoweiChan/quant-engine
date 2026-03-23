@@ -226,7 +226,7 @@ GRID_PARAMS: dict[str, dict[str, float]] = {
 }
 
 # ── Strategy Optimizer ──────────────────────────────────────────────────────
-# ── Strategy discovery ───────────────────────────────────────────────────────
+# ── Strategy discovery (delegates to src.strategies.registry) ────────────────
 @dataclass
 class StrategyInfo:
     name: str          # human-readable: "ATR Mean Reversion"
@@ -235,74 +235,30 @@ class StrategyInfo:
     param_grid: dict[str, dict] | None = None
 
 
-_STRATEGIES_DIR = Path(__file__).resolve().parent.parent / "strategies"
-
-
 def discover_strategies() -> dict[str, StrategyInfo]:
-    """Scan src/strategies/*.py for `create_*_engine` factory functions."""
-    import importlib
-    import inspect
-    import re
+    """Discover strategies via the central registry."""
+    from src.strategies.registry import get_all, get_param_grid
     result: dict[str, StrategyInfo] = {}
-    for py in sorted(_STRATEGIES_DIR.glob("*.py")):
-        if py.name.startswith("_"):
-            continue
-        mod_name = f"src.strategies.{py.stem}"
-        try:
-            mod = importlib.import_module(mod_name)
-        except Exception:
-            continue
-        for attr_name in dir(mod):
-            if not re.match(r"create_\w+_engine$", attr_name):
-                continue
-            fn = getattr(mod, attr_name)
-            if not callable(fn):
-                continue
-            slug = py.stem
-            label = slug.replace("_", " ").title()
-            info = StrategyInfo(name=label, module=mod_name, factory=attr_name)
-            sig = inspect.signature(fn)
-            grid: dict[str, dict] = {}
-            for pname, param in sig.parameters.items():
-                if pname in ("max_loss", "lots", "contract_type"):
-                    continue
-                default = param.default
-                if default is inspect.Parameter.empty:
-                    continue
-                if isinstance(default, (int, float)):
-                    ptype = "int" if isinstance(default, int) else "float"
-                    grid[pname] = {
-                        "label": pname.replace("_", " ").title(),
-                        "type": ptype,
-                        "default": [default],
-                    }
-            if grid:
-                info.param_grid = grid
-            result[slug] = info
+    for slug, reg_info in get_all().items():
+        grid = get_param_grid(slug)
+        result[slug] = StrategyInfo(
+            name=reg_info.name, module=reg_info.module,
+            factory=reg_info.factory, param_grid=grid or None,
+        )
     return result
 
 
 STRATEGY_REGISTRY: dict[str, StrategyInfo] = discover_strategies()
 
 
-# Per-strategy curated param grids (override auto-discovered single defaults)
-CURATED_PARAM_GRIDS: dict[str, dict[str, dict]] = {
-    "atr_mean_reversion": {
-        "bb_len":         {"label": "BB Length",         "type": "int",   "default": [15, 20, 25]},
-        "rsi_oversold":   {"label": "RSI Oversold",      "type": "float", "default": [25, 30]},
-        "rsi_overbought": {"label": "RSI Overbought",    "type": "float", "default": [70, 75]},
-        "atr_sl_multi":   {"label": "ATR SL Multiplier", "type": "float", "default": [2.0, 2.5, 3.0]},
-        "atr_tp_multi":   {"label": "ATR TP Multiplier", "type": "float", "default": [1.5, 2.0, 2.5]},
-    },
-}
-
-
 def get_param_grid_for_strategy(slug: str) -> dict[str, dict]:
-    """Return the param grid for a strategy: curated if available, else auto-discovered."""
-    if slug in CURATED_PARAM_GRIDS:
-        return CURATED_PARAM_GRIDS[slug]
-    info = STRATEGY_REGISTRY.get(slug)
-    return info.param_grid or {} if info else {}
+    """Return the optimizer param grid for a strategy from the central registry."""
+    from src.strategies.registry import get_param_grid
+    try:
+        return get_param_grid(slug)
+    except KeyError:
+        info = STRATEGY_REGISTRY.get(slug)
+        return info.param_grid or {} if info else {}
 
 # Objectives available in the optimizer (maps display label → metric key)
 OPT_OBJECTIVES: list[dict[str, str]] = [
@@ -561,66 +517,39 @@ def run_strategy_backtest(
     start_str: str,
     end_str: str,
     initial_equity: float = 2_000_000.0,
+    strategy_params: dict | None = None,
+    max_loss: float = 100_000.0,
 ) -> dict:
-    """Run a quick backtest and return return statistics + equity curve.
+    """Run a backtest on real DB data via the MCP facade.
+
+    Delegates to run_backtest_realdata_for_mcp so the dashboard and MCP
+    tool produce identical results for the same inputs.
 
     Returns dict with keys: daily_returns (np.ndarray), equity_curve (list),
     bnh_returns (np.ndarray), bnh_equity (list), metrics (dict), bars_count (int).
     """
-    import importlib
-    from statistics import mean as _mean
+    from src.mcp_server.facade import _BUILTIN_FACTORIES, run_backtest_realdata_for_mcp
 
+    # Map strategy_slug to facade strategy name
     info = STRATEGY_REGISTRY.get(strategy_slug)
     if not info:
         raise ValueError(f"Unknown strategy: {strategy_slug}")
+    facade_name = strategy_slug if strategy_slug in _BUILTIN_FACTORIES else f"{info.module}:{info.factory}"
 
-    mod = importlib.import_module(info.module)
-    factory = getattr(mod, info.factory)
+    merged_params = dict(strategy_params or {})
+    merged_params["max_loss"] = max_loss
 
-    from src.adapters.taifex import TaifexAdapter
-    from src.data.db import Database
-    from src.simulator.backtester import BacktestRunner
-    from src.simulator.fill_model import ClosePriceFillModel
-
-    db = Database(f"sqlite:///{_DB_PATH}")
-    start_dt = datetime.fromisoformat(start_str)
-    end_dt = datetime.fromisoformat(end_str)
-    raw = db.get_ohlcv(symbol, start_dt, end_dt)
-    if not raw:
-        raise ValueError(f"No data for {symbol} in {start_str}–{end_str}")
-
-    daily_atr = _mean(b.high - b.low for b in raw)
-    adapter = TaifexAdapter()
-    runner = BacktestRunner(
-        config=lambda: factory(max_loss=100_000),
-        adapter=adapter,
-        fill_model=ClosePriceFillModel(slippage_points=1.0),
+    result = run_backtest_realdata_for_mcp(
+        symbol=symbol,
+        start=start_str,
+        end=end_str,
+        strategy=facade_name,
+        strategy_params=merged_params,
         initial_equity=initial_equity,
     )
-    bars = [
-        {"symbol": symbol, "price": b.close, "open": b.open, "high": b.high,
-         "low": b.low, "close": b.close, "daily_atr": daily_atr, "timestamp": b.timestamp}
-        for b in raw
-    ]
-    timestamps = [b.timestamp for b in raw]
-    result = runner.run(bars, timestamps)
-
-    eq = np.array(result.equity_curve)
-    strat_returns = np.diff(eq) / eq[:-1] if len(eq) > 1 else np.array([0.0])
-    strat_returns = strat_returns[np.isfinite(strat_returns)]
-
-    closes = np.array([b.close for b in raw], dtype=float)
-    bnh_returns = np.diff(closes) / closes[:-1] if len(closes) > 1 else np.array([0.0])
-    bnh_eq = initial_equity * np.cumprod(np.concatenate([[1.0], 1 + bnh_returns]))
-
-    return {
-        "daily_returns": strat_returns,
-        "equity_curve": result.equity_curve,
-        "bnh_returns": bnh_returns,
-        "bnh_equity": bnh_eq.tolist(),
-        "metrics": result.metrics,
-        "bars_count": len(bars),
-    }
+    if "error" in result:
+        raise ValueError(result["error"])
+    return result
 
 
 def run_grid_mc(
@@ -647,3 +576,86 @@ def run_grid_mc(
             win_rate = float(np.mean(arr > 0) * 100)
             results[yi, xi] = [mean_ret, sharpe, win_rate, std_ret]
     return results
+
+
+# ── War Room data helpers ────────────────────────────────────────────────
+
+_session_manager = None
+_gateway_registry = None
+_account_equity_store = None
+
+
+def _init_war_room() -> None:
+    """Lazy-init the SessionManager and GatewayRegistry singletons."""
+    global _session_manager, _gateway_registry, _account_equity_store
+    if _gateway_registry is not None:
+        return
+    from src.broker_gateway.account_db import AccountDB
+    from src.broker_gateway.registry import GatewayRegistry
+    from src.trading_session.manager import SessionManager
+    from src.trading_session.store import AccountEquityStore, SnapshotStore
+    db = AccountDB()
+    _gateway_registry = GatewayRegistry(db=db)
+    _gateway_registry.load_all()
+    store = SnapshotStore()
+    _session_manager = SessionManager(registry=_gateway_registry, store=store)
+    _session_manager.restore_from_config()
+    _account_equity_store = AccountEquityStore()
+
+
+def get_war_room_data() -> dict:
+    """Fetch all data needed by the war room dashboard pages."""
+    _init_war_room()
+    assert _session_manager is not None
+    assert _gateway_registry is not None
+    assert _account_equity_store is not None
+    try:
+        _session_manager.poll_all()
+    except Exception:
+        pass
+    # Load all accounts from DB so they always appear even if gateway failed to instantiate
+    accounts: dict = {}
+    try:
+        from src.broker_gateway.account_db import AccountDB
+        all_configs = AccountDB().load_all_accounts()
+    except Exception:
+        all_configs = _gateway_registry.get_all_configs()
+    for config in all_configs:
+        gw = _gateway_registry.get_gateway(config.id)
+        snap = None
+        if gw:
+            try:
+                snap = gw.get_account_snapshot()
+            except Exception:
+                snap = None
+        # Record equity for the curve whenever we have a live snapshot
+        if snap and snap.connected and snap.equity > 0:
+            try:
+                _account_equity_store.record(config.id, snap.equity, snap.margin_used)
+            except Exception:
+                pass
+        equity_curve = []
+        try:
+            equity_curve = _account_equity_store.get_equity_curve(config.id, days=30)
+        except Exception:
+            pass
+        accounts[config.id] = {"config": config, "snapshot": snap, "equity_curve": equity_curve}
+    sessions = _session_manager.get_all_sessions()
+    sessions_by_account: dict[str, list] = {}
+    for s in sessions:
+        sessions_by_account.setdefault(s.account_id, []).append(s)
+    return {
+        "accounts": accounts,
+        "all_sessions": sessions,
+        "sessions_by_account": sessions_by_account,
+    }
+
+
+def get_gateway_registry():
+    _init_war_room()
+    return _gateway_registry
+
+
+def get_session_manager():
+    _init_war_room()
+    return _session_manager

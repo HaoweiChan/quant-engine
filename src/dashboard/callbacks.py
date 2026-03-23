@@ -11,6 +11,7 @@ import numpy as np
 import plotly.graph_objects as go
 from dash import ALL, Input, Output, State, callback, dash_table, dcc, html, no_update
 
+from src.broker_gateway.types import AccountSnapshot
 from src.dashboard import helpers
 from src.dashboard import theme as th
 
@@ -65,12 +66,18 @@ def render_strategy_sub(tab: str) -> object:
 )
 def render_trading_sub(tab: str) -> object:
     from src.dashboard.app import (  # noqa: PLC0415
-        build_live_page,
-        build_risk_page,
+        build_accounts_page,
+        build_blotter_page,
+        build_risk_overview_page,
+        build_war_room_page,
     )
+    if tab == "trd-warroom":
+        return build_war_room_page()
+    if tab == "trd-blotter":
+        return build_blotter_page()
     if tab == "trd-risk":
-        return build_risk_page()
-    return build_live_page()
+        return build_risk_overview_page()
+    return build_accounts_page()
 
 
 # ── Chart helpers ────────────────────────────────────────────────────────────
@@ -239,6 +246,17 @@ def update_live(n_intervals: int) -> object:
     ])
 
 
+# ── Backtest: dynamic param swap ─────────────────────────────────────────────
+@callback(
+    Output("bt-param-container", "children"),
+    Input("bt-strategy", "value"),
+    prevent_initial_call=True,
+)
+def bt_update_params(strategy_slug: str) -> list:
+    from src.dashboard.app import _build_bt_strategy_params
+    return _build_bt_strategy_params(strategy_slug)
+
+
 # ── Backtest ─────────────────────────────────────────────────────────────────
 @callback(
     Output("bt-content", "children"),
@@ -248,15 +266,9 @@ def update_live(n_intervals: int) -> object:
     State("bt-contract",    "value"),
     State("bt-start",       "value"),
     State("bt-end",         "value"),
-    State("bt-max-levels",  "value"),
-    State("bt-stop-atr",    "value"),
-    State("bt-trail-atr",   "value"),
-    State("bt-add-trigger", "value"),
-    State("bt-margin",      "value"),
-    State("bt-kelly",       "value"),
-    State("bt-entry-conf",  "value"),
     State("bt-max-loss",    "value"),
-    State("bt-reentry",     "value"),
+    State({"type": "bt-param", "key": ALL}, "value"),
+    State({"type": "bt-param", "key": ALL}, "id"),
     prevent_initial_call=True,
 )
 def run_backtest(
@@ -265,14 +277,22 @@ def run_backtest(
     symbol: str,
     start: str,
     end: str,
-    *_: object,
+    max_loss: float | None,
+    param_values: list,
+    param_ids: list[dict],
 ) -> tuple[object, list]:
+    strategy_params: dict = {}
+    for pid, val in zip(param_ids, param_values, strict=True):
+        if val is not None:
+            strategy_params[pid["key"]] = val
     try:
         bt = helpers.run_strategy_backtest(
             strategy_slug or "atr_mean_reversion",
             symbol or "TX",
             start or "2025-08-01",
             end or "2026-03-14",
+            strategy_params=strategy_params,
+            max_loss=float(max_loss or 100_000),
         )
     except Exception as exc:
         return th.error_card(f"Backtest error: {exc}"), []
@@ -287,7 +307,7 @@ def run_backtest(
     bnh_pnl = float(bnh_equity[-1] - initial) if bnh_equity else 0.0
     alpha = total_pnl - bnh_pnl
     sharpe = metrics.get("sharpe", 0)
-    max_dd = metrics.get("max_drawdown_pct", 0)
+    max_dd = metrics.get("max_drawdown_pct", 0) * 100
     win_rate = metrics.get("win_rate", 0) * 100
     trade_count = int(metrics.get("trade_count", 0))
 
@@ -1135,3 +1155,567 @@ def _crawl_header(state: dict) -> html.Div:
             "fontSize": 9, "color": status_color, "fontFamily": th.MONO,
         }),
     ], style={"marginTop": 10, "marginBottom": 2})
+
+
+# ── Accounts Management ──────────────────────────────────────────────────
+
+def _get_account_db():
+    from src.broker_gateway.account_db import AccountDB
+    return AccountDB()
+
+
+def _build_account_avatar(broker: str) -> html.Span:
+    from src.dashboard.app import _AVATAR_COLORS
+    initials = broker[:2].upper()
+    color = _AVATAR_COLORS.get(broker, "#556")
+    return html.Span(initials, style={
+        "display": "inline-block", "width": 28, "height": 28, "lineHeight": "28px",
+        "borderRadius": 6, "textAlign": "center", "fontSize": 10, "fontWeight": 600,
+        "fontFamily": th.MONO, "color": "#fff", "background": color, "marginRight": 10,
+    })
+
+
+@callback(
+    Output("accounts-table-container", "children"),
+    Input("trd-tabs", "value"),
+    Input("accounts-refresh-trigger", "data"),
+)
+def render_accounts_table(tab: str, trigger: int) -> object:
+    if tab != "trd-accounts":
+        return no_update
+    try:
+        accounts = _get_account_db().load_all_accounts()
+    except Exception:
+        accounts = []
+    if not accounts:
+        return html.Div([
+            html.Div([
+                html.Span("ACCOUNT", style={"flex": 2, "fontSize": 9, "color": th.DIM, "fontFamily": th.MONO, "letterSpacing": 1}),
+                html.Span("CONNECTION", style={"flex": 1, "fontSize": 9, "color": th.DIM, "fontFamily": th.MONO, "letterSpacing": 1}),
+                html.Span("GUARDS", style={"flex": "0 0 80px", "fontSize": 9, "color": th.DIM, "fontFamily": th.MONO, "letterSpacing": 1}),
+            ], style={"display": "flex", "padding": "8px 12px", "borderBottom": f"1px solid {th.CARD_BORDER}"}),
+            html.Div("No accounts configured.", style={
+                "fontSize": 10, "color": th.DIM, "fontFamily": th.MONO, "padding": "20px 12px",
+            }),
+        ])
+    rows = []
+    for acct in accounts:
+        guard_count = len([v for v in acct.guards.values() if v > 0]) if acct.guards else 0
+        guard_label = str(guard_count) if guard_count > 0 else "—"
+        rows.append(html.Div([
+            html.Div([
+                _build_account_avatar(acct.broker),
+                html.Span(acct.id, style={"fontSize": 12, "fontFamily": th.MONO, "color": th.TEXT, "fontWeight": 500}),
+            ], style={"flex": 2, "display": "flex", "alignItems": "center"}),
+            html.Span(acct.broker, style={"flex": 1, "fontSize": 11, "color": th.MUTED, "fontFamily": th.MONO}),
+            html.Span(guard_label, style={
+                "flex": "0 0 80px", "fontSize": 11, "color": th.MUTED, "fontFamily": th.MONO, "textAlign": "center",
+            }),
+        ], id={"type": "account-row", "id": acct.id}, n_clicks=0, style={
+            "display": "flex", "alignItems": "center", "padding": "10px 12px",
+            "borderBottom": f"1px solid {th.CARD_BORDER}", "cursor": "pointer",
+        }))
+    header = html.Div([
+        html.Span("ACCOUNT", style={"flex": 2, "fontSize": 9, "color": th.DIM, "fontFamily": th.MONO, "letterSpacing": 1}),
+        html.Span("CONNECTION", style={"flex": 1, "fontSize": 9, "color": th.DIM, "fontFamily": th.MONO, "letterSpacing": 1}),
+        html.Span("GUARDS", style={"flex": "0 0 80px", "fontSize": 9, "color": th.DIM, "fontFamily": th.MONO, "letterSpacing": 1, "textAlign": "center"}),
+    ], style={"display": "flex", "padding": "8px 12px", "borderBottom": f"1px solid {th.CARD_BORDER}"})
+    return html.Div([header, *rows])
+
+
+def _check_gsm_credentials(account_id: str) -> dict[str, bool]:
+    """Check which credentials exist in GSM for an account. Returns {field: exists}."""
+    from concurrent.futures import ThreadPoolExecutor
+    from src.broker_gateway.registry import _gsm_key
+    from src.secrets.manager import get_secret_manager
+    fields = {"api_key": "API_KEY", "api_secret": "API_SECRET", "password": "PASSWORD"}
+    result: dict[str, bool] = {}
+    try:
+        sm = get_secret_manager()
+        def _check(logical: str, gsm_field: str) -> tuple[str, bool]:
+            try:
+                return logical, sm.exists(_gsm_key(account_id, gsm_field))
+            except Exception:
+                return logical, False
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futs = {pool.submit(_check, lk, gf): lk for lk, gf in fields.items()}
+            for fut in futs:
+                try:
+                    lk, exists = fut.result(timeout=3)
+                    result[lk] = exists
+                except Exception:
+                    result[futs[fut]] = False
+    except Exception:
+        for lk in fields:
+            result[lk] = False
+    return result
+
+
+@callback(
+    Output("account-modal", "style"),
+    Output("modal-title", "children"),
+    Output("modal-account-id", "data"),
+    Output("modal-broker-type", "value"),
+    Output("modal-guard-dd", "value"),
+    Output("modal-guard-margin", "value"),
+    Output("modal-guard-loss", "value"),
+    Output("modal-api-key-badge", "children"),
+    Output("modal-api-secret-badge", "children"),
+    Output("modal-password-badge", "children"),
+    Output("modal-cred-status", "children"),
+    Input({"type": "account-row", "id": ALL}, "n_clicks"),
+    Input("accounts-add-btn", "n_clicks"),
+    Input("modal-close-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def toggle_account_modal(row_clicks: list, add_clicks: int, close_clicks: int) -> tuple:
+    from dash import ctx
+    tid = ctx.triggered_id
+    _MODAL_OVERLAY = {
+        "display": "flex", "position": "fixed", "top": 0, "left": 0,
+        "width": "100vw", "height": "100vh", "background": "rgba(0,0,0,0.6)",
+        "zIndex": 1000, "justifyContent": "center", "alignItems": "center",
+    }
+    _HIDDEN = {"display": "none"}
+    _NO_BADGE = ("", "", "", "")
+    if tid == "modal-close-btn":
+        return (_HIDDEN, "", "", "sinopac", 15, 80, 100_000, *_NO_BADGE)
+    if tid == "accounts-add-btn":
+        return (_MODAL_OVERLAY, "New Account", "", "sinopac", 15, 80, 100_000, *_NO_BADGE)
+    if isinstance(tid, dict) and tid.get("type") == "account-row":
+        account_id = tid["id"]
+        acct = _get_account_db().load_account(account_id)
+        if acct:
+            guards = acct.guards or {}
+            cred_status = _check_gsm_credentials(account_id)
+            key_badge = "✓ saved" if cred_status.get("api_key") else ""
+            secret_badge = "✓ saved" if cred_status.get("api_secret") else ""
+            pw_badge = "✓ saved" if cred_status.get("password") else ""
+            saved_count = sum(1 for v in cred_status.values() if v)
+            cred_summary = f"({saved_count} of 3 credentials in GSM)" if saved_count else ""
+            return (
+                _MODAL_OVERLAY, acct.display_name or acct.id, acct.id,
+                acct.broker,
+                guards.get("max_drawdown_pct", 15),
+                guards.get("max_margin_pct", 80),
+                guards.get("max_daily_loss", 100_000),
+                key_badge, secret_badge, pw_badge, cred_summary,
+            )
+    return (_HIDDEN, "", "", "sinopac", 15, 80, 100_000, *_NO_BADGE)
+
+
+@callback(
+    Output("modal-status", "children"),
+    Output("accounts-refresh-trigger", "data", allow_duplicate=True),
+    Input("modal-save-btn", "n_clicks"),
+    State("modal-account-id", "data"),
+    State("modal-broker-type", "value"),
+    State("modal-sandbox", "value"),
+    State("modal-demo", "value"),
+    State("modal-api-key", "value"),
+    State("modal-api-secret", "value"),
+    State("modal-password", "value"),
+    State("modal-guard-dd", "value"),
+    State("modal-guard-margin", "value"),
+    State("modal-guard-loss", "value"),
+    State("accounts-refresh-trigger", "data"),
+    prevent_initial_call=True,
+)
+def save_account(
+    n_clicks: int, account_id: str, broker: str,
+    sandbox: list, demo: list,
+    api_key: str, api_secret: str, password: str,
+    guard_dd: float, guard_margin: float, guard_loss: float,
+    refresh: int,
+) -> tuple:
+    from src.broker_gateway.types import AccountConfig
+    from src.dashboard.app import _GATEWAY_CLASSES
+    if not broker:
+        return html.Span("Select a broker type.", style={"color": th.RED}), refresh
+    if not account_id:
+        account_id = f"{broker}-main"
+    config = AccountConfig(
+        id=account_id,
+        broker=broker,
+        display_name=f"{broker.title()} ({account_id})",
+        gateway_class=_GATEWAY_CLASSES.get(broker, _GATEWAY_CLASSES["mock"]),
+        sandbox_mode=bool(sandbox),
+        demo_trading=bool(demo),
+        guards={
+            "max_drawdown_pct": float(guard_dd or 15),
+            "max_margin_pct": float(guard_margin or 80),
+            "max_daily_loss": float(guard_loss or 100_000),
+        },
+        strategies=[],
+    )
+    try:
+        _get_account_db().save_account(config)
+    except Exception as exc:
+        return html.Span(f"DB error: {exc}", style={"color": th.RED}), refresh
+    # Save credentials to GSM (best-effort, with timeout to prevent UI hang)
+    creds = {}
+    if api_key:
+        creds["api_key"] = api_key
+    if api_secret:
+        creds["api_secret"] = api_secret
+    if password:
+        creds["password"] = password
+    if creds:
+        try:
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+            from src.broker_gateway.registry import save_credentials
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(save_credentials, account_id, creds).result(timeout=5)
+        except FuturesTimeout:
+            return (
+                html.Span(f"Account saved. GSM credential write timed out — check GCP auth.", style={"color": th.GOLD}),
+                refresh + 1,
+            )
+        except Exception as exc:
+            return (
+                html.Span(f"Account saved. GSM credential write failed: {exc}", style={"color": th.GOLD}),
+                refresh + 1,
+            )
+    return html.Span(f"Saved {account_id}", style={"color": th.GREEN}), refresh + 1
+
+
+# ── Reconnect button ─────────────────────────────────────────────────────
+
+@callback(
+    Output("modal-status", "children", allow_duplicate=True),
+    Input("modal-reconnect-btn", "n_clicks"),
+    State("modal-account-id", "data"),
+    prevent_initial_call=True,
+)
+def reconnect_account(n_clicks: int, account_id: str) -> object:
+    if not n_clicks or not account_id:
+        return no_update
+    try:
+        registry = helpers.get_gateway_registry()
+        if registry is None:
+            return html.Span("War room not initialised yet — open the War Room tab first.", style={"color": th.GOLD})
+        from src.broker_gateway.account_db import AccountDB
+        config = AccountDB().load_account(account_id)
+        if not config:
+            return html.Span(f"Account '{account_id}' not found in DB.", style={"color": th.RED})
+        registry.hot_reload(config)
+        return html.Span(f"Reconnecting {account_id}…", style={"color": th.CYAN})
+    except Exception as exc:
+        return html.Span(f"Reconnect error: {exc}", style={"color": th.RED})
+
+
+# ── War Room ─────────────────────────────────────────────────────────────
+
+def _build_connection_badge(connected: bool, is_mock: bool = False) -> html.Span:
+    if is_mock:
+        label, bg = "MOCK", th.BLUE
+    elif connected:
+        label, bg = "LIVE", th.GREEN
+    else:
+        label, bg = "DISCONNECTED", "#6B4040"
+    return html.Span(label, style={
+        "fontSize": 7, "color": "#fff", "background": bg,
+        "padding": "1px 5px", "borderRadius": 3, "fontFamily": th.MONO,
+        "fontWeight": 600, "letterSpacing": "0.5px",
+    })
+
+
+def _build_account_overview_card(acct_id: str, info: dict, sessions_count: int) -> html.Div:
+    snap = info.get("snapshot")
+    config = info.get("config")
+    equity_curve: list = info.get("equity_curve", [])
+    name = config.display_name if config else acct_id
+    broker = config.broker if config else ""
+    is_mock = broker == "mock"
+    connected = bool(snap and snap.connected)
+    badge = _build_connection_badge(connected, is_mock)
+    eq_text = f"${snap.equity:,.0f}" if connected else "—"
+    eq_color = th.GREEN if connected else th.DIM
+    margin_pct = 0.0
+    if connected and snap and (snap.margin_used + snap.margin_available) > 0:
+        margin_pct = snap.margin_used / (snap.margin_used + snap.margin_available) * 100
+    margin_color = th.GREEN if margin_pct < 50 else (th.GOLD if margin_pct < 80 else th.RED)
+    # Daily PnL (vs first recorded equity today)
+    daily_pnl_div = html.Div()
+    if connected and snap and equity_curve:
+        today_open = equity_curve[0][1]
+        daily_pnl = snap.equity - today_open
+        pnl_color = th.GREEN if daily_pnl >= 0 else th.RED
+        daily_pnl_div = html.Div(
+            f"Day PnL  {daily_pnl:+,.0f}",
+            style={"fontSize": 9, "color": pnl_color, "fontFamily": th.MONO, "marginBottom": 6},
+        )
+    # Equity sparkline (if history available)
+    sparkline = html.Div()
+    if equity_curve and len(equity_curve) >= 2:
+        xs = [t.isoformat() for t, _ in equity_curve]
+        ys = [e for _, e in equity_curve]
+        line_color = th.GREEN if (ys[-1] >= ys[0]) else th.RED
+        spark_fig = go.Figure(layout={
+            **th.DARK_CHART_LAYOUT,
+            "margin": {"l": 0, "r": 0, "t": 0, "b": 0},
+            "xaxis": {"visible": False},
+            "yaxis": {"visible": False},
+            "plot_bgcolor": "rgba(0,0,0,0)",
+            "paper_bgcolor": "rgba(0,0,0,0)",
+        })
+        spark_fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="lines",
+            line=dict(color=line_color, width=1.5),
+            fill="tozeroy", fillcolor=f"rgba({int(line_color[1:3],16)},{int(line_color[3:5],16)},{int(line_color[5:7],16)},0.08)",
+        ))
+        sparkline = dcc.Graph(
+            figure=spark_fig,
+            config={"displayModeBar": False},
+            style={"height": 60, "marginTop": 6, "marginBottom": 4},
+        )
+    # Live positions inline
+    pos_items = []
+    if connected and snap and snap.positions:
+        for p in snap.positions[:4]:
+            pnl_color = th.GREEN if p.unrealized_pnl >= 0 else th.RED
+            pos_items.append(html.Div([
+                html.Span(f"{p.symbol} {p.side[:1].upper()}{p.quantity:.0f}",
+                          style={"color": th.MUTED, "fontSize": 9, "fontFamily": th.MONO}),
+                html.Span(f"${p.unrealized_pnl:+,.0f}",
+                          style={"color": pnl_color, "fontSize": 9, "fontFamily": th.MONO, "marginLeft": 8}),
+            ], style={"display": "flex", "justifyContent": "space-between", "marginBottom": 2}))
+        if len(snap.positions) > 4:
+            pos_items.append(html.Div(f"+ {len(snap.positions) - 4} more",
+                                      style={"color": th.DIM, "fontSize": 8, "fontFamily": th.MONO}))
+    elif not connected:
+        pos_items = [html.Div("Not connected", style={"color": th.DIM, "fontSize": 9, "fontFamily": th.MONO})]
+    else:
+        pos_items = [html.Div("No open positions", style={"color": th.DIM, "fontSize": 9, "fontFamily": th.MONO})]
+    return html.Div([
+        html.Div([
+            html.Span(name, style={"fontSize": 11, "fontFamily": th.MONO, "color": th.TEXT, "flex": 1}),
+            badge,
+        ], style={"display": "flex", "alignItems": "center", "marginBottom": 6}),
+        html.Div(eq_text, style={"fontSize": 22, "fontFamily": th.MONO, "color": eq_color,
+                                  "fontWeight": 700, "marginBottom": 2}),
+        daily_pnl_div,
+        html.Div([
+            html.Span("MARGIN", style={"fontSize": 7, "color": th.MUTED, "fontFamily": th.MONO, "letterSpacing": 1}),
+            html.Span(f"{margin_pct:.1f}%", style={"fontSize": 9, "color": margin_color,
+                                                     "fontFamily": th.MONO, "marginLeft": 6}),
+        ], style={"marginBottom": 4}),
+        sparkline,
+        html.Div(pos_items, style={
+            "borderTop": f"1px solid {th.CARD_BORDER}", "paddingTop": 8, "marginTop": 4,
+        }),
+        html.Div(f"{sessions_count} strategy session{'s' if sessions_count != 1 else ''}",
+                 style={"fontSize": 8, "color": th.DIM, "fontFamily": th.MONO, "marginTop": 8}),
+    ], style={
+        "background": th.CARD_BG, "border": f"1px solid {th.CARD_BORDER}",
+        "borderRadius": 6, "padding": 14, "minWidth": 240, "flex": "1 1 240px",
+    })
+
+
+@callback(
+    Output("warroom-account-overview", "children"),
+    Output("warroom-equity-section", "children"),
+    Output("warroom-sessions-grid", "children"),
+    Input("warroom-interval", "n_intervals"),
+    Input("trd-tabs", "value"),
+)
+def update_war_room(n_intervals: int, tab: str) -> tuple:
+    if tab != "trd-warroom":
+        return no_update, no_update, no_update
+    try:
+        data = helpers.get_war_room_data()
+    except Exception as exc:
+        return th.error_card(f"War room error: {exc}"), html.Div(), html.Div()
+
+    # Account overview cards
+    account_cards = []
+    for acct_id, info in data.get("accounts", {}).items():
+        sessions_count = len(data.get("sessions_by_account", {}).get(acct_id, []))
+        account_cards.append(_build_account_overview_card(acct_id, info, sessions_count))
+    if not account_cards:
+        account_cards = [th.info_msg("No accounts configured. Go to the Accounts tab to add one.")]
+    overview = html.Div([
+        th.section_label("ACCOUNT OVERVIEW"),
+        html.Div(account_cards, style={"display": "flex", "gap": 10, "flexWrap": "wrap"}),
+    ], style={"marginBottom": 20})
+
+    # Full equity curve chart (all accounts with history)
+    equity_section = html.Div()
+    accounts_with_history = {
+        aid: info for aid, info in data.get("accounts", {}).items()
+        if info.get("equity_curve") and len(info["equity_curve"]) >= 2
+    }
+    if accounts_with_history:
+        eq_fig = go.Figure(layout={
+            **th.DARK_CHART_LAYOUT,
+            "showlegend": True,
+            "legend": {"font": {"family": th.MONO, "size": 9, "color": th.DIM},
+                       "bgcolor": "rgba(0,0,0,0)", "bordercolor": "rgba(0,0,0,0)"},
+        })
+        palette = [th.GREEN, th.BLUE, th.CYAN, th.GOLD]
+        for idx, (aid, info) in enumerate(accounts_with_history.items()):
+            curve = info["equity_curve"]
+            xs = [t.isoformat() for t, _ in curve]
+            ys = [e for _, e in curve]
+            cfg = info.get("config")
+            label = cfg.display_name if cfg else aid
+            color = palette[idx % len(palette)]
+            eq_fig.add_trace(go.Scatter(
+                x=xs, y=ys, mode="lines", name=label,
+                line=dict(color=color, width=1.8),
+            ))
+        equity_section = html.Div([
+            th.section_label("EQUITY CURVE — 30 DAYS"),
+            th.dark_graph(eq_fig, height=220),
+        ], style={"marginBottom": 20})
+
+    # Session monitor cards
+    session_cards = []
+    for session in data.get("all_sessions", []):
+        snap = session.current_snapshot
+        strategy_label = session.strategy_slug.replace("_", " ").title()
+        status_color = th.GREEN if session.status == "active" else th.GOLD
+        if snap:
+            eq_fig = _line_fig(
+                list(range(10)),
+                [snap.equity] * 10,
+                th.GREEN,
+            )
+            stats = th.stat_row([
+                th.stat_card("EQUITY", f"${snap.equity:,.0f}", th.GREEN),
+                th.stat_card("UNREAL PnL", f"${snap.unrealized_pnl:+,.0f}",
+                             th.GREEN if snap.unrealized_pnl >= 0 else th.RED),
+                th.stat_card("DRAWDOWN", f"{snap.drawdown_pct:.1f}%",
+                             th.RED if snap.drawdown_pct > 5 else th.GOLD),
+                th.stat_card("TRADES", str(snap.trade_count), th.CYAN),
+            ])
+            positions_data = [
+                {"Symbol": p.symbol, "Side": p.side, "Qty": p.quantity,
+                 "Entry": f"{p.avg_entry_price:,.0f}", "PnL": f"${p.unrealized_pnl:+,.0f}"}
+                for p in snap.positions
+            ]
+            pos_table = _make_table(positions_data, ["Symbol", "Side", "Qty", "Entry", "PnL"]) if positions_data else html.Div(
+                "No positions", style={"fontSize": 9, "color": th.DIM, "fontFamily": th.MONO}
+            )
+        else:
+            eq_fig = go.Figure(layout=th.DARK_CHART_LAYOUT)
+            stats = html.Div("Waiting for data...", style={"fontSize": 9, "color": th.DIM, "fontFamily": th.MONO})
+            pos_table = html.Div()
+        session_cards.append(html.Div([
+            html.Div([
+                html.Span(f"{strategy_label} on {session.symbol}", style={
+                    "fontSize": 12, "fontFamily": th.MONO, "color": th.TEXT, "fontWeight": 500,
+                }),
+                html.Span(session.status.upper(), style={
+                    "fontSize": 8, "color": status_color, "fontFamily": th.MONO, "letterSpacing": 1,
+                }),
+            ], style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "marginBottom": 8}),
+            stats,
+            th.chart_card("EQUITY", th.dark_graph(eq_fig, height=140)),
+            th.chart_card("POSITIONS", pos_table),
+        ], style={
+            "background": th.CARD_BG, "border": f"1px solid {th.CARD_BORDER}",
+            "borderRadius": 5, "padding": 12,
+        }))
+    grid = html.Div(session_cards, style={
+        "display": "grid", "gridTemplateColumns": "repeat(auto-fill, minmax(400px, 1fr))",
+        "gap": 12,
+    }) if session_cards else html.Div()
+    return overview, equity_section, grid
+
+
+# ── Blotter ──────────────────────────────────────────────────────────────
+
+@callback(
+    Output("blotter-content", "children"),
+    Input("blotter-interval", "n_intervals"),
+    Input("trd-tabs", "value"),
+    Input("blotter-account-filter", "value"),
+    prevent_initial_call=True,
+)
+def update_blotter(n_intervals: int, tab: str, account_filter: str) -> object:
+    if tab != "trd-blotter":
+        return no_update
+    try:
+        data = helpers.get_war_room_data()
+    except Exception:
+        return th.info_msg("No data available.")
+    all_fills = []
+    for session in data.get("all_sessions", []):
+        if account_filter != "all" and session.account_id != account_filter:
+            continue
+        snap = session.current_snapshot
+        if not snap:
+            continue
+        for fill in data.get("accounts", {}).get(session.account_id, {}).get("snapshot", AccountSnapshot.disconnected()).recent_fills:
+            all_fills.append({
+                "Time": fill.timestamp.strftime("%H:%M:%S"),
+                "Account": session.account_id,
+                "Strategy": session.strategy_slug,
+                "Symbol": fill.symbol,
+                "Side": fill.side,
+                "Price": f"{fill.price:,.0f}",
+                "Qty": fill.quantity,
+                "Fee": f"${fill.fee:.0f}",
+            })
+    if not all_fills:
+        return th.info_msg("No recent fills across active sessions.")
+    return _make_table(
+        sorted(all_fills, key=lambda x: x["Time"], reverse=True),
+        ["Time", "Account", "Strategy", "Symbol", "Side", "Price", "Qty", "Fee"],
+    )
+
+
+# ── Risk Overview ────────────────────────────────────────────────────────
+
+@callback(
+    Output("risk-content", "children"),
+    Input("risk-interval", "n_intervals"),
+    Input("trd-tabs", "value"),
+    prevent_initial_call=True,
+)
+def update_risk_overview(n_intervals: int, tab: str) -> object:
+    if tab != "trd-risk":
+        return no_update
+    try:
+        data = helpers.get_war_room_data()
+    except Exception:
+        return th.info_msg("No data available.")
+    accounts = data.get("accounts", {})
+    sessions = data.get("all_sessions", [])
+    total_equity = sum(
+        info["snapshot"].equity for info in accounts.values()
+        if info.get("snapshot") and info["snapshot"].connected
+    )
+    total_margin = sum(
+        info["snapshot"].margin_used for info in accounts.values()
+        if info.get("snapshot") and info["snapshot"].connected
+    )
+    total_unrealized = sum(
+        s.current_snapshot.unrealized_pnl for s in sessions
+        if s.current_snapshot
+    )
+    worst_dd = max(
+        (s.current_snapshot.drawdown_pct for s in sessions if s.current_snapshot),
+        default=0.0,
+    )
+    # Margin utilization per account
+    margin_data = []
+    for acct_id, info in accounts.items():
+        snap = info.get("snapshot")
+        if snap and snap.connected and (snap.margin_used + snap.margin_available) > 0:
+            util = snap.margin_used / (snap.margin_used + snap.margin_available) * 100
+            color = th.GREEN if util < 50 else (th.GOLD if util < 80 else th.RED)
+            margin_data.append({"Account": acct_id, "Utilization": f"{util:.1f}%", "Status": "OK" if util < 80 else "WARNING"})
+    return html.Div([
+        th.stat_row([
+            th.stat_card("TOTAL EQUITY", f"${total_equity:,.0f}", th.GREEN if total_equity > 0 else th.DIM),
+            th.stat_card("TOTAL MARGIN", f"${total_margin:,.0f}", th.MUTED),
+            th.stat_card("WORST DRAWDOWN", f"{worst_dd:.1f}%", th.RED if worst_dd > 5 else th.GOLD),
+            th.stat_card("TOTAL UNREAL PnL", f"${total_unrealized:+,.0f}",
+                         th.GREEN if total_unrealized >= 0 else th.RED),
+        ]),
+        th.chart_card("MARGIN UTILIZATION", _make_table(
+            margin_data, ["Account", "Utilization", "Status"],
+        ) if margin_data else th.info_msg("No connected accounts.")),
+    ])

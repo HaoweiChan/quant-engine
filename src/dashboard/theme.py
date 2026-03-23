@@ -117,16 +117,142 @@ body {{ background: {BG}; color: {TEXT}; font-family: {SANS}; margin: 0; padding
 .dash-input-stepper svg {{ fill: {TEXT} !important; }}
 .tab-container {{ display: flex !important; flex-direction: row !important; justify-content: center; }}
 .tab {{ cursor: pointer; white-space: nowrap; }}
-input[type="number"], input[type="text"] {{
+input[type="number"], input[type="text"],
+input[type="number"]:focus, input[type="text"]:focus,
+input[type="password"], input[type="password"]:focus {{
     background-color: {INPUT_BG} !important; border: 1px solid {INPUT_BORDER} !important;
     border-radius: 3px !important; color: {TEXT} !important; font-family: {MONO} !important;
-    font-size: 11px !important; padding: 4px 6px !important; width: 100% !important; outline: none !important;
+    font-size: 11px !important; padding: 4px 6px !important; width: 100% !important;
+    outline: none !important; box-shadow: none !important;
 }}
 [id*="editor-file-item"]:hover {{ background: {INPUT_BG}; color: {TEXT} !important; }}
 .Select-input input {{ background: {INPUT_BG} !important; color: {TEXT} !important; }}
 .Select-input {{ background: {INPUT_BG} !important; }}
 input[type="search"] {{ background-color: {INPUT_BG} !important; color: {TEXT} !important; caret-color: {TEXT} !important; border: none !important; }}
 .dash-dropdown input {{ background-color: {INPUT_BG} !important; color: {TEXT} !important; caret-color: {TEXT} !important; }}
+/* Dash 4 — intercept every input inside any dropdown-ish container */
+input[role="combobox"],
+input[role="combobox"]:focus,
+input[role="combobox"]:focus-visible,
+input[role="combobox"]:active {{
+    background-color: {INPUT_BG} !important;
+    color: {TEXT} !important;
+    caret-color: {TEXT} !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    -webkit-appearance: none !important;
+}}
+/* Kill the white wrapper border that appears around the search box */
+div:has(> input[role="combobox"]) {{
+    background-color: {INPUT_BG} !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+}}
+/* The container one level up (search row with magnifier icon) */
+div:has(input[role="combobox"]) {{
+    background-color: {INPUT_BG} !important;
+    border: none !important;
+    border-bottom: 1px solid {INPUT_BORDER} !important;
+    outline: none !important;
+    box-shadow: none !important;
+}}
+/* Nuke any nested wrapper that inherits white from a parent */
+div:has(input[role="combobox"]) > * {{
+    background-color: {INPUT_BG} !important;
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+}}
+/* Dash 4 react-select search wrapper */
+div[class$="-Input"] input,
+div[class*="-Input"] input,
+div[class$="-input"] input,
+.css-1g6gooi input,
+.css-ackcql input {{
+    background: {INPUT_BG} !important;
+    color: {TEXT} !important;
+    caret-color: {TEXT} !important;
+}}
+/* Dash 4 dropdown container backgrounds */
+div[class$="-menu"],
+div[class*="-menu"],
+div[class*="menu"] {{
+    background-color: {SIDEBAR_BG} !important;
+    border: 1px solid {INPUT_BORDER} !important;
+    border-radius: 4px !important;
+}}
+div[class$="-option"],
+div[class*="-option"] {{
+    background-color: {SIDEBAR_BG} !important;
+    color: {TEXT} !important;
+    font-family: {MONO} !important;
+    font-size: 11px !important;
+    cursor: pointer;
+}}
+div[class$="-option"]:hover,
+div[class*="-option"]:hover,
+div[class*="option--is-focused"] {{
+    background-color: {INPUT_BG} !important;
+}}
+div[class*="option--is-selected"] {{
+    background-color: #253048 !important;
+}}
+div[class$="-ValueContainer"],
+div[class*="-ValueContainer"] {{
+    background-color: {INPUT_BG} !important;
+    border-radius: 4px !important;
+}}
+div[class$="-control"],
+div[class*="-control"] {{
+    background-color: {INPUT_BG} !important;
+    border-color: {INPUT_BORDER} !important;
+    border-radius: 4px !important;
+    box-shadow: none !important;
+    min-height: 28px !important;
+}}
+div[class$="-control"]:hover,
+div[class*="-control"]:hover {{
+    border-color: #4a4d5e !important;
+}}
+div[class$="-singleValue"],
+div[class*="-singleValue"] {{
+    color: {TEXT} !important;
+    font-family: {MONO} !important;
+    font-size: 11px !important;
+}}
+div[class$="-placeholder"],
+div[class*="-placeholder"] {{
+    color: {MUTED} !important;
+    font-family: {MONO} !important;
+    font-size: 11px !important;
+}}
+div[class$="-indicatorContainer"] svg,
+div[class*="-indicatorContainer"] svg {{
+    fill: {MUTED} !important;
+    width: 14px !important;
+    height: 14px !important;
+}}
+div[class$="-indicatorSeparator"],
+div[class*="-indicatorSeparator"] {{
+    background-color: {INPUT_BORDER} !important;
+}}
+/* Search icon inside dropdown */
+svg[class*="search"], svg[aria-label="search"],
+div:has(> input[role="combobox"]) ~ svg,
+div:has(input[role="combobox"]) svg {{
+    fill: {MUTED} !important;
+    color: {MUTED} !important;
+    opacity: 0.6;
+    width: 12px !important;
+    height: 12px !important;
+}}
+div[class$="-Input"],
+div[class*="-Input"] {{
+    background-color: {INPUT_BG} !important;
+    color: {TEXT} !important;
+}}
 input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus {{
     -webkit-box-shadow: 0 0 0 30px {INPUT_BG} inset !important;
     -webkit-text-fill-color: {TEXT} !important;
