@@ -16,7 +16,7 @@ _singleton: SecretManager | None = None
 
 
 class SecretManager:
-    """Fetches secrets from GSM with process-lifetime caching."""
+    """Read/write secrets from GSM with process-lifetime caching."""
 
     def __init__(self, project_id: str = "tx-collar-trader") -> None:
         self._project_id = project_id
@@ -50,6 +50,58 @@ class SecretManager:
         self._cache[cache_key] = value
         logger.info("secret_fetched", name=name)
         return value
+
+    def set(self, name: str, value: str) -> None:
+        """Create or update a secret in GSM. Creates the secret if it doesn't exist, then adds a new version."""
+        parent = f"projects/{self._project_id}"
+        secret_path = f"{parent}/secrets/{name}"
+        try:
+            if not self.exists(name):
+                self._client.create_secret(
+                    request={"parent": parent, "secret_id": name, "secret": {"replication": {"automatic": {}}}},
+                )
+                logger.info("secret_created", name=name)
+            self._client.add_secret_version(
+                request={"parent": secret_path, "payload": {"data": value.encode("utf-8")}},
+            )
+            self._cache[f"{name}:latest"] = value
+            logger.info("secret_version_added", name=name)
+        except PermissionDenied:
+            raise SecretAccessError(
+                name, self._project_id,
+                "permission denied — need roles/secretmanager.admin or secretmanager.secretCreator + secretVersionAdder",
+            ) from None
+        except Exception as exc:
+            raise SecretAccessError(name, self._project_id, str(exc)) from exc
+
+    def delete(self, name: str) -> None:
+        """Delete a secret from GSM entirely."""
+        secret_path = f"projects/{self._project_id}/secrets/{name}"
+        try:
+            self._client.delete_secret(request={"name": secret_path})
+            cache_keys = [k for k in self._cache if k.startswith(f"{name}:")]
+            for k in cache_keys:
+                del self._cache[k]
+            logger.info("secret_deleted", name=name)
+        except NotFound:
+            pass
+        except PermissionDenied:
+            raise SecretAccessError(
+                name, self._project_id, "permission denied — need roles/secretmanager.admin",
+            ) from None
+        except Exception as exc:
+            raise SecretAccessError(name, self._project_id, str(exc)) from exc
+
+    def exists(self, name: str) -> bool:
+        """Check if a secret exists in GSM (does not fetch the value)."""
+        secret_path = f"projects/{self._project_id}/secrets/{name}"
+        try:
+            self._client.get_secret(request={"name": secret_path})
+            return True
+        except NotFound:
+            return False
+        except Exception:
+            return False
 
     def get_batch(self, names: list[str]) -> dict[str, str]:
         """Fetch multiple secrets by GSM secret IDs."""
