@@ -27,6 +27,10 @@ class BaseAdapter(ABC):
     def translate_lots(
         self, abstract_lots: list[tuple[str, float]]
     ) -> list[tuple[str, float]]: ...
+
+    def account_info(self) -> dict[str, Any] | None:
+        """Return broker-specific account metadata. Override in subclass."""
+        return None
 ```
 
 #### Scenario: All methods required
@@ -37,8 +41,14 @@ class BaseAdapter(ABC):
 - **WHEN** an adapter module is loaded
 - **THEN** it SHALL only import from `core.types` — never from `position_engine`, `prediction/`, or `execution/`
 
+#### Scenario: Default implementation returns None
+- **WHEN** `account_info()` is called on a `BaseAdapter` subclass that does not override it
+- **THEN** it SHALL return `None`
+
 ### Requirement: TaifexAdapter
 The system SHALL provide a `TaifexAdapter` for TW Futures (TAIFEX) via Sinopac (shioaji). All contract specs, margins, fees, and trading hours SHALL be loaded from adapter configuration (TOML), not hardcoded in source. **Margin values SHALL additionally be resolvable from the database (latest MarginSnapshot), with static TOML config as fallback.**
+
+The `TaifexAdapter` SHALL also implement `account_info()` returning TAIFEX-specific metadata, and SHALL provide a `get_point_value(symbol: str) -> float` method for broker gateway P&L calculations.
 
 #### Scenario: Contract specs from config
 - **WHEN** `get_contract_specs()` is called for any supported symbol
@@ -71,6 +81,22 @@ The system SHALL provide a `TaifexAdapter` for TW Futures (TAIFEX) via Sinopac (
 #### Scenario: Feature plugin registration
 - **WHEN** TaifexAdapter is constructed
 - **THEN** it SHALL register a TAIFEX feature plugin with the Feature Store for computing market-specific features (institutional net position, P/C ratio, volatility index, days to settlement, margin adjustment events)
+
+#### Scenario: TaifexAdapter returns TAIFEX account info
+- **WHEN** `account_info()` is called on `TaifexAdapter`
+- **THEN** it SHALL return a dict with keys: `exchange` ("TAIFEX"), `currency` ("TWD"), `session_type` ("futures"), and `contract_multipliers` mapping contract symbols to their point values
+
+#### Scenario: TX contract point value
+- **WHEN** `get_point_value("TX")` is called
+- **THEN** it SHALL return `200.0` (TWD 200 per index point for TAIEX futures)
+
+#### Scenario: MTX contract point value
+- **WHEN** `get_point_value("MTX")` is called
+- **THEN** it SHALL return `50.0` (TWD 50 per index point for Mini-TAIEX)
+
+#### Scenario: Unknown symbol returns default
+- **WHEN** `get_point_value("UNKNOWN")` is called
+- **THEN** it SHALL return `1.0` as a safe default and log a warning
 
 ### Requirement: CryptoAdapter
 The system SHALL provide a `CryptoAdapter` for crypto perpetuals via Binance (python-binance). (Phase 3)

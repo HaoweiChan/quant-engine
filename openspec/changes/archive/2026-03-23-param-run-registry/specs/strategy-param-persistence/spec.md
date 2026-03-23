@@ -1,8 +1,4 @@
-## Purpose
-
-Persist optimized strategy parameters as TOML files under `src/strategies/configs/`, with load/save helpers for the dashboard Optimizer and other callers.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Save optimized params as TOML config
 The dashboard SHALL provide a "Save as Default Params" button in the Optimizer results view that writes the best parameter set to the parameter registry database via `ParamRegistry.save_run()` and activates the best candidate. The existing `save_strategy_params()` function SHALL delegate to `ParamRegistry` for the primary write and additionally write a TOML file at `src/strategies/configs/<strategy_slug>.toml` for backward compatibility.
@@ -43,14 +39,3 @@ def load_strategy_params(name: str) -> dict[str, Any] | None:
 #### Scenario: TOML format is human-readable
 - **WHEN** the TOML config file is opened in a text editor
 - **THEN** it SHALL contain a `[params]` section with one key-value pair per parameter, with inline comments showing the optimization objective and IS metric value
-
-### Requirement: Per-strategy config files replace default.toml
-The `configs/default.toml` file SHALL be replaced by per-strategy files using the convention `configs/<slug>.toml`. The pyramid strategy config SHALL be stored in `configs/pyramid.toml`.
-
-#### Scenario: Pyramid config in its own file
-- **WHEN** `load_strategy_params("pyramid")` is called
-- **THEN** it SHALL read from `src/strategies/configs/pyramid.toml`
-
-#### Scenario: Legacy default.toml is removed
-- **WHEN** the migration is complete
-- **THEN** `src/strategies/configs/default.toml` SHALL NOT exist

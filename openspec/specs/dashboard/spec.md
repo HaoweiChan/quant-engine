@@ -1,6 +1,6 @@
 ## Purpose
 
-A Dash-based monitoring and analysis dashboard for the quant engine. Organized into four lifecycle-ordered primary tabs — Data Hub, Strategy, Backtest, Trading — with the Strategy tab containing Code Editor, Optimizer, and Monte Carlo sub-views, and sub-navigation on Trading. Renders dark-themed charts, stat cards, and data tables for market data browsing/export, in-browser strategy editing, backtesting, parameter grid search, Monte Carlo simulation, live/paper trading, and risk monitoring.
+A FastAPI-backed, React monitoring and analysis dashboard for the quant engine. Organized into four lifecycle-ordered primary tabs — Data Hub, Strategy, Backtest, Trading — with the Strategy tab containing Code Editor, Optimizer, and Monte Carlo sub-views, and sub-navigation on Trading. Uses TradingView Lightweight Charts and Recharts for visuals, React tables for tabular data, and shadcn/ui for selects. Renders the dark terminal theme (navy surfaces, stat cards) for market data browsing/export, in-browser strategy editing, backtesting, parameter grid search, Monte Carlo simulation, live trading via War Room, and risk monitoring.
 
 ## Requirements
 
@@ -16,7 +16,7 @@ The dashboard SHALL render on a deep navy background (`#07071a`) with a darker s
 - **THEN** its paper and plot background SHALL be `#0a0a22` with grid lines `#111130`
 
 ### Requirement: Typography from Google Fonts
-The dashboard SHALL load IBM Plex Serif (headings), IBM Plex Sans (body text), and JetBrains Mono (all numeric values, labels, stat cards) from Google Fonts via `app.index_string`. Fonts SHALL fall back to system monospace / sans-serif if Google Fonts is unreachable.
+The dashboard SHALL load IBM Plex Serif (headings), IBM Plex Sans (body text), and JetBrains Mono (all numeric values, labels, stat cards) from Google Fonts (e.g., in the React app `index.html` or equivalent). Fonts SHALL fall back to system monospace / sans-serif if Google Fonts is unreachable.
 
 #### Scenario: Stat card values use monospace font
 - **WHEN** a stat card is displayed
@@ -27,11 +27,11 @@ The dashboard SHALL load IBM Plex Serif (headings), IBM Plex Sans (body text), a
 - **THEN** the title "Quant Engine Dashboard" SHALL use IBM Plex Serif at 17px weight 600
 
 ### Requirement: Tab navigation
-The dashboard SHALL provide a horizontal primary tab bar with four tabs in lifecycle order: Data Hub, Strategy, Backtest, Trading. The active tab SHALL be indicated by a `#5a8af2` bottom border. Inactive tabs SHALL use `#445` text color. The Strategy tab SHALL contain a secondary tab bar with three sub-tabs: Code Editor, Optimizer, Monte Carlo. The Trading tab SHALL contain a secondary tab bar for sub-navigation. Secondary tabs SHALL use a lighter visual weight (9px font, `#6B7280` text, subtler border) to differentiate from primary navigation. The Optimization primary tab is removed.
+The dashboard SHALL provide a horizontal primary tab bar with four tabs in lifecycle order: Data Hub, Strategy, Backtest, Trading. The active tab SHALL be indicated by a `#5a8af2` bottom border. Inactive tabs SHALL use `#445` text color. The Strategy tab SHALL contain a secondary tab bar with three sub-tabs: Code Editor, Optimizer, Monte Carlo. The Trading tab SHALL contain a secondary tab bar with four sub-tabs: Accounts, War Room, Blotter, Risk. Secondary tabs SHALL use a lighter visual weight (9px font, `#6B7280` text, subtler border) to differentiate from primary navigation. Tab switching SHALL be handled entirely client-side via React Router or Zustand state with zero server round-trips.
 
 #### Scenario: Tab switches page content
 - **WHEN** the user clicks a primary tab
-- **THEN** the main content area SHALL update to show that tab's content without a full page reload
+- **THEN** the main content area SHALL update to show that tab's content via client-side routing without any network request
 
 #### Scenario: Default tab on load
 - **WHEN** the dashboard first loads
@@ -39,28 +39,17 @@ The dashboard SHALL provide a horizontal primary tab bar with four tabs in lifec
 
 #### Scenario: Sub-tab navigation within Strategy
 - **WHEN** the user clicks the Strategy primary tab
-- **THEN** a secondary tab bar SHALL appear with three sub-tabs: Code Editor, Optimizer, Monte Carlo
+- **THEN** a secondary tab bar SHALL appear with sub-tabs: Code Editor, Optimizer, Monte Carlo
 - **THEN** Code Editor SHALL be the default active sub-tab
 
 #### Scenario: Sub-tab navigation within Trading
 - **WHEN** the user clicks the Trading primary tab
-- **THEN** a secondary tab bar SHALL appear with two sub-tabs: Live/Paper and Risk Monitor
-- **THEN** Live/Paper SHALL be the default active sub-tab
+- **THEN** a secondary tab bar SHALL appear with four sub-tabs: Accounts, War Room, Blotter, Risk
+- **THEN** Accounts SHALL be the default active sub-tab
 
 #### Scenario: Sub-tab preserves state on primary tab switch
 - **WHEN** the user selects the Monte Carlo sub-tab under Strategy, switches to Backtest, then switches back to Strategy
 - **THEN** the Monte Carlo sub-tab SHALL still be selected
-
-### Requirement: Dropdown search bar dark theme
-All Dash dropdown components with search enabled SHALL render the search input with the dashboard's dark background (`INPUT_BG`), dark text color (`TEXT`), and a dark `color-scheme` to suppress browser autofill light backgrounds.
-
-#### Scenario: Search bar matches dark theme
-- **WHEN** the user opens a dropdown with a search input
-- **THEN** the search input background SHALL be `INPUT_BG` (#1E2130), text color SHALL be `TEXT` (#E0E0E0), and caret SHALL be visible against the dark background
-
-#### Scenario: Browser autofill does not flash white
-- **WHEN** the browser applies autofill styling to a dropdown search input
-- **THEN** the background SHALL remain dark due to `color-scheme: dark` on the root element
 
 ### Requirement: Strategy selector in Optimizer
 The Optimizer sub-tab (under Strategy) SHALL include a "Strategy" dropdown in the sidebar that lists all discoverable strategy factories from `src/strategies/`. Each option SHALL display the strategy's human-readable name. Selecting a strategy SHALL load its param grid definition into the sidebar inputs.
@@ -78,18 +67,20 @@ The Optimizer sub-tab (under Strategy) SHALL include a "Strategy" dropdown in th
 - **THEN** that strategy SHALL be pre-selected in the dropdown
 
 ### Requirement: Save optimized params from results
-The Optimizer results view SHALL include a "Save as Default Params" button that writes the best parameter set to a TOML config file. A success or error message SHALL appear after the save.
+The Optimizer results view SHALL save the full optimization result to the param registry database via the API, replacing the TOML-only save. A success or error message SHALL appear after the save.
 
 #### Scenario: Save button appears after optimization
 - **WHEN** optimization results are displayed
 - **THEN** a "Save as Default Params" button SHALL appear in the best-params section
 
-#### Scenario: Save confirms success
+#### Scenario: Save persists to registry
 - **WHEN** the user clicks "Save as Default Params"
-- **THEN** the TOML file SHALL be written and a green "Saved to configs/<name>.toml" message SHALL appear
+- **THEN** the full optimization result SHALL be persisted to the param registry via the API
+- **AND** the best candidate SHALL be activated
+- **AND** a green success message SHALL appear with the run ID and candidate count
 
 #### Scenario: Save shows error on failure
-- **WHEN** the TOML write fails (e.g., permission error)
+- **WHEN** the save fails (e.g., database error)
 - **THEN** a red error message SHALL appear with the failure reason
 
 ### Requirement: Stat card component
@@ -103,45 +94,19 @@ Every page that displays metrics SHALL render them as stat cards arranged in a h
 - **WHEN** a stat card displays a negative P&L value
 - **THEN** the value color SHALL be `#ff5252`
 
-### Requirement: Dark Plotly charts
-All charts SHALL use a shared Plotly layout base with: `paper_bgcolor` and `plot_bgcolor` set to `#0a0a22`, grid lines `#111130`, axis lines `#1a1a30`, tick font JetBrains Mono at 8px `#444`. Line charts SHALL use `#5a8af2` for price and `#69f0ae` for equity/return curves. Area charts for drawdown SHALL use a red fill `rgba(255,82,82,0.15)`. Bar charts for distribution SHALL color bars green for positive bins and red for negative bins.
-
-#### Scenario: Equity curve chart appearance
-- **WHEN** the equity curve chart renders on Live/Paper or Backtest
-- **THEN** the line stroke SHALL be `#69f0ae` and background SHALL be `#0a0a22`
-
-#### Scenario: Drawdown area chart appearance
-- **WHEN** the drawdown chart renders
-- **THEN** the filled area SHALL use a red-tinted gradient and values SHALL be negative percentages
-
-#### Scenario: Return distribution bar chart
-- **WHEN** the return distribution histogram renders
-- **THEN** bins with midpoint >= 0 SHALL be `#1a5a3a` and bins with midpoint < 0 SHALL be `#5a1a1a`
-
-### Requirement: Dark data tables
-All tabular data SHALL be rendered with `dash_table.DataTable` using dark styling: header background `#131332`, header text `#556` at 9px, cell background `#0a0a22`, cell text `#ccc` at 9px, border color `#1e1e40`, JetBrains Mono font. Tables SHALL fill container width and hide the index column.
-
-#### Scenario: Trade log table renders with dark theme
-- **WHEN** the trade log table is displayed
-- **THEN** rows SHALL alternate between `#0a0a22` and `#0e0e28` backgrounds with no light-colored borders
-
-#### Scenario: Table is scrollable for large datasets
-- **WHEN** a table has more rows than the visible area
-- **THEN** the table SHALL scroll vertically within a fixed-height container
-
 ### Requirement: Left sidebar for page controls
-The dashboard SHALL have a left sidebar of 234px width with `#09091e` background. The sidebar SHALL contain page-specific controls (date pickers, dropdowns, number inputs, action buttons). Sidebar section labels SHALL be uppercase at 8px JetBrains Mono `#445` with `letter-spacing: 1.5px`. Input fields SHALL have `#12122a` background, `#222248` border, `#ccc` text, and JetBrains Mono font.
+The dashboard SHALL have a left sidebar of 234px width with `#09091e` background. The sidebar SHALL contain page-specific controls (date pickers, dropdowns, number inputs, action buttons). Sidebar section labels SHALL be uppercase at 8px JetBrains Mono `#445` with `letter-spacing: 1.5px`. Input fields SHALL have `#12122a` background, `#222248` border, `#ccc` text, and JetBrains Mono font. All sidebar control interactions that only affect local display state (filter, sort, tab selection) SHALL execute client-side with zero server round-trips.
 
 #### Scenario: Sidebar controls update main content
-- **WHEN** the user changes a control in the sidebar (e.g., adjusts Stop ATR Mult)
-- **THEN** the corresponding chart or table in the main area SHALL update reactively via Dash callback
+- **WHEN** the user changes a control in the sidebar
+- **THEN** the corresponding chart or table in the main area SHALL update reactively — via local state for display-only changes, or via API call for data-fetching changes
 
 #### Scenario: Sidebar is visible on all pages
 - **WHEN** any tab is active
 - **THEN** the left sidebar SHALL remain visible at 234px width
 
 ### Requirement: Data Hub page
-The Data Hub page SHALL consolidate market data browsing, CSV export, and Sinopac crawling into a single view. The sidebar SHALL contain: a contract dropdown (showing TAIFEX futures with display name and description), timeframe selector (1 min / 5 min / 15 min / 1 hour / 1 day), date range inputs (From/To), a "Preview & Download" button for CSV export, and a "Crawl from Sinopac" section with crawl contract/date-range inputs and a "Start Crawl" button. The main area SHALL display: a database coverage summary, 5 stat cards (First Bar, Last Bar, Latest Close, Period Return, Avg Volume), a price close line chart, a High/Low dual-line chart, a Volume bar chart, a raw data table (last 100 bars), and export preview/download sections.
+The Data Hub page SHALL consolidate market data browsing, CSV export, and Sinopac crawling into a single view. The sidebar SHALL contain: a contract dropdown (showing TAIFEX futures with display name and description), timeframe selector (1 min / 5 min / 15 min / 1 hour / 1 day), date range inputs (From/To), a "Load Data" button, a dynamic indicator management section with "Add Indicator" capability for overlay indicators, and action buttons (Export CSV, Crawl Data). The main area SHALL display: a database coverage summary, 5 stat cards (First Bar, Last Bar, Latest Close, Period Return, Avg Volume), a synchronized chart stack consisting of a primary OHLC pane (no volume) with overlay indicators and an always-visible secondary chart pane with a dropdown indicator selector (Volume by default) with inline parameter editing, and a raw data table (last 100 bars).
 
 #### Scenario: No database file present
 - **WHEN** `taifex_data.db` does not exist
@@ -149,37 +114,51 @@ The Data Hub page SHALL consolidate market data browsing, CSV export, and Sinopa
 
 #### Scenario: Data loads and charts render
 - **WHEN** valid contract/timeframe/date range is selected and data exists
-- **THEN** all charts SHALL render with the dark Plotly theme and stat cards SHALL populate
-
-#### Scenario: Export preview and download
-- **WHEN** the user clicks "Preview & Download"
-- **THEN** the main area SHALL show a close preview chart, bar count stats, a sample data table (last 50 bars), and a download button for the CSV file
-
-#### Scenario: Crawl progress display
-- **WHEN** the user clicks "Start Crawl"
-- **THEN** a crawl console SHALL appear in the main area showing real-time progress, status, and log output
+- **THEN** the chart stack SHALL render the primary OHLC pane and any active indicator panes, all with synchronized time scales
 
 #### Scenario: Coverage summary always visible
 - **WHEN** the Data Hub page loads
 - **THEN** the database coverage summary SHALL be visible at the top of the main area
 
-### Requirement: Live / Paper Trading page
-The Live/Paper page (sub-tab under Trading) SHALL display: 4 stat cards (Equity, Unrealized PnL, Drawdown, Engine Mode), an equity curve chart, a current positions table, a current signal JSON display, and a recent trades table. The page SHALL auto-refresh on a `dcc.Interval` every 30 seconds (using mock data in dev mode).
+#### Scenario: Adding an overlay indicator from sidebar
+- **WHEN** the user clicks "Add Indicator" and selects "SMA"
+- **THEN** an SMA entry SHALL appear in the sidebar indicator list and the SMA line SHALL render on the primary OHLC pane
 
-#### Scenario: Equity metric shows delta
-- **WHEN** the Live/Paper page renders
-- **THEN** the Equity stat card SHALL show the current equity value and the day-over-day change as a sub-label
+#### Scenario: Adding a pane indicator from sidebar
+- **WHEN** the user clicks "Add Indicator" and selects "RSI"
+- **THEN** an RSI entry SHALL appear in the sidebar indicator list and a new RSI pane SHALL appear below the primary pane
 
-#### Scenario: Engine mode badge
-- **WHEN** the Engine Mode stat card renders
-- **THEN** its color SHALL be `#4fc3f7` to indicate informational status
+#### Scenario: Removing an indicator from sidebar
+- **WHEN** the user clicks the remove button next to an active indicator in the sidebar
+- **THEN** that indicator SHALL be removed from the chart (overlay removed from price pane, or pane destroyed)
+
+#### Scenario: Editing indicator parameters
+- **WHEN** the user clicks the edit control on an active SMA indicator and changes the period from 20 to 50
+- **THEN** the SMA overlay on the price pane SHALL re-compute and re-render with period 50
+
+#### Scenario: Export preview and download
+- **WHEN** the user clicks "Export CSV"
+- **THEN** a CSV file with all loaded bar data SHALL be downloaded
+
+#### Scenario: Crawl progress display
+- **WHEN** the user clicks "Crawl Data"
+- **THEN** a crawl status indicator SHALL appear in the sidebar showing progress and status
 
 ### Requirement: Backtest page
-The Backtest page SHALL expose position engine settings in the sidebar (Max Pyramid Levels, Stop ATR Mult, Trail ATR Mult, Add Trigger ATR, Margin Limit, Kelly Fraction, Entry Conf Threshold, Max Loss, Re-Entry Strategy). It SHALL display 5 performance metric stat cards (Sharpe, Max Drawdown, Win Rate, Total Trades, Total PnL), an equity curve chart, a drawdown area chart, a return distribution histogram, and a trade log table.
+The Backtest page SHALL load the active optimized parameters from the param registry as sidebar defaults when a strategy is selected. It SHALL expose position engine settings in the sidebar (Max Pyramid Levels, Stop ATR Mult, Trail ATR Mult, Add Trigger ATR, Margin Limit, Kelly Fraction, Entry Conf Threshold, Max Loss, Re-Entry Strategy). It SHALL display 5 performance metric stat cards (Sharpe, Max Drawdown, Win Rate, Total Trades, Total PnL), an equity curve chart, a drawdown area chart, a return distribution histogram, and a trade log table. The backtest SHALL be triggered via `POST /api/backtest/run`. Progress SHALL be displayed via loading indicator or WebSocket streaming.
+
+#### Scenario: Sidebar loads optimized params
+- **WHEN** the user selects a strategy on the Backtest page
+- **THEN** the sidebar parameter inputs SHALL be populated with the active optimized params from the registry
+- **AND** if no optimized params exist, it SHALL fall back to PARAM_SCHEMA defaults from `GET /api/strategies`
+
+#### Scenario: Optimized params indicator
+- **WHEN** the Backtest sidebar displays params loaded from the registry
+- **THEN** a visual indicator (label or badge) SHALL show that the params are from an optimization run, including the run date and objective
 
 #### Scenario: Run Backtest button
 - **WHEN** the user clicks "Run Backtest"
-- **THEN** the charts and metrics SHALL update based on the current sidebar parameter values
+- **THEN** the frontend SHALL POST parameters to the API and the charts and metrics SHALL update based on the current sidebar parameter values
 
 #### Scenario: Total PnL colored by sign
 - **WHEN** total PnL is positive
@@ -208,38 +187,56 @@ The Monte Carlo page (sub-tab under Strategy) SHALL expose Number of Paths (100�
 - **THEN** bins with positive midpoints SHALL be `#1a5a3a` and negative bins SHALL be `#5a1a1a`
 
 ### Requirement: Strategy tab structure
-The Strategy primary tab SHALL contain a secondary `dcc.Tabs` bar with three sub-tabs: Code Editor, Optimizer, and Monte Carlo. The Optimizer sub-tab SHALL host Grid Search; each of Optimizer and Monte Carlo SHALL render its own sidebar and main content layout. The Code Editor sub-tab SHALL render the embedded strategy file editor. The secondary tab bar SHALL appear below the primary tab bar with visually lighter styling.
+The Strategy primary tab SHALL contain sub-tabs: Code Editor, Optimizer, and Monte Carlo. Each sub-tab SHALL render its own sidebar and main content. The Code Editor SHALL use a browser-based code editor component (Monaco or CodeMirror). The Optimizer and Monte Carlo SHALL fetch data via API and render results client-side.
 
 #### Scenario: Code Editor sub-tab content
 - **WHEN** the Code Editor sub-tab is active
-- **THEN** the page SHALL display the full code editor interface (file browser sidebar, Ace editor, validation panel) with its own sidebar
+- **THEN** the page SHALL display a file browser sidebar, a code editor component, and a validation panel
 
-#### Scenario: Grid Search sub-tab content
+#### Scenario: Optimizer sub-tab content
 - **WHEN** the Optimizer sub-tab is active
-- **THEN** the page SHALL display the full Grid Search interface (axis parameter selectors, range controls, heatmap, results table) with its own sidebar
+- **THEN** the page SHALL display param grid inputs, heatmap visualization, IS/OOS equity curves, and top-10 results table
 
 #### Scenario: Monte Carlo sub-tab content
 - **WHEN** the Monte Carlo sub-tab is active
-- **THEN** the page SHALL display the full Monte Carlo interface (path count, simulation days, scenario selector, simulation paths chart, distribution, percentile table) with its own sidebar
+- **THEN** the page SHALL display path simulation charts, PnL distribution, and percentile tables
 
 ### Requirement: Trading tab structure
-The Trading primary tab SHALL contain a secondary `dcc.Tabs` bar with two sub-tabs: Live/Paper and Risk Monitor. Each sub-tab SHALL render its own sidebar and main content layout. The secondary tab bar SHALL appear below the primary tab bar with visually lighter styling.
+The Trading primary tab SHALL contain sub-tabs: Accounts, War Room, Blotter, and Risk. The War Room SHALL receive real-time updates via WebSocket push instead of `dcc.Interval` polling. The Blotter and Risk sub-tabs SHALL refresh data via API polling or WebSocket as appropriate.
 
-#### Scenario: Live/Paper sub-tab content
-- **WHEN** the Live/Paper sub-tab is active
-- **THEN** the page SHALL display the full live/paper trading interface (equity, positions, signals, trades) with auto-refresh
+#### Scenario: Accounts sub-tab content
+- **WHEN** the Accounts sub-tab is active
+- **THEN** the page SHALL display an account table, add account flow, and detail modal for credentials and guards
 
-#### Scenario: Risk Monitor sub-tab content
-- **WHEN** the Risk Monitor sub-tab is active
-- **THEN** the page SHALL display the full risk monitoring interface (margin ratio, drawdown, thresholds, alert history)
+#### Scenario: War Room sub-tab content
+- **WHEN** the War Room sub-tab is active
+- **THEN** the page SHALL display account overview cards, equity sparklines, and strategy session monitors updated in real-time via WebSocket
 
-### Requirement: Risk Monitor page
-The Risk Monitor page (sub-tab under Trading) SHALL display 4 stat cards (Margin Ratio, Drawdown, Max Loss Limit, Engine Mode), a drawdown over time area chart, a margin ratio history line chart with threshold reference line at 30%, a risk thresholds table, and an alert history table.
+#### Scenario: Blotter sub-tab content
+- **WHEN** the Blotter sub-tab is active
+- **THEN** the page SHALL display a unified fill feed table with filter controls
 
-#### Scenario: Margin ratio threshold reference line
-- **WHEN** the margin ratio chart renders
-- **THEN** a dashed reference line SHALL appear at y=0.30 in `#ff5252` color
+#### Scenario: Risk sub-tab content
+- **WHEN** the Risk sub-tab is active
+- **THEN** the page SHALL display aggregated risk metrics (margin, drawdown, alerts) updated via WebSocket or API polling
 
-#### Scenario: Alert action color coding
-- **WHEN** the alert history table renders
-- **THEN** rows with Action "CLOSE_ALL" or "REDUCE_HALF" SHALL have a red-tinted cell background; "NORMAL" rows SHALL have green-tinted
+### Requirement: Active params API endpoints
+The dashboard API SHALL expose endpoints for reading and managing active optimized parameters from the param registry.
+
+#### Scenario: Get active params
+- **WHEN** `GET /api/params/active/{strategy}` is called
+- **THEN** it SHALL return the currently active candidate's params, label, run metadata, and `activated_at` timestamp
+- **AND** if no active candidate exists, it SHALL return PARAM_SCHEMA defaults with `"source": "defaults"`
+
+#### Scenario: Get run history
+- **WHEN** `GET /api/params/runs/{strategy}` is called
+- **THEN** it SHALL return a list of past optimization runs with `run_id`, `run_at`, `objective`, `best_params`, best metrics summary, `tag`, and candidate count
+
+#### Scenario: Activate a candidate
+- **WHEN** `POST /api/params/activate/{candidate_id}` is called
+- **THEN** the specified candidate SHALL become active for its strategy
+- **AND** the response SHALL confirm the activation with the candidate's params and strategy name
+
+#### Scenario: Invalid candidate ID
+- **WHEN** `POST /api/params/activate/{candidate_id}` is called with a non-existent ID
+- **THEN** the API SHALL return HTTP 404 with an error message
