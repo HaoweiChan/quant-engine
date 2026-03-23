@@ -1,0 +1,136 @@
+"""SQLite persistence for session and account equity snapshots."""
+from __future__ import annotations
+
+import sqlite3
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from src.trading_session.session import SessionSnapshot
+
+_DB_PATH = Path(__file__).resolve().parent.parent.parent / "trading.db"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS session_snapshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT NOT NULL,
+    timestamp     TEXT NOT NULL,
+    equity        REAL NOT NULL,
+    unrealized_pnl REAL NOT NULL DEFAULT 0,
+    realized_pnl  REAL NOT NULL DEFAULT 0,
+    drawdown_pct  REAL NOT NULL DEFAULT 0,
+    peak_equity   REAL NOT NULL DEFAULT 0,
+    trade_count   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_session_ts ON session_snapshots(session_id, timestamp);
+CREATE TABLE IF NOT EXISTS account_equity_history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id  TEXT NOT NULL,
+    timestamp   TEXT NOT NULL,
+    equity      REAL NOT NULL,
+    margin_used REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_acct_equity_ts ON account_equity_history(account_id, timestamp);
+"""
+
+
+class SnapshotStore:
+    """Read/write session snapshots to trading.db."""
+
+    def __init__(self, db_path: Path | None = None) -> None:
+        self._db_path = db_path or _DB_PATH
+        self._ensure_schema()
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_schema(self) -> None:
+        with self._conn() as conn:
+            conn.executescript(_SCHEMA)
+
+    def write_snapshot(self, session_id: str, snap: SessionSnapshot) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO session_snapshots "
+                "(session_id, timestamp, equity, unrealized_pnl, realized_pnl, drawdown_pct, peak_equity, trade_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, snap.timestamp.isoformat(), snap.equity, snap.unrealized_pnl,
+                 snap.realized_pnl, snap.drawdown_pct, snap.peak_equity, snap.trade_count),
+            )
+
+    def get_equity_curve(self, session_id: str, days: int = 30) -> list[tuple[datetime, float]]:
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT timestamp, equity FROM session_snapshots "
+                "WHERE session_id = ? AND timestamp >= ? ORDER BY timestamp",
+                (session_id, cutoff),
+            ).fetchall()
+        return [(datetime.fromisoformat(r["timestamp"]), r["equity"]) for r in rows]
+
+    def get_latest_snapshot(self, session_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM session_snapshots WHERE session_id = ? ORDER BY timestamp DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+
+class AccountEquityStore:
+    """Records and retrieves per-account equity snapshots over time."""
+
+    # Minimum seconds between consecutive writes for the same account (throttle)
+    _MIN_INTERVAL_SECS: int = 60
+
+    def __init__(self, db_path: Path | None = None) -> None:
+        self._db_path = db_path or _DB_PATH
+        self._last_write: dict[str, float] = {}
+        self._ensure_schema()
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_schema(self) -> None:
+        with self._conn() as conn:
+            conn.executescript(_SCHEMA)
+
+    def record(self, account_id: str, equity: float, margin_used: float = 0.0) -> None:
+        """Write an equity data point, throttled to once per minute per account."""
+        import time
+        now = time.monotonic()
+        if now - self._last_write.get(account_id, 0.0) < self._MIN_INTERVAL_SECS:
+            return
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO account_equity_history (account_id, timestamp, equity, margin_used) "
+                "VALUES (?, ?, ?, ?)",
+                (account_id, datetime.now().isoformat(), equity, margin_used),
+            )
+        self._last_write[account_id] = now
+
+    def get_equity_curve(
+        self, account_id: str, days: int = 30
+    ) -> list[tuple[datetime, float]]:
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT timestamp, equity FROM account_equity_history "
+                "WHERE account_id = ? AND timestamp >= ? ORDER BY timestamp",
+                (account_id, cutoff),
+            ).fetchall()
+        return [(datetime.fromisoformat(r["timestamp"]), r["equity"]) for r in rows]
+
+    def get_today_open(self, account_id: str) -> float | None:
+        """Return the first equity value recorded today, for daily PnL calculation."""
+        today = datetime.now().date().isoformat()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT equity FROM account_equity_history "
+                "WHERE account_id = ? AND timestamp >= ? ORDER BY timestamp LIMIT 1",
+                (account_id, today),
+            ).fetchone()
+        return float(row["equity"]) if row else None
