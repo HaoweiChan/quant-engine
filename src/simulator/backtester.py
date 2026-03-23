@@ -30,6 +30,7 @@ class BacktestRunner:
         adapter: BaseAdapter,
         fill_model: FillModel | None = None,
         initial_equity: float = 2_000_000.0,
+        periods_per_year: float = 252.0,
     ) -> None:
         if callable(config) and not isinstance(config, PyramidConfig):
             self._engine_factory = config
@@ -38,6 +39,7 @@ class BacktestRunner:
         self._adapter = adapter
         self._fill_model = fill_model or ClosePriceFillModel()
         self._initial_equity = initial_equity
+        self._periods_per_year = periods_per_year
 
     def run(
         self,
@@ -51,7 +53,8 @@ class BacktestRunner:
         trade_log: list[Fill] = []
         ts_list: list[datetime] = []
         realized_pnl = 0.0
-        open_entries: dict[str, tuple[float, float]] = {}
+        # (entry_price, lots, entry_side) — supports both long and short
+        open_entries: dict[str, tuple[float, float, str]] = {}
 
         for i, bar in enumerate(bars):
             signal = signals[i] if signals else None
@@ -64,19 +67,31 @@ class BacktestRunner:
             for order in orders:
                 fill = self._fill_model.simulate(order, bar, ts)
                 trade_log.append(fill)
-                if fill.side == "buy":
-                    open_entries[fill.symbol] = (fill.fill_price, fill.lots)
-                elif fill.side == "sell" and fill.symbol in open_entries:
-                    entry_price, lots = open_entries.pop(fill.symbol)
-                    pnl = (fill.fill_price - entry_price) * lots * snapshot.point_value
-                    realized_pnl += pnl
+                sym = fill.symbol
+                if sym in open_entries:
+                    entry_price, entry_lots, entry_side = open_entries[sym]
+                    if fill.side != entry_side:
+                        # Closing position (opposite side)
+                        if entry_side == "buy":
+                            pnl = (fill.fill_price - entry_price) * entry_lots * snapshot.point_value
+                        else:
+                            pnl = (entry_price - fill.fill_price) * entry_lots * snapshot.point_value
+                        realized_pnl += pnl
+                        del open_entries[sym]
+                    else:
+                        # Adding to position (same side, e.g. pyramid)
+                        total_lots = entry_lots + fill.lots
+                        avg = (entry_price * entry_lots + fill.fill_price * fill.lots) / total_lots
+                        open_entries[sym] = (avg, total_lots, entry_side)
+                else:
+                    open_entries[sym] = (fill.fill_price, fill.lots, fill.side)
 
             unrealized = self._calc_unrealized(open_entries, snapshot)
             equity = self._initial_equity + realized_pnl + unrealized
             equity_curve.append(equity)
 
         dd_series = drawdown_series(equity_curve)
-        metrics = compute_all_metrics(equity_curve, trade_log)
+        metrics = compute_all_metrics(equity_curve, trade_log, self._periods_per_year)
         m_returns = monthly_returns(equity_curve[1:], ts_list) if ts_list else {}
         y_returns = yearly_returns(equity_curve[1:], ts_list) if ts_list else {}
 
@@ -117,10 +132,13 @@ class BacktestRunner:
 
     def _calc_unrealized(
         self,
-        open_entries: dict[str, tuple[float, float]],
+        open_entries: dict[str, tuple[float, float, str]],
         snapshot: MarketSnapshot,
     ) -> float:
         total = 0.0
-        for _sym, (entry_price, lots) in open_entries.items():
-            total += (snapshot.price - entry_price) * lots * snapshot.point_value
+        for _sym, (entry_price, lots, side) in open_entries.items():
+            if side == "buy":
+                total += (snapshot.price - entry_price) * lots * snapshot.point_value
+            else:
+                total += (entry_price - snapshot.price) * lots * snapshot.point_value
         return total

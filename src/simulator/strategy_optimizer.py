@@ -134,11 +134,15 @@ class StrategyOptimizer:
 
         rows = self._dispatch(engine_factory, param_list, is_bars, is_ts)
 
-        # Validate objective after first trial gives us the metric keys
+        # Validate objective; skip error rows from parallel failures
         if rows:
-            _validate_objective(objective, rows[0])
+            _validate_objective(objective, rows)
 
-        df = pl.DataFrame(rows).sort(objective, descending=True)
+        # Filter out error rows before building DataFrame
+        valid_rows = [r for r in rows if "_error" not in r]
+        if not valid_rows:
+            raise ValueError("All optimizer trials failed — check engine factory and params")
+        df = pl.DataFrame(valid_rows).sort(objective, descending=True)
         best_params = {k: df[k][0] for k in keys}
 
         warnings = _low_trade_count_warnings(rows, keys)
@@ -261,9 +265,12 @@ class StrategyOptimizer:
         rows = self._dispatch(engine_factory, param_list, is_bars, is_ts)
 
         if rows:
-            _validate_objective(objective, rows[0])
+            _validate_objective(objective, rows)
 
-        df = pl.DataFrame(rows).sort(objective, descending=True)
+        valid_rows = [r for r in rows if "_error" not in r]
+        if not valid_rows:
+            raise ValueError("All optimizer trials failed — check engine factory and params")
+        df = pl.DataFrame(valid_rows).sort(objective, descending=True)
         best_params = {k: df[k][0] for k in keys}
         warnings = _low_trade_count_warnings(rows, keys)
 
@@ -354,18 +361,22 @@ class StrategyOptimizer:
 # Free helper functions
 # ---------------------------------------------------------------------------
 
-def _validate_objective(objective: str, sample_row: dict[str, Any]) -> None:
-    metric_keys = [k for k in sample_row if not k.startswith("_") and k not in sample_row]
-    # A cleaner approach: the metrics come from BacktestResult.metrics dict
+def _validate_objective(objective: str, rows: list[dict[str, Any]]) -> None:
     valid = {
         "sharpe", "sortino", "calmar", "max_drawdown_abs", "max_drawdown_pct",
         "win_rate", "profit_factor", "avg_win", "avg_loss", "trade_count",
         "avg_holding_period",
     }
-    if objective not in sample_row:
+    # Skip error rows (from failed parallel workers) when checking
+    sample = next((r for r in rows if "_error" not in r), None)
+    if sample is None:
+        errors = [r.get("_error", "unknown") for r in rows[:3]]
+        raise ValueError(f"All optimizer trials failed. Errors: {errors}")
+    if objective not in sample:
+        available = sorted(k for k in sample if not k.startswith("_"))
         raise ValueError(
             f"Objective '{objective}' not found in trial results. "
-            f"Available metrics: {sorted(valid)}"
+            f"Available metrics: {available}"
         )
 
 
