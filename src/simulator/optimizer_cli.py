@@ -43,7 +43,11 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 from statistics import mean as _mean
+
+if TYPE_CHECKING:
+    from src.simulator.types import OptimizerResult
 
 
 def main() -> None:
@@ -57,14 +61,40 @@ def main() -> None:
 
     try:
         cfg = json.loads(config_path.read_text())
-        result_data = _run_optimizer(cfg)
+        result_data, optimizer_result = _run_optimizer(cfg)
+        # Persist full result to param registry
+        try:
+            from src.strategies.param_registry import ParamRegistry
+            registry = ParamRegistry()
+            run_id = registry.save_run(
+                result=optimizer_result,
+                strategy=cfg.get("factory_name", "").replace("create_", "").replace("_engine", ""),
+                symbol=cfg["symbol"],
+                objective=cfg.get("objective", "sharpe"),
+                train_start=cfg.get("start"),
+                train_end=cfg.get("end"),
+                is_fraction=float(cfg.get("is_fraction", 0.8)),
+                search_type="grid",
+                source="dashboard",
+            )
+            # Auto-activate best candidate
+            best_cand = registry._conn.execute(
+                "SELECT id FROM param_candidates WHERE run_id = ? AND label LIKE 'best_%' LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if best_cand:
+                registry.activate(best_cand["id"])
+            registry.close()
+            result_data["run_id"] = run_id
+        except Exception:
+            pass  # registry save is best-effort; don't fail the CLI
         output_path.write_text(json.dumps({**result_data, "status": "ok"}))
     except Exception as exc:
         output_path.write_text(json.dumps({"status": "error", "error": str(exc)}))
         sys.exit(1)
 
 
-def _run_optimizer(cfg: dict) -> dict:
+def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
     import importlib
     from datetime import datetime
 
@@ -140,7 +170,7 @@ def _run_optimizer(cfg: dict) -> dict:
         "start": cfg["start"],
         "end": cfg["end"],
         "is_fraction": is_fraction,
-    }
+    }, result
 
 
 if __name__ == "__main__":

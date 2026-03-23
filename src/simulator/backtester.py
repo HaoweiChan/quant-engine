@@ -60,7 +60,7 @@ class BacktestRunner:
             signal = signals[i] if signals else None
             ts = timestamps[i] if timestamps else datetime(2024, 1, 1)
             ts_list.append(ts)
-            snapshot = self._adapter.to_snapshot(bar)
+            snapshot = self._adapter.to_snapshot({**bar, "timestamp": ts})
             account = self._make_account(equity, realized_pnl, engine, snapshot)
             orders = engine.on_snapshot(snapshot, signal, account)
 

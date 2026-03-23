@@ -129,10 +129,11 @@ def _path_to_bars(
 
 
 _TAIFEX_SESSIONS = [
+    (8, 45, 15),    # Pre-open: 08:45–09:00 (15 minutes, ORB window)
     (9, 0, 255),    # Day session: 09:00–13:15 (255 minutes)
     (15, 15, 795),  # Night session: 15:15–04:30+1 (795 minutes)
 ]
-TAIFEX_BARS_PER_DAY = sum(s[2] for s in _TAIFEX_SESSIONS)  # 1050
+TAIFEX_BARS_PER_DAY = sum(s[2] for s in _TAIFEX_SESSIONS)  # 1065
 
 
 def _generate_taifex_timestamps(n_bars: int) -> list[datetime]:
