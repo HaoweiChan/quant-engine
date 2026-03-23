@@ -51,12 +51,14 @@ def _build_pyramid_config(params: dict[str, Any] | None) -> PyramidConfig:
 
 
 def _load_default_pyramid_params() -> dict[str, Any]:
-    """Load default pyramid params from configs/default.toml or fallback."""
+    """Load pyramid params from registry (PARAM_SCHEMA defaults + TOML overrides)."""
     try:
-        from src.strategies.param_loader import load_strategy_params
-        loaded = load_strategy_params("default")
-        if loaded:
-            return dict(loaded)
+        from src.strategies.registry import get_active_params
+        params = get_active_params("pyramid_wrapper")
+        params.setdefault("max_loss", 500_000)
+        params.setdefault("add_trigger_atr", [4.0, 8.0, 12.0])
+        params.setdefault("lot_schedule", [[3, 4], [2, 0], [1, 4], [1, 4]])
+        return params
     except Exception:
         pass
     return {
@@ -149,6 +151,52 @@ def _bars_from_path(
     return _path_to_bars(path, config)
 
 
+def _build_runner(
+    strategy: str,
+    strategy_params: dict[str, Any] | None,
+    periods_per_year: float = 252.0,
+    fill_model=None,
+    initial_equity: float = 2_000_000.0,
+):
+    """Build a BacktestRunner for any strategy. Single source of truth."""
+    from src.simulator.backtester import BacktestRunner
+    from src.simulator.fill_model import ClosePriceFillModel
+    factory = resolve_factory(strategy)
+    adapter = _get_adapter()
+    fm = fill_model or ClosePriceFillModel(slippage_points=1.0)
+    if strategy == "pyramid":
+        config = _build_pyramid_config(strategy_params)
+        return BacktestRunner(
+            config, adapter, fill_model=fm,
+            initial_equity=initial_equity, periods_per_year=periods_per_year,
+        )
+    merged = dict(strategy_params or {})
+    if "max_loss" not in merged:
+        merged["max_loss"] = 500_000
+    engine_factory = lambda: factory(**merged)  # noqa: E731
+    return BacktestRunner(
+        engine_factory, adapter, fill_model=fm,
+        initial_equity=initial_equity, periods_per_year=periods_per_year,
+    )
+
+
+def _format_backtest_result(result, *, label: str, strategy: str, n_bars: int, extra: dict | None = None):
+    """Format a BacktestResult into a JSON-serializable dict."""
+    out = {
+        "label": label,
+        "strategy": strategy,
+        "n_bars": n_bars,
+        "metrics": result.metrics,
+        "trade_count": int(result.metrics.get("trade_count", 0)),
+        "equity_start": result.equity_curve[0],
+        "equity_end": result.equity_curve[-1],
+        "total_pnl": result.equity_curve[-1] - result.equity_curve[0],
+    }
+    if extra:
+        out.update(extra)
+    return out
+
+
 def run_backtest_for_mcp(
     scenario: str,
     strategy_params: dict[str, Any] | None = None,
@@ -157,38 +205,96 @@ def run_backtest_for_mcp(
     timeframe: str = "daily",
 ) -> dict[str, Any]:
     """Run a single backtest on synthetic data."""
-    from src.simulator.backtester import BacktestRunner
+    from src.simulator.monte_carlo import TAIFEX_BARS_PER_DAY
     from src.simulator.price_gen import generate_paths
 
     path_config = _make_path_config(scenario, n_bars, timeframe)
-    factory = resolve_factory(strategy)
-    adapter = _get_adapter()
-
-    if strategy == "pyramid":
-        config = _build_pyramid_config(strategy_params)
-        runner = BacktestRunner(config, adapter)
-    else:
-        merged = dict(strategy_params or {})
-        if "max_loss" not in merged:
-            merged["max_loss"] = 500_000
-        engine = factory(**merged)
-        runner = BacktestRunner(lambda: engine, adapter)
-
+    is_intraday = timeframe in ("intraday", "1m")
+    ppy = TAIFEX_BARS_PER_DAY * 252.0 if is_intraday else 252.0
+    runner = _build_runner(strategy, strategy_params, periods_per_year=ppy)
     paths = generate_paths(1, path_config)
     bars, timestamps = _bars_from_path(paths[0], path_config, timeframe)
-
     result = runner.run(bars, timestamps=timestamps)
-    return {
-        "scenario": scenario,
-        "strategy": strategy,
-        "n_bars": len(bars),
-        "timeframe": timeframe,
-        "metrics": result.metrics,
-        "trade_count": len([f for f in result.trade_log if f.side == "buy"]),
-        "equity_start": result.equity_curve[0],
-        "equity_end": result.equity_curve[-1],
-        "total_pnl": result.equity_curve[-1] - result.equity_curve[0],
-    }
+    return _format_backtest_result(
+        result,
+        label=f"synthetic:{scenario}",
+        strategy=strategy,
+        n_bars=len(bars),
+        extra={"scenario": scenario, "timeframe": timeframe},
+    )
+
+
+def run_backtest_realdata_for_mcp(
+    symbol: str,
+    start: str,
+    end: str,
+    strategy: str = "pyramid",
+    strategy_params: dict[str, Any] | None = None,
+    initial_equity: float = 2_000_000.0,
+) -> dict[str, Any]:
+    """Run a backtest on real historical data from the DB.
+
+    This is the single source of truth for real-data backtests.
+    Both the MCP tool and the dashboard call this function so results
+    are guaranteed identical for the same inputs.
+    """
+    from datetime import datetime
+    from pathlib import Path
+    from statistics import mean as _mean
+
+    import numpy as np
+
+    db_path = Path(__file__).resolve().parent.parent.parent / "taifex_data.db"
+    if not db_path.exists():
+        return {"error": f"Database not found at {db_path}"}
+
+    from src.data.db import Database
+    db = Database(f"sqlite:///{db_path}")
+    start_dt = datetime.fromisoformat(start)
+    end_dt = datetime.fromisoformat(end)
+    raw = db.get_ohlcv(symbol, start_dt, end_dt)
+    if not raw:
+        return {"error": f"No data for {symbol} in {start}–{end}"}
+
+    daily_atr = _mean(b.high - b.low for b in raw)
+    trading_days = len({b.timestamp.date() for b in raw})
+    bars_per_day = len(raw) / max(trading_days, 1)
+    periods_per_year = bars_per_day * 252 if bars_per_day > 10 else 252.0
+    runner = _build_runner(
+        strategy, strategy_params,
+        periods_per_year=periods_per_year,
+        initial_equity=initial_equity,
+    )
+
+    bars = [
+        {"symbol": symbol, "price": b.close, "open": b.open, "high": b.high,
+         "low": b.low, "close": b.close, "daily_atr": daily_atr,
+         "timestamp": b.timestamp}
+        for b in raw
+    ]
+    timestamps = [b.timestamp for b in raw]
+    result = runner.run(bars, timestamps=timestamps)
+
+    eq = np.array(result.equity_curve)
+    strat_returns = np.diff(eq) / eq[:-1] if len(eq) > 1 else np.array([0.0])
+    strat_returns = strat_returns[np.isfinite(strat_returns)]
+    closes = np.array([b.close for b in raw], dtype=float)
+    bnh_returns = np.diff(closes) / closes[:-1] if len(closes) > 1 else np.array([0.0])
+    bnh_eq = initial_equity * np.cumprod(np.concatenate([[1.0], 1 + bnh_returns]))
+
+    base = _format_backtest_result(
+        result,
+        label=f"real:{symbol}:{start}:{end}",
+        strategy=strategy,
+        n_bars=len(bars),
+        extra={"symbol": symbol, "start": start, "end": end},
+    )
+    base["daily_returns"] = strat_returns
+    base["equity_curve"] = result.equity_curve
+    base["bnh_returns"] = bnh_returns
+    base["bnh_equity"] = bnh_eq.tolist()
+    base["bars_count"] = len(bars)
+    return base
 
 
 def run_monte_carlo_for_mcp(
@@ -476,119 +582,20 @@ def run_stress_for_mcp(
 
 def get_strategy_parameter_schema(strategy: str = "pyramid") -> dict[str, Any]:
     """Return parameter schema with current values, types, and ranges."""
-    if strategy == "pyramid":
-        return _pyramid_schema()
-    if strategy == "atr_mean_reversion":
-        return _atr_mr_schema()
-    return {"error": f"No schema available for strategy '{strategy}'"}
-
-
-def _pyramid_schema() -> dict[str, Any]:
-    defaults = _load_default_pyramid_params()
-    schema: dict[str, Any] = {
-        "strategy": "pyramid",
-        "parameters": {
-            "max_loss": {
-                "current": defaults.get("max_loss", 500_000),
-                "type": "float",
-                "description": "Maximum dollar loss before engine halts. DO NOT CHANGE.",
-            },
-            "max_levels": {
-                "current": defaults.get("max_levels", 4),
-                "type": "int",
-                "min": 1, "max": 8,
-                "description": "Maximum pyramid levels.",
-            },
-            "stop_atr_mult": {
-                "current": defaults.get("stop_atr_mult", 1.5),
-                "type": "float",
-                "min": 0.5, "max": 4.0,
-                "description": "ATR multiplier for initial stop distance.",
-            },
-            "trail_atr_mult": {
-                "current": defaults.get("trail_atr_mult", 3.0),
-                "type": "float",
-                "min": 1.0, "max": 6.0,
-                "description": "ATR multiplier for chandelier trailing stop.",
-            },
-            "trail_lookback": {
-                "current": defaults.get("trail_lookback", 22),
-                "type": "int",
-                "min": 5, "max": 60,
-                "description": "Lookback bars for trailing stop high/low.",
-            },
-            "margin_limit": {
-                "current": defaults.get("margin_limit", 0.50),
-                "type": "float",
-                "description": "Margin utilization cap. DO NOT CHANGE.",
-            },
-            "kelly_fraction": {
-                "current": defaults.get("kelly_fraction", 0.25),
-                "type": "float",
-                "min": 0.05, "max": 0.50,
-                "description": "Kelly criterion fraction for position sizing.",
-            },
-            "entry_conf_threshold": {
-                "current": defaults.get("entry_conf_threshold", 0.65),
-                "type": "float",
-                "min": 0.30, "max": 0.90,
-                "description": "Minimum model confidence to enter a trade.",
-            },
-        },
-        "scenarios": _scenario_descriptions(),
-    }
+    from src.strategies.registry import get_schema
+    # Map legacy "pyramid" slug to wrapper module
+    slug = "pyramid_wrapper" if strategy == "pyramid" else strategy
+    try:
+        schema = get_schema(slug)
+    except KeyError:
+        return {"error": f"No schema available for strategy '{strategy}'"}
+    schema["scenarios"] = _scenario_descriptions()
+    # Inject max_loss as a fixed param (not from PARAM_SCHEMA)
+    schema["parameters"].setdefault("max_loss", {
+        "current": 500_000, "type": "float",
+        "description": "Maximum dollar loss before engine halts. DO NOT CHANGE.",
+    })
     return schema
-
-
-def _atr_mr_schema() -> dict[str, Any]:
-    return {
-        "strategy": "atr_mean_reversion",
-        "parameters": {
-            "max_loss": {
-                "current": 500_000,
-                "type": "float",
-                "description": "Maximum dollar loss. DO NOT CHANGE.",
-            },
-            "lots": {"current": 1.0, "type": "float", "min": 0.5, "max": 10.0,
-                      "description": "Number of lots per entry."},
-            "bb_len": {"current": 40, "type": "int", "min": 5, "max": 60,
-                        "description": "Bollinger Bands lookback length."},
-            "bb_upper_mult": {"current": 3.0, "type": "float", "min": 1.0, "max": 4.0,
-                               "description": "BB upper band std multiplier."},
-            "bb_lower_mult": {"current": 1.0, "type": "float", "min": 0.5, "max": 4.0,
-                               "description": "BB lower band std multiplier."},
-            "rsi_len": {"current": 5, "type": "int", "min": 3, "max": 30,
-                         "description": "RSI lookback period."},
-            "atr_len": {"current": 14, "type": "int", "min": 5, "max": 30,
-                         "description": "ATR calculation length."},
-            "atr_sl_multi": {"current": 3.5, "type": "float", "min": 1.0, "max": 5.0,
-                              "description": "ATR multiplier for stop loss."},
-            "atr_tp_multi": {"current": 1.5, "type": "float", "min": 0.5, "max": 5.0,
-                              "description": "ATR multiplier for take profit."},
-            "trend_ma_len": {"current": 60, "type": "int", "min": 20, "max": 200,
-                              "description": "Trend MA lookback for extreme-trend filter."},
-            "rsi_oversold": {"current": 45.0, "type": "float", "min": 10.0, "max": 50.0,
-                              "description": "RSI threshold for oversold (long entry)."},
-            "rsi_overbought": {"current": 60.0, "type": "float", "min": 55.0, "max": 90.0,
-                                "description": "RSI threshold for overbought (short entry)."},
-        },
-        "scenarios": _scenario_descriptions(),
-        "recommended_timeframe": {
-            "timeframe": "intraday",
-            "bars_per_day": 1050,
-            "presets": {
-                "quick": {"n_bars": 21000, "note": "~1 month (20 trading days)"},
-                "standard": {"n_bars": 63000, "note": "~3 months (60 trading days)"},
-                "full_year": {"n_bars": 264600, "note": "~1 year (252 trading days)"},
-            },
-            "note": (
-                "ATR Mean Reversion is a 1-min intraday strategy. "
-                "TAIFEX has ~1050 1-min bars/day (day 09:00-13:15 + night 15:15-04:30). "
-                "Use timeframe='intraday'. For Monte Carlo, use 'quick' preset "
-                "for iteration and 'standard' for validation."
-            ),
-        },
-    }
 
 
 def _scenario_descriptions() -> dict[str, str]:

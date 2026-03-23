@@ -11,6 +11,7 @@ from mcp.types import TextContent, Tool
 from src.mcp_server.facade import (
     get_strategy_parameter_schema,
     run_backtest_for_mcp,
+    run_backtest_realdata_for_mcp,
     run_monte_carlo_for_mcp,
     run_stress_for_mcp,
     run_sweep_for_mcp,
@@ -73,6 +74,43 @@ TOOLS: list[Tool] = [
                 },
             },
             "required": ["scenario"],
+        },
+    ),
+    Tool(
+        name="run_backtest_realdata",
+        description=(
+            "Run a backtest on REAL historical data from the database. "
+            "Uses the same BacktestRunner, adapter, and metrics as run_backtest, "
+            "so results are directly comparable to the dashboard. "
+            "Provide symbol (e.g. 'TX'), start and end dates (ISO format). "
+            "Returns: Sharpe, drawdown, win rate, PnL, equity curve, buy-and-hold comparison."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Contract symbol (e.g. 'TX')",
+                },
+                "start": {
+                    "type": "string",
+                    "description": "Start date in ISO format (e.g. '2025-08-01')",
+                },
+                "end": {
+                    "type": "string",
+                    "description": "End date in ISO format (e.g. '2026-03-14')",
+                },
+                "strategy": {
+                    "type": "string",
+                    "description": "Strategy name: pyramid|atr_mean_reversion|module:factory",
+                    "default": "pyramid",
+                },
+                "strategy_params": {
+                    "type": "object",
+                    "description": "Override strategy parameters (merged with defaults)",
+                },
+            },
+            "required": ["symbol", "start", "end"],
         },
     ),
     Tool(
@@ -344,6 +382,28 @@ def register_tools(app: Server) -> None:
                     scenario=arguments["scenario"],
                     strategy=arguments.get("strategy", "pyramid"),
                 )
+                return _json_response(result)
+
+            if name == "run_backtest_realdata":
+                result = run_backtest_realdata_for_mcp(
+                    symbol=arguments["symbol"],
+                    start=arguments["start"],
+                    end=arguments["end"],
+                    strategy=arguments.get("strategy", "pyramid"),
+                    strategy_params=arguments.get("strategy_params"),
+                )
+                if "metrics" in result:
+                    history.append(
+                        tool="run_backtest_realdata",
+                        params=arguments.get("strategy_params", {}),
+                        metrics=result.get("metrics", {}),
+                        scenario=f"real:{arguments['symbol']}",
+                        strategy=arguments.get("strategy", "pyramid"),
+                    )
+                # Strip large arrays from response to keep it readable
+                for key in ("daily_returns", "equity_curve", "bnh_returns", "bnh_equity"):
+                    if key in result:
+                        del result[key]
                 return _json_response(result)
 
             if name == "run_monte_carlo":
