@@ -31,6 +31,7 @@ function AccountModal({ initial, onClose, onSaved }: {
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const cred = initial?.credential_status;
   const [broker, setBroker] = useState(initial?.broker ?? "mock");
   const [displayName, setDisplayName] = useState(initial?.display_name ?? "");
   const [sandbox, setSandbox] = useState(false);
@@ -96,9 +97,15 @@ function AccountModal({ initial, onClose, onSaved }: {
         </div>
         <hr style={{ borderColor: colors.cardBorder, margin: "12px 0" }} />
         <SectionLabel>CREDENTIALS</SectionLabel>
-        <ParamInput label="API Key"><input type="text" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Enter API key" className="w-full rounded px-1.5 py-1.5 text-[11px]" style={inputStyle} /></ParamInput>
-        <ParamInput label="API Secret"><input type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} placeholder="Enter API secret" className="w-full rounded px-1.5 py-1.5 text-[11px]" style={inputStyle} /></ParamInput>
-        <ParamInput label="Password (optional)"><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Required by some exchanges (e.g. OKX)" className="w-full rounded px-1.5 py-1.5 text-[11px]" style={inputStyle} /></ParamInput>
+        <ParamInput label="API Key">
+          <input type="text" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={cred?.api_key ? "••••••••  (stored in GSM)" : "Enter API key"} className="w-full rounded px-1.5 py-1.5 text-[11px]" style={inputStyle} />
+        </ParamInput>
+        <ParamInput label="API Secret">
+          <input type="password" value={apiSecret} onChange={(e) => setApiSecret(e.target.value)} placeholder={cred?.api_secret ? "••••••••  (stored in GSM)" : "Enter API secret"} className="w-full rounded px-1.5 py-1.5 text-[11px]" style={inputStyle} />
+        </ParamInput>
+        <ParamInput label="Password (optional)">
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={cred?.password ? "••••••••  (stored in GSM)" : "Required by some exchanges (e.g. OKX)"} className="w-full rounded px-1.5 py-1.5 text-[11px]" style={inputStyle} />
+        </ParamInput>
         <hr style={{ borderColor: colors.cardBorder, margin: "12px 0" }} />
         <SectionLabel>RISK GUARDS</SectionLabel>
         <ParamInput label="Max Drawdown %"><input type="number" value={maxDrawdown} min={1} max={100} onChange={(e) => setMaxDrawdown(Number(e.target.value))} className="w-full rounded px-1.5 py-1.5 text-[11px]" style={inputStyle} /></ParamInput>
@@ -174,7 +181,7 @@ function WarRoomTab() {
     const interval = setInterval(poll, 15000);
     return () => clearInterval(interval);
   }, []);
-  const accounts = (data?.accounts ?? {}) as Record<string, { display_name: string; broker: string; connected: boolean; equity: number; margin_used: number; margin_available: number }>;
+  const accounts = (data?.accounts ?? {}) as Record<string, { display_name: string; broker: string; connected: boolean; connect_error?: string | null; equity: number; margin_used: number; margin_available: number }>;
   return (
     <div className="p-3">
       <SectionLabel>ACCOUNT OVERVIEW</SectionLabel>
@@ -192,9 +199,16 @@ function WarRoomTab() {
               <div className="text-[22px] font-bold mb-0.5" style={{ fontFamily: "var(--font-mono)", color: info.connected ? colors.green : colors.dim }}>
                 {info.connected ? `$${info.equity.toLocaleString()}` : "—"}
               </div>
-              <div className="text-[7px] tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-                MARGIN <span className="ml-1.5 text-[9px]" style={{ color: marginPct < 50 ? colors.green : marginPct < 80 ? colors.gold : colors.red }}>{marginPct.toFixed(1)}%</span>
-              </div>
+              {!info.connected && info.connect_error && (
+                <div className="text-[8px] mt-1 leading-snug" style={{ color: colors.orange, fontFamily: "var(--font-mono)" }}>
+                  {info.connect_error}
+                </div>
+              )}
+              {info.connected && (
+                <div className="text-[7px] tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+                  MARGIN <span className="ml-1.5 text-[9px]" style={{ color: marginPct < 50 ? colors.green : marginPct < 80 ? colors.gold : colors.red }}>{marginPct.toFixed(1)}%</span>
+                </div>
+              )}
             </div>
           );
         })}

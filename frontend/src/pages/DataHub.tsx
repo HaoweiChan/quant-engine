@@ -1,16 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ChartCard } from "@/components/ChartCard";
-import { OHLCVChart } from "@/components/charts/OHLCVChart";
-import type { IndicatorOverlay } from "@/components/charts/OHLCVChart";
+import { ChartStack } from "@/components/charts/ChartStack";
+import { ChartErrorBoundary } from "@/components/ErrorBoundary";
 import { Sidebar, SectionLabel, ParamInput } from "@/components/Sidebar";
 import { StatCard, StatRow } from "@/components/StatCard";
 import { fetchCoverage, fetchOHLCV, startCrawl, fetchCrawlStatus } from "@/lib/api";
 import type { CoverageEntry, CrawlStatus } from "@/lib/api";
-import { sma, ema, bollingerBands } from "@/lib/indicators";
+import { INDICATOR_REGISTRY, createActiveIndicator, getIndicatorDef } from "@/lib/indicatorRegistry";
+import type { ActiveIndicator } from "@/lib/indicatorRegistry";
 import { colors } from "@/lib/theme";
 import { useMarketDataStore } from "@/stores/marketDataStore";
 
+
+const OVERLAY_INDICATORS = INDICATOR_REGISTRY.filter((d) => d.type === "overlay");
 const contracts = [
   { value: "TX", label: "TX (TAIEX)" },
   { value: "MTX", label: "MTX (Mini-TAIEX)" },
@@ -31,45 +34,49 @@ export function DataHub() {
   const [coverage, setCoverage] = useState<CoverageEntry[]>([]);
   const [crawl, setCrawl] = useState<CrawlStatus | null>(null);
   const [crawling, setCrawling] = useState(false);
-  const [showSma, setShowSma] = useState(false);
-  const [smaPeriod, setSmaPeriod] = useState(20);
-  const [showEma, setShowEma] = useState(false);
-  const [emaPeriod, setEmaPeriod] = useState(12);
-  const [showBb, setShowBb] = useState(false);
-  const [bbPeriod, setBbPeriod] = useState(20);
-
-  const overlays = useMemo(() => {
-    const closes = bars.map((b) => b.close);
-    const result: IndicatorOverlay[] = [];
-    if (showSma) result.push({ label: `SMA(${smaPeriod})`, values: sma(closes, smaPeriod), color: colors.gold });
-    if (showEma) result.push({ label: `EMA(${emaPeriod})`, values: ema(closes, emaPeriod), color: colors.cyan });
-    if (showBb) {
-      const bb = bollingerBands(closes, bbPeriod);
-      result.push({ label: `BB Upper`, values: bb.upper, color: colors.purple, lineStyle: 2 });
-      result.push({ label: `BB Lower`, values: bb.lower, color: colors.purple, lineStyle: 2 });
-    }
-    return result;
-  }, [bars, showSma, smaPeriod, showEma, emaPeriod, showBb, bbPeriod]);
+  const [indicators, setIndicators] = useState<ActiveIndicator[]>([]);
+  const [addingIndicator, setAddingIndicator] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchCoverage().then(setCoverage).catch(() => {});
   }, []);
 
-  useEffect(() => {
+  const loadData = () => {
     setLoading(true);
     fetchOHLCV(symbol, start, end, tfMinutes)
-      .then((r) => setBars(r.bars))
+      .then((r) => { setBars(r.bars); setLoading(false); })
       .catch((e) => setError(e.message));
-  }, [symbol, start, end, tfMinutes]);
+  };
+
+  const addIndicator = (registryId: string) => {
+    const count = indicators.filter((ai) => ai.registryId === registryId).length;
+    setIndicators((prev) => [...prev, createActiveIndicator(registryId, count)]);
+    setAddingIndicator(false);
+  };
+
+  const removeIndicator = (instanceId: string) => {
+    setIndicators((prev) => prev.filter((ai) => ai.instanceId !== instanceId));
+    if (editingId === instanceId) setEditingId(null);
+  };
+
+  const updateParam = (instanceId: string, paramName: string, value: number) => {
+    if (!Number.isFinite(value) || value <= 0) return;
+    setIndicators((prev) =>
+      prev.map((ai) =>
+        ai.instanceId === instanceId
+          ? { ...ai, params: { ...ai.params, [paramName]: value } }
+          : ai,
+      ),
+    );
+  };
 
   const latest = bars.length > 0 ? bars[bars.length - 1] : null;
   const first = bars.length > 0 ? bars[0] : null;
-  const periodRet =
-    first && latest ? ((latest.close / first.open - 1) * 100).toFixed(2) : "—";
-  const avgVol =
-    bars.length > 0
-      ? Math.round(bars.reduce((s, b) => s + b.volume, 0) / bars.length).toLocaleString()
-      : "—";
+  const periodRet = first && latest ? ((latest.close / first.open - 1) * 100).toFixed(2) : "—";
+  const avgVol = bars.length > 0
+    ? Math.round(bars.reduce((s, b) => s + b.volume, 0) / bars.length).toLocaleString()
+    : "—";
 
   return (
     <div className="flex">
@@ -117,23 +124,104 @@ export function DataHub() {
             style={inputStyle}
           />
         </ParamInput>
+        <button
+          onClick={loadData}
+          disabled={loading}
+          className="w-full py-1.5 mt-2 mb-1 rounded text-[10px] font-semibold cursor-pointer border-none text-white"
+          style={{ background: loading ? "#444" : "#2A5A9A", fontFamily: "var(--font-mono)" }}
+        >
+          {loading ? "Loading…" : "Load Data"}
+        </button>
         <hr style={{ borderColor: "var(--color-qe-card-border)", margin: "10px 0" }} />
-        <SectionLabel>INDICATORS</SectionLabel>
-        <label className="flex items-center gap-1.5 text-[9px] mb-1 cursor-pointer" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-          <input type="checkbox" checked={showSma} onChange={(e) => setShowSma(e.target.checked)} />
-          SMA
-          <input type="number" value={smaPeriod} onChange={(e) => setSmaPeriod(Number(e.target.value))} className="w-10 rounded px-1 py-0.5 text-[10px]" style={inputStyle} />
-        </label>
-        <label className="flex items-center gap-1.5 text-[9px] mb-1 cursor-pointer" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-          <input type="checkbox" checked={showEma} onChange={(e) => setShowEma(e.target.checked)} />
-          EMA
-          <input type="number" value={emaPeriod} onChange={(e) => setEmaPeriod(Number(e.target.value))} className="w-10 rounded px-1 py-0.5 text-[10px]" style={inputStyle} />
-        </label>
-        <label className="flex items-center gap-1.5 text-[9px] mb-1 cursor-pointer" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-          <input type="checkbox" checked={showBb} onChange={(e) => setShowBb(e.target.checked)} />
-          Bollinger
-          <input type="number" value={bbPeriod} onChange={(e) => setBbPeriod(Number(e.target.value))} className="w-10 rounded px-1 py-0.5 text-[10px]" style={inputStyle} />
-        </label>
+
+        <SectionLabel>OVERLAYS</SectionLabel>
+        {indicators.map((ai) => {
+          const def = getIndicatorDef(ai.registryId);
+          if (!def) return null;
+          const paramStr = def.params.length > 0
+            ? `(${def.params.map((p) => ai.params[p.name]).join(",")})`
+            : "";
+          const isEditing = editingId === ai.instanceId;
+          return (
+            <div key={ai.instanceId} className="mb-1.5">
+              <div className="flex items-center gap-1.5 text-[9px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+                <span
+                  className="inline-block w-2 h-2 rounded-full shrink-0"
+                  style={{ background: ai.color }}
+                />
+                <span className="flex-1 truncate">{def.label}{paramStr}</span>
+                {def.params.length > 0 && (
+                  <button
+                    onClick={() => setEditingId(isEditing ? null : ai.instanceId)}
+                    className="text-[8px] cursor-pointer border-none bg-transparent"
+                    style={{ color: isEditing ? colors.cyan : colors.dim }}
+                    title="Edit parameters"
+                  >
+                    ⚙
+                  </button>
+                )}
+                <button
+                  onClick={() => removeIndicator(ai.instanceId)}
+                  className="text-[9px] cursor-pointer border-none bg-transparent"
+                  style={{ color: colors.red }}
+                  title="Remove"
+                >
+                  ×
+                </button>
+              </div>
+              {isEditing && (
+                <div className="ml-3.5 mt-1">
+                  {def.params.map((p) => (
+                    <div key={p.name} className="flex items-center gap-1 mb-0.5">
+                      <span className="text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)", minWidth: 40 }}>
+                        {p.label}
+                      </span>
+                      <input
+                        key={`${ai.instanceId}-${p.name}-${ai.params[p.name]}`}
+                        type="number"
+                        defaultValue={ai.params[p.name]}
+                        min={p.min}
+                        max={p.max}
+                        step={p.step ?? 1}
+                        onBlur={(e) => updateParam(ai.instanceId, p.name, Number(e.target.value))}
+                        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                        className="w-14 rounded px-1 py-0.5 text-[9px]"
+                        style={inputStyle}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {addingIndicator ? (
+          <select
+            autoFocus
+            value=""
+            onChange={(e) => { if (e.target.value) addIndicator(e.target.value); }}
+            onBlur={() => setAddingIndicator(false)}
+            className="w-full rounded px-1.5 py-1 text-[9px] mb-1"
+            style={inputStyle}
+          >
+            <option value="">Select overlay…</option>
+            {OVERLAY_INDICATORS.map((def) => (
+              <option key={def.id} value={def.id}>
+                {def.label}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <button
+            onClick={() => setAddingIndicator(true)}
+            className="w-full py-1 rounded text-[9px] cursor-pointer border-none text-white mb-1"
+            style={{ background: "#353849", fontFamily: "var(--font-mono)" }}
+          >
+            + Add Overlay
+          </button>
+        )}
+
         <hr style={{ borderColor: "var(--color-qe-card-border)", margin: "10px 0" }} />
         <SectionLabel>ACTIONS</SectionLabel>
         <button
@@ -187,7 +275,6 @@ export function DataHub() {
       </Sidebar>
 
       <div className="flex-1 p-3 overflow-y-auto" style={{ minWidth: 0 }}>
-        {/* Coverage */}
         <SectionLabel>DATABASE COVERAGE</SectionLabel>
         <div
           className="rounded-[5px] px-3 py-2 mb-3.5 max-h-[180px] overflow-y-auto"
@@ -211,12 +298,12 @@ export function DataHub() {
         </div>
 
         {loading ? (
-          <div className="text-[11px] py-5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-            Loading...
+          <div className="text-[11px] py-5" style={{ color: colors.cyan, fontFamily: "var(--font-mono)" }}>
+            Loading data…
           </div>
         ) : bars.length === 0 ? (
           <div className="text-[11px] py-5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-            No data for this range.
+            Select a contract and time range, then click Load Data.
           </div>
         ) : (
           <>
@@ -230,22 +317,11 @@ export function DataHub() {
               <StatCard label="PERIOD RETURN" value={`${periodRet}%`} color={Number(periodRet) >= 0 ? colors.green : colors.red} />
               <StatCard label="AVG VOLUME" value={avgVol} color={colors.muted} />
             </StatRow>
-            <ChartCard title="PRICE CLOSE">
-              <OHLCVChart data={bars} lineColor={colors.blue} field="close" overlays={overlays} />
+            <ChartCard title="OHLC">
+              <ChartErrorBoundary fallbackLabel="Chart">
+                <ChartStack bars={bars} activeIndicators={indicators} />
+              </ChartErrorBoundary>
             </ChartCard>
-            <div className="flex gap-2.5">
-              <div className="flex-1">
-                <ChartCard title="HIGH / LOW RANGE">
-                  <OHLCVChart data={bars} lineColor={colors.cyan} field="high" height={200} />
-                </ChartCard>
-              </div>
-              <div className="flex-1">
-                <ChartCard title="VOLUME">
-                  <OHLCVChart data={bars} lineColor={colors.blue} field="volume" height={200} />
-                </ChartCard>
-              </div>
-            </div>
-            {/* Raw data table (last 100 bars) */}
             <ChartCard title={`RAW DATA — LAST ${Math.min(100, bars.length)} BARS`}>
               <div className="max-h-[300px] overflow-y-auto">
                 <Table>

@@ -32,7 +32,7 @@ export interface CoverageEntry {
 export interface StrategyInfo {
   slug: string;
   name: string;
-  param_grid: Record<string, { label: string; type: string; default: number[] }>;
+  param_grid: Record<string, { label: string; type: string; default: number[]; value?: number }>;
 }
 
 export interface BacktestResult {
@@ -58,6 +58,7 @@ export interface AccountInfo {
   display_name: string;
   guards: Record<string, number>;
   strategies: Record<string, unknown>[];
+  credential_status?: Record<string, boolean>;
 }
 
 export interface CrawlStatus {
@@ -194,4 +195,44 @@ export async function writeEditorFile(
 
 export async function validateEngine(): Promise<{ ok: boolean; error: string | null }> {
   return fetchJSON("/api/editor/validate", { method: "POST" });
+}
+
+// --- Param Registry ---
+
+export interface ActiveParams {
+  params: Record<string, number>;
+  source: "registry" | "defaults";
+  candidate_id?: number;
+  run_id?: number;
+  label?: string;
+  objective?: string;
+  tag?: string;
+  run_at?: string;
+  activated_at?: string;
+  symbol?: string;
+}
+
+export interface ParamRun {
+  run_id: number;
+  run_at: string;
+  strategy: string;
+  symbol: string;
+  objective: string;
+  n_trials: number;
+  tag: string | null;
+  n_candidates: number;
+  best_params?: Record<string, number>;
+  best_metrics?: Record<string, number>;
+}
+
+export async function fetchActiveParams(strategy: string): Promise<ActiveParams> {
+  return fetchJSON(`/api/params/active/${encodeURIComponent(strategy)}`);
+}
+
+export async function fetchParamRuns(strategy: string): Promise<{ runs: ParamRun[]; count: number }> {
+  return fetchJSON(`/api/params/runs/${encodeURIComponent(strategy)}`);
+}
+
+export async function activateCandidate(candidateId: number): Promise<Record<string, unknown>> {
+  return fetchJSON(`/api/params/activate/${candidateId}`, { method: "POST" });
 }

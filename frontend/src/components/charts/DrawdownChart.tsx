@@ -7,6 +7,22 @@ interface DrawdownChartProps {
   height?: number;
 }
 
+const MAX_CHART_POINTS = 2000;
+
+function downsample(data: number[], maxPoints: number): number[] {
+  if (data.length <= maxPoints) return data;
+  const step = data.length / maxPoints;
+  const result: number[] = [];
+  for (let i = 0; i < maxPoints; i++) {
+    const idx = Math.round(i * step);
+    result.push(data[idx]);
+  }
+  if (result[result.length - 1] !== data[data.length - 1]) {
+    result.push(data[data.length - 1]);
+  }
+  return result;
+}
+
 export function DrawdownChart({ equity, height = 200 }: DrawdownChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -21,6 +37,7 @@ export function DrawdownChart({ equity, height = 200 }: DrawdownChartProps) {
         textColor: colors.dim,
         fontFamily: "'JetBrains Mono', monospace",
         fontSize: 9,
+        attributionLogo: false,
       },
       grid: {
         vertLines: { color: colors.grid },
@@ -31,13 +48,13 @@ export function DrawdownChart({ equity, height = 200 }: DrawdownChartProps) {
     });
     chartRef.current = chart;
 
-    // Compute drawdown
     let peak = equity[0];
     const dd = equity.map((v) => {
       if (v > peak) peak = v;
       return ((v - peak) / peak) * 100;
     });
 
+    const ds = downsample(dd, MAX_CHART_POINTS);
     const baseDate = new Date("2025-01-01");
     const series = chart.addSeries(AreaSeries, {
       lineColor: colors.red,
@@ -46,16 +63,19 @@ export function DrawdownChart({ equity, height = 200 }: DrawdownChartProps) {
       bottomColor: "rgba(255,82,82,0.02)",
     });
     series.setData(
-      dd.map((v, i) => {
+      ds.map((v, i) => {
         const d = new Date(baseDate);
         d.setDate(d.getDate() + i);
-        return { time: d.toISOString().slice(0, 10), value: v };
+        return { time: d.toISOString().slice(0, 10) as string, value: v };
       }),
     );
     chart.timeScale().fitContent();
 
     const handleResize = () => {
-      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth });
+      if (containerRef.current) {
+        chart.applyOptions({ width: containerRef.current.clientWidth });
+        chart.timeScale().fitContent();
+      }
     };
     window.addEventListener("resize", handleResize);
     return () => {

@@ -9,8 +9,12 @@ interface DistributionChartProps {
 
 function histogram(values: number[], bins: number) {
   if (values.length === 0) return [];
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  let min = values[0];
+  let max = values[0];
+  for (let i = 1; i < values.length; i++) {
+    if (values[i] < min) min = values[i];
+    if (values[i] > max) max = values[i];
+  }
   const binWidth = (max - min) / bins || 1;
   const counts = new Array(bins).fill(0);
   for (const v of values) {

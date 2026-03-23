@@ -5,8 +5,9 @@ import { DrawdownChart } from "@/components/charts/DrawdownChart";
 import { DistributionChart } from "@/components/charts/DistributionChart";
 import { Sidebar, SectionLabel, ParamInput } from "@/components/Sidebar";
 import { StatCard, StatRow } from "@/components/StatCard";
-import { fetchStrategies, runBacktest } from "@/lib/api";
-import type { StrategyInfo, BacktestResult } from "@/lib/api";
+import { fetchStrategies, fetchActiveParams, runBacktest } from "@/lib/api";
+import type { StrategyInfo, BacktestResult, ActiveParams } from "@/lib/api";
+import { ChartErrorBoundary } from "@/components/ErrorBoundary";
 import { colors, pnlColor } from "@/lib/theme";
 
 const inputStyle: React.CSSProperties = {
@@ -29,6 +30,7 @@ export function Backtest() {
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [paramSource, setParamSource] = useState<ActiveParams | null>(null);
 
   useEffect(() => {
     fetchStrategies().then((s) => {
@@ -43,9 +45,26 @@ export function Backtest() {
     if (!currentStrat?.param_grid) return;
     const defaults: Record<string, number> = {};
     for (const [k, v] of Object.entries(currentStrat.param_grid)) {
-      defaults[k] = v.default?.[0] ?? 0;
+      defaults[k] = v.value ?? v.default?.[0] ?? 0;
     }
-    setParams(defaults);
+    // Try to load optimized params from the registry
+    fetchActiveParams(strategy)
+      .then((active) => {
+        setParamSource(active);
+        if (active.source === "registry" && active.params) {
+          const merged = { ...defaults };
+          for (const [k, v] of Object.entries(active.params)) {
+            if (k in merged && typeof v === "number") merged[k] = v;
+          }
+          setParams(merged);
+        } else {
+          setParams(defaults);
+        }
+      })
+      .catch(() => {
+        setParamSource(null);
+        setParams(defaults);
+      });
   }, [strategy, strategies]);
 
   const handleRun = async () => {
@@ -67,6 +86,8 @@ export function Backtest() {
   const totalPnl = equity.length > 0 ? equity[equity.length - 1] - initial : 0;
   const bnhPnl = result?.bnh_equity?.length ? result.bnh_equity[result.bnh_equity.length - 1] - initial : 0;
   const alpha = totalPnl - bnhPnl;
+  const fmtPct = (v: number) => `${(v * 100).toFixed(1)}%`;
+  const fmtDollar = (v: number) => `$${v >= 0 ? "+" : ""}${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
   return (
     <div className="flex">
@@ -91,6 +112,11 @@ export function Backtest() {
         </ParamInput>
         <hr style={{ borderColor: "var(--color-qe-card-border)", margin: "10px 0" }} />
         <SectionLabel>STRATEGY PARAMETERS</SectionLabel>
+        {paramSource?.source === "registry" && (
+          <div className="text-[8px] mb-1.5 px-1 py-0.5 rounded" style={{ background: "rgba(90,138,242,0.15)", color: colors.blue, fontFamily: "var(--font-mono)" }}>
+            Optimized ({paramSource.objective}{paramSource.run_at ? `, ${paramSource.run_at.slice(0, 10)}` : ""})
+          </div>
+        )}
         {currentStrat?.param_grid &&
           Object.entries(currentStrat.param_grid).map(([key, cfg]) => (
             <ParamInput key={key} label={cfg.label || key}>
@@ -134,27 +160,40 @@ export function Backtest() {
               {currentStrat?.name} on {symbol} ({start} → {end}) • {result.bars_count.toLocaleString()} bars
             </div>
             <StatRow>
-              <StatCard label="SHARPE RATIO" value={(m.sharpe ?? 0).toFixed(2)} color={(m.sharpe ?? 0) > 1 ? colors.green : colors.gold} />
-              <StatCard label="MAX DRAWDOWN" value={`${((m.max_drawdown_pct ?? 0) * 100).toFixed(1)}%`} color={colors.red} />
+              <StatCard label="SHARPE" value={(m.sharpe ?? 0).toFixed(2)} color={(m.sharpe ?? 0) > 1 ? colors.green : (m.sharpe ?? 0) > 0 ? colors.gold : colors.red} />
+              <StatCard label="SORTINO" value={(m.sortino ?? 0).toFixed(2)} color={(m.sortino ?? 0) > 1 ? colors.green : (m.sortino ?? 0) > 0 ? colors.gold : colors.red} />
+              <StatCard label="MAX DD" value={fmtPct(m.max_drawdown_pct ?? 0)} color={colors.red} />
               <StatCard label="WIN RATE" value={`${((m.win_rate ?? 0) * 100).toFixed(0)}%`} color={(m.win_rate ?? 0) >= 0.5 ? colors.green : colors.orange} />
-              <StatCard label="TOTAL TRADES" value={String(m.trade_count ?? 0)} color={colors.cyan} />
-              <StatCard label="TOTAL PnL" value={`$${totalPnl >= 0 ? "+" : ""}${totalPnl.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} color={pnlColor(totalPnl)} />
-              <StatCard label="B&H PnL" value={`$${bnhPnl >= 0 ? "+" : ""}${bnhPnl.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} color={colors.muted} />
-              <StatCard label="ALPHA" value={`$${alpha >= 0 ? "+" : ""}${alpha.toLocaleString(undefined, { maximumFractionDigits: 0 })}`} color={pnlColor(alpha)} />
+              <StatCard label="PROFIT FACTOR" value={(m.profit_factor ?? 0).toFixed(2)} color={(m.profit_factor ?? 0) >= 1.5 ? colors.green : (m.profit_factor ?? 0) >= 1 ? colors.gold : colors.red} />
+              <StatCard label="TRADES" value={String(Math.round(m.trade_count ?? 0))} color={colors.cyan} />
             </StatRow>
-            <ChartCard title="EQUITY CURVE vs BUY & HOLD">
-              <EquityCurveChart equity={equity} bnhEquity={result.bnh_equity} />
-            </ChartCard>
+            <StatRow>
+              <StatCard label="TOTAL PnL" value={fmtDollar(totalPnl)} color={pnlColor(totalPnl)} />
+              <StatCard label="B&H PnL" value={fmtDollar(bnhPnl)} color={colors.muted} />
+              <StatCard label="ALPHA" value={fmtDollar(alpha)} color={pnlColor(alpha)} />
+              <StatCard label="AVG WIN" value={(m.avg_win ?? 0).toFixed(1)} color={colors.green} />
+              <StatCard label="AVG LOSS" value={(m.avg_loss ?? 0).toFixed(1)} color={colors.red} />
+              <StatCard label="MAX DD ($)" value={fmtDollar(-(m.max_drawdown_abs ?? 0))} color={colors.red} />
+            </StatRow>
+            <ChartErrorBoundary fallbackLabel="Equity Curve">
+              <ChartCard title="EQUITY CURVE vs BUY & HOLD">
+                <EquityCurveChart equity={equity} bnhEquity={result.bnh_equity} />
+              </ChartCard>
+            </ChartErrorBoundary>
             <div className="flex gap-2.5">
               <div className="flex-1">
-                <ChartCard title="DRAWDOWN">
-                  <DrawdownChart equity={equity} />
-                </ChartCard>
+                <ChartErrorBoundary fallbackLabel="Drawdown">
+                  <ChartCard title="DRAWDOWN">
+                    <DrawdownChart equity={equity} />
+                  </ChartCard>
+                </ChartErrorBoundary>
               </div>
               <div className="flex-1">
-                <ChartCard title="RETURN DISTRIBUTION">
-                  <DistributionChart values={result.daily_returns.map((r) => r * 100)} />
-                </ChartCard>
+                <ChartErrorBoundary fallbackLabel="Distribution">
+                  <ChartCard title="RETURN DISTRIBUTION">
+                    <DistributionChart values={result.daily_returns.map((r) => r * 100)} />
+                  </ChartCard>
+                </ChartErrorBoundary>
               </div>
             </div>
           </>
