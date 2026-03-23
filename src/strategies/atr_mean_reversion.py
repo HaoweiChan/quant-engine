@@ -335,7 +335,7 @@ class ATRMeanReversionStopPolicy(StopPolicy):
 # ---------------------------------------------------------------------------
 
 def create_atr_mean_reversion_engine(
-    max_loss: float,
+    max_loss: float = 100_000.0,
     lots: float = 1.0,
     contract_type: str = "large",
     bb_len: int = 40,

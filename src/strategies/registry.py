@@ -130,7 +130,7 @@ def get_defaults(slug: str) -> dict[str, Any]:
 
 
 def get_active_params(slug: str) -> dict[str, Any]:
-    """Return effective params: TOML overrides merged over PARAM_SCHEMA defaults."""
+    """Return effective params: registry DB → TOML → PARAM_SCHEMA defaults."""
     defaults = get_defaults(slug)
     try:
         from src.strategies.param_loader import load_strategy_params
@@ -138,7 +138,7 @@ def get_active_params(slug: str) -> dict[str, Any]:
         if overrides:
             defaults.update(overrides)
     except Exception:
-        pass
+        logger.warning("get_active_params_fallback", slug=slug, exc_info=True)
     return defaults
 
 
@@ -156,6 +156,7 @@ def get_param_grid(slug: str) -> dict[str, dict]:
             "label": key.replace("_", " ").title(),
             "type": spec["type"],
             "default": grid_values,
+            "value": spec["default"],
         }
     return result
 
