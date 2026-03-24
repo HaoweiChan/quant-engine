@@ -16,7 +16,7 @@ from src.api.editor import (
 
 class TestPathValidation:
     def test_valid_strategies_path(self) -> None:
-        p = _validate_path("src/strategies/example_entry.py")
+        p = _validate_path("src/strategies/examples/example_entry.py")
         assert p.name == "example_entry.py"
 
     def test_valid_configs_path(self) -> None:
@@ -64,7 +64,7 @@ class TestListFiles:
 
 class TestReadWrite:
     def test_read_existing_file(self) -> None:
-        content = read_file("src/strategies/example_entry.py")
+        content = read_file("src/strategies/examples/example_entry.py")
         assert "MyEntryPolicy" in content
 
     def test_write_and_read_roundtrip(self, tmp_path, monkeypatch) -> None:
