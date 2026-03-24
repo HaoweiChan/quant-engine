@@ -76,3 +76,6 @@ logs/
 
 # OpenSpec skills (managed by openspec CLI, not version-controlled)
 .claude/skills/openspec-*/
+
+# Strategy backups
+src/strategies/.backup/
