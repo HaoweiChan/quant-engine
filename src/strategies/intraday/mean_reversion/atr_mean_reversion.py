@@ -36,6 +36,8 @@ from src.core.types import (
     MarketSnapshot,
     Position,
 )
+from src.strategies import StrategyCategory, StrategyTimeframe
+from src.strategies._session_utils import in_day_session, in_force_close, in_night_session
 
 if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
@@ -74,14 +76,16 @@ PARAM_SCHEMA: dict[str, dict] = {
 }
 
 STRATEGY_META: dict = {
-    "recommended_timeframe": "intraday",
+    "category": StrategyCategory.MEAN_REVERSION,
+    "timeframe": StrategyTimeframe.INTRADAY,
+    "session": "both",
     "bars_per_day": 1050,
     "presets": {
         "quick": {"n_bars": 21000, "note": "~1 month (20 trading days)"},
         "standard": {"n_bars": 63000, "note": "~3 months (60 trading days)"},
         "full_year": {"n_bars": 264600, "note": "~1 year (252 trading days)"},
     },
-    "note": (
+    "description": (
         "ATR Mean Reversion is a 1-min intraday strategy. "
         "TAIFEX has ~1050 1-min bars/day (day 09:00-13:15 + night 15:15-04:30). "
         "Use timeframe='intraday'. For Monte Carlo, use 'quick' preset "
@@ -168,23 +172,6 @@ class _Indicators:
 
 
 # ---------------------------------------------------------------------------
-# Time-session helpers
-# ---------------------------------------------------------------------------
-
-def _in_day_session(t: time) -> bool:
-    return time(9, 0) <= t <= time(13, 15)
-
-
-def _in_night_session(t: time) -> bool:
-    # spans midnight: 15:15 → next-day 04:30
-    return t >= time(15, 15) or t <= time(4, 30)
-
-
-def _in_force_close(t: time) -> bool:
-    return time(13, 25) <= t < time(13, 45) or time(4, 50) <= t <= time(5, 0)
-
-
-# ---------------------------------------------------------------------------
 # Entry policy
 # ---------------------------------------------------------------------------
 
@@ -219,9 +206,9 @@ class ATRMeanReversionEntryPolicy(EntryPolicy):
             return None
 
         t = snapshot.timestamp.time()
-        if _in_force_close(t):
+        if in_force_close(t):
             return None
-        if not (_in_day_session(t) or _in_night_session(t)):
+        if not (in_day_session(t) or in_night_session(t)):
             return None
 
         self._ind.update(snapshot.price, snapshot.timestamp)
@@ -310,7 +297,7 @@ class ATRMeanReversionStopPolicy(StopPolicy):
 
         # Force close: set stop to current price so the ratchet locks it in
         # and the engine closes the position on the very next stop check
-        if _in_force_close(t):
+        if in_force_close(t):
             return price
 
         entry = position.entry_price

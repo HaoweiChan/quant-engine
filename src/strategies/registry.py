@@ -14,9 +14,20 @@ from typing import Any
 
 import structlog
 
+from src.strategies import StrategyCategory, StrategyTimeframe
+
 logger = structlog.get_logger(__name__)
 
 _STRATEGIES_DIR = Path(__file__).resolve().parent
+
+_INFRA_MODULES = frozenset({"registry", "param_registry", "param_loader", "scaffold"})
+
+_SLUG_ALIASES: dict[str, str] = {
+    "ta_orb": "intraday/breakout/ta_orb",
+    "atr_mean_reversion": "intraday/mean_reversion/atr_mean_reversion",
+    "pyramid": "daily/trend_following/pyramid_wrapper",
+    "pyramid_wrapper": "daily/trend_following/pyramid_wrapper",
+}
 
 
 @dataclass
@@ -27,18 +38,30 @@ class StrategyInfo:
     factory: str
     param_schema: dict[str, dict] = field(default_factory=dict)
     meta: dict = field(default_factory=dict)
+    category: StrategyCategory | None = None
+    timeframe: StrategyTimeframe | None = None
 
 
 _registry: dict[str, StrategyInfo] | None = None
 
 
 def _discover() -> dict[str, StrategyInfo]:
-    """Scan src/strategies/*.py for modules with create_*_engine + PARAM_SCHEMA."""
+    """Recursively scan src/strategies/ for modules with create_*_engine + PARAM_SCHEMA."""
     result: dict[str, StrategyInfo] = {}
-    for py in sorted(_STRATEGIES_DIR.glob("*.py")):
-        if py.name.startswith("_"):
+    for py in sorted(_STRATEGIES_DIR.rglob("*.py")):
+        if py.name.startswith("_") or py.name == "__init__.py":
             continue
-        mod_name = f"src.strategies.{py.stem}"
+        if py.parent == _STRATEGIES_DIR and py.stem in _INFRA_MODULES:
+            continue
+        # Skip examples directory
+        try:
+            py.relative_to(_STRATEGIES_DIR / "examples")
+            continue
+        except ValueError:
+            pass
+        relative = py.relative_to(_STRATEGIES_DIR)
+        slug = str(relative.with_suffix(""))
+        mod_name = f"src.strategies.{slug.replace('/', '.')}"
         try:
             mod = importlib.import_module(mod_name)
         except Exception:
@@ -55,12 +78,15 @@ def _discover() -> dict[str, StrategyInfo]:
         if not factory_name:
             logger.debug("registry_skip_no_factory", module=mod_name)
             continue
-        slug = py.stem
-        label = slug.replace("_", " ").title()
-        meta = getattr(mod, "STRATEGY_META", {})
+        label = py.stem.replace("_", " ").title()
+        meta = getattr(mod, "STRATEGY_META", {}) or {}
+        cat = meta.get("category")
+        tf = meta.get("timeframe")
         result[slug] = StrategyInfo(
             name=label, slug=slug, module=mod_name,
-            factory=factory_name, param_schema=schema, meta=meta or {},
+            factory=factory_name, param_schema=schema, meta=meta,
+            category=cat if isinstance(cat, StrategyCategory) else None,
+            timeframe=tf if isinstance(tf, StrategyTimeframe) else None,
         )
         logger.debug("registry_discovered", slug=slug)
     return result
@@ -73,6 +99,17 @@ def _ensure_loaded() -> dict[str, StrategyInfo]:
     return _registry
 
 
+def _resolve_slug(slug: str) -> str:
+    """Resolve a slug, following aliases if needed."""
+    return _SLUG_ALIASES.get(slug, slug)
+
+
+def invalidate() -> None:
+    """Clear the registry cache. Next access triggers re-discovery."""
+    global _registry
+    _registry = None
+
+
 def register(
     slug: str,
     module: str,
@@ -83,9 +120,14 @@ def register(
     """Explicitly register a strategy (for strategies outside src/strategies/)."""
     reg = _ensure_loaded()
     label = slug.replace("_", " ").title()
+    m = meta or {}
+    cat = m.get("category")
+    tf = m.get("timeframe")
     reg[slug] = StrategyInfo(
         name=label, slug=slug, module=module,
-        factory=factory, param_schema=param_schema, meta=meta or {},
+        factory=factory, param_schema=param_schema, meta=m,
+        category=cat if isinstance(cat, StrategyCategory) else None,
+        timeframe=tf if isinstance(tf, StrategyTimeframe) else None,
     )
 
 
@@ -97,9 +139,10 @@ def get_all() -> dict[str, StrategyInfo]:
 def get_info(slug: str) -> StrategyInfo:
     """Return StrategyInfo for a specific strategy. Raises KeyError if unknown."""
     reg = _ensure_loaded()
-    if slug not in reg:
+    resolved = _resolve_slug(slug)
+    if resolved not in reg:
         raise KeyError(f"Unknown strategy '{slug}'. Available: {list(reg.keys())}")
-    return reg[slug]
+    return reg[resolved]
 
 
 def get_schema(slug: str) -> dict[str, Any]:
@@ -120,7 +163,7 @@ def get_schema(slug: str) -> dict[str, Any]:
             params[key]["min"] = spec["min"]
         if "max" in spec:
             params[key]["max"] = spec["max"]
-    return {"strategy": slug, "parameters": params, "meta": info.meta}
+    return {"strategy": info.slug, "parameters": params, "meta": info.meta}
 
 
 def get_defaults(slug: str) -> dict[str, Any]:
@@ -134,7 +177,7 @@ def get_active_params(slug: str) -> dict[str, Any]:
     defaults = get_defaults(slug)
     try:
         from src.strategies.param_loader import load_strategy_params
-        overrides = load_strategy_params(slug)
+        overrides = load_strategy_params(_resolve_slug(slug))
         if overrides:
             defaults.update(overrides)
     except Exception:
@@ -159,6 +202,16 @@ def get_param_grid(slug: str) -> dict[str, dict]:
             "value": spec["default"],
         }
     return result
+
+
+def get_by_category(category: StrategyCategory) -> dict[str, StrategyInfo]:
+    """Return strategies matching the given category."""
+    return {s: i for s, i in _ensure_loaded().items() if i.category == category}
+
+
+def get_by_timeframe(timeframe: StrategyTimeframe) -> dict[str, StrategyInfo]:
+    """Return strategies matching the given timeframe."""
+    return {s: i for s, i in _ensure_loaded().items() if i.timeframe == timeframe}
 
 
 def validate_schemas() -> list[str]:

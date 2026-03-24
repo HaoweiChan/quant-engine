@@ -44,6 +44,8 @@ from src.core.types import (
     MarketSnapshot,
     Position,
 )
+from src.strategies import StrategyCategory, StrategyTimeframe
+from src.strategies._session_utils import in_day_session, in_force_close, in_or_window
 
 if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
@@ -82,33 +84,12 @@ PARAM_SCHEMA: dict[str, dict] = {
 }
 
 STRATEGY_META: dict = {
-    "recommended_timeframe": "intraday",
+    "category": StrategyCategory.BREAKOUT,
+    "timeframe": StrategyTimeframe.INTRADAY,
+    "session": "day",
     "description": "Threshold-Adjusting Opening Range Breakout for TAIFEX futures.",
     "paper": "Modified ORB Strategies with Threshold Adjusting on Taiwan Futures Market (IEEE 2019)",
 }
-
-
-# ---------------------------------------------------------------------------
-# Session helpers  (mirrors atr_mean_reversion.py)
-# ---------------------------------------------------------------------------
-
-def _in_day_session(t: time) -> bool:
-    return time(8, 45) <= t <= time(13, 15)
-
-
-def _in_or_window(t: time) -> bool:
-    """8:45 <= t < 9:00 — the 15-minute Opening Range building window."""
-    return time(8, 45) <= t < time(9, 0)
-
-
-def _in_force_close(_t: time) -> bool:
-    """Disabled: positions held until trend reversal or stop.
-
-    The strategy captures multi-day drift by not force-closing.
-    Exit is driven by the trailing stop or trend-reversal logic
-    in the stop policy.
-    """
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +126,7 @@ class _ORBState:
     def update_or(self, price: float, ts: datetime) -> None:
         if self.or_frozen:
             return
-        if _in_or_window(ts.time()):
+        if in_or_window(ts.time()):
             self.or_high = max(self.or_high or price, price)
             self.or_low = min(self.or_low or price, price)
 
@@ -249,11 +230,11 @@ class TAORBEntryPolicy(EntryPolicy):
         ts = snapshot.timestamp
         t = ts.time()
         price = snapshot.price
-        if not _in_day_session(t):
+        if not in_day_session(t):
             return None
         self.orb_state.reset_if_new_day(ts)
         self._maybe_update_daily_close(price, ts)
-        if _in_or_window(t):
+        if in_or_window(t):
             self.orb_state.update_or(price, ts)
             return None
         if not self.orb_state.or_frozen:
@@ -266,7 +247,7 @@ class TAORBEntryPolicy(EntryPolicy):
             return None
         if t > self._latest_entry:
             return None
-        if _in_force_close(t):
+        if in_force_close(t, mode="disabled"):
             return None
         trend = self.trend_filter.trend()
         if trend == "neutral":
@@ -321,7 +302,7 @@ class TAORBEntryPolicy(EntryPolicy):
     def _maybe_update_daily_close(self, price: float, ts: datetime) -> None:
         """Feed the trend filter with the first bar of each day session."""
         d = ts.date()
-        if d != self._last_close_update_date and _in_day_session(ts.time()):
+        if d != self._last_close_update_date and in_day_session(ts.time()):
             self.trend_filter.update_daily_close(price, d)
             self._last_close_update_date = d
 

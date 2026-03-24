@@ -7,6 +7,7 @@ can discover it uniformly.
 from __future__ import annotations
 
 from src.core.position_engine import create_pyramid_engine  # noqa: F401
+from src.strategies import StrategyCategory, StrategyTimeframe
 
 PARAM_SCHEMA: dict[str, dict] = {
     "max_levels":          {"type": "int",   "default": 4,    "min": 1,   "max": 8,
@@ -25,4 +26,8 @@ PARAM_SCHEMA: dict[str, dict] = {
                              "description": "Minimum model confidence to enter a trade."},
 }
 
-STRATEGY_META: dict = {}
+STRATEGY_META: dict = {
+    "category": StrategyCategory.TREND_FOLLOWING,
+    "timeframe": StrategyTimeframe.DAILY,
+    "description": "Pyramid trend-following with Kelly sizing and chandelier stops.",
+}
