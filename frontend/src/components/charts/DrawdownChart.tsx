@@ -1,5 +1,4 @@
-import { useEffect, useRef } from "react";
-import { createChart, type IChartApi, AreaSeries } from "lightweight-charts";
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
 import { colors } from "@/lib/theme";
 
 interface DrawdownChartProps {
@@ -7,15 +6,14 @@ interface DrawdownChartProps {
   height?: number;
 }
 
-const MAX_CHART_POINTS = 2000;
+const MAX_POINTS = 800;
 
-function downsample(data: number[], maxPoints: number): number[] {
+function downsample<T>(data: T[], maxPoints: number): T[] {
   if (data.length <= maxPoints) return data;
   const step = data.length / maxPoints;
-  const result: number[] = [];
+  const result: T[] = [];
   for (let i = 0; i < maxPoints; i++) {
-    const idx = Math.round(i * step);
-    result.push(data[idx]);
+    result.push(data[Math.round(i * step)]);
   }
   if (result[result.length - 1] !== data[data.length - 1]) {
     result.push(data[data.length - 1]);
@@ -24,65 +22,57 @@ function downsample(data: number[], maxPoints: number): number[] {
 }
 
 export function DrawdownChart({ equity, height = 200 }: DrawdownChartProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
+  if (equity.length === 0) return null;
 
-  useEffect(() => {
-    if (!containerRef.current || equity.length === 0) return;
-    const chart = createChart(containerRef.current, {
-      width: containerRef.current.clientWidth,
-      height,
-      layout: {
-        background: { color: colors.card },
-        textColor: colors.dim,
-        fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 9,
-        attributionLogo: false,
-      },
-      grid: {
-        vertLines: { color: colors.grid },
-        horzLines: { color: colors.grid },
-      },
-      rightPriceScale: { borderColor: colors.cardBorder },
-      timeScale: { borderColor: colors.cardBorder, visible: false },
-    });
-    chartRef.current = chart;
+  let peak = equity[0];
+  const raw = equity.map((v, i) => {
+    if (v > peak) peak = v;
+    const dd = (v - peak) / peak;
+    return { idx: i, dd: dd * 100 };
+  });
+  const data = downsample(raw, MAX_POINTS);
 
-    let peak = equity[0];
-    const dd = equity.map((v) => {
-      if (v > peak) peak = v;
-      return ((v - peak) / peak) * 100;
-    });
+  const minDD = Math.min(...data.map((d) => d.dd));
+  const yMin = Math.floor(minDD / 2) * 2 - 2;
 
-    const ds = downsample(dd, MAX_CHART_POINTS);
-    const baseDate = new Date("2025-01-01");
-    const series = chart.addSeries(AreaSeries, {
-      lineColor: colors.red,
-      lineWidth: 1,
-      topColor: "rgba(255,82,82,0.25)",
-      bottomColor: "rgba(255,82,82,0.02)",
-    });
-    series.setData(
-      ds.map((v, i) => {
-        const d = new Date(baseDate);
-        d.setDate(d.getDate() + i);
-        return { time: d.toISOString().slice(0, 10) as string, value: v };
-      }),
-    );
-    chart.timeScale().fitContent();
-
-    const handleResize = () => {
-      if (containerRef.current) {
-        chart.applyOptions({ width: containerRef.current.clientWidth });
-        chart.timeScale().fitContent();
-      }
-    };
-    window.addEventListener("resize", handleResize);
-    return () => {
-      window.removeEventListener("resize", handleResize);
-      chart.remove();
-    };
-  }, [equity, height]);
-
-  return <div ref={containerRef} />;
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <AreaChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
+        <defs>
+          <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgba(255,82,82,0.6)" />
+            <stop offset="100%" stopColor="rgba(255,82,82,0.15)" />
+          </linearGradient>
+        </defs>
+        <XAxis dataKey="idx" hide />
+        <YAxis
+          domain={[yMin, 0]}
+          tick={{ fontSize: 8, fill: colors.dim, fontFamily: "'JetBrains Mono'" }}
+          tickFormatter={(v: number) => `${v.toFixed(0)}%`}
+          axisLine={{ stroke: colors.cardBorder }}
+          width={40}
+        />
+        <ReferenceLine y={0} stroke={colors.cardBorder} strokeDasharray="3 3" />
+        <Tooltip
+          contentStyle={{
+            background: colors.sidebar,
+            border: `1px solid ${colors.cardBorder}`,
+            fontFamily: "'JetBrains Mono'",
+            fontSize: 10,
+            color: colors.text,
+          }}
+          formatter={(value: number) => [`${value.toFixed(2)}%`, "Drawdown"]}
+          labelFormatter={() => ""}
+        />
+        <Area
+          type="stepAfter"
+          dataKey="dd"
+          stroke={colors.red}
+          strokeWidth={1.5}
+          fill="url(#ddGrad)"
+          isAnimationActive={false}
+        />
+      </AreaChart>
+    </ResponsiveContainer>
+  );
 }

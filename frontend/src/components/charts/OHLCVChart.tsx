@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
-import { createChart, type IChartApi, type ISeriesApi, type LineWidth, CandlestickSeries, HistogramSeries, LineSeries } from "lightweight-charts";
-import type { OHLCVBar } from "@/lib/api";
+import { createChart, createSeriesMarkers, type IChartApi, type ISeriesApi, type ISeriesMarkersPluginApi, type LineWidth, CandlestickSeries, HistogramSeries, LineSeries } from "lightweight-charts";
+import type { OHLCVBar, TradeSignal } from "@/lib/api";
 import { colors } from "@/lib/theme";
 
 export interface IndicatorOverlay {
@@ -15,6 +15,7 @@ interface OHLCVChartProps {
   data: OHLCVBar[];
   height?: number;
   overlays?: IndicatorOverlay[];
+  signals?: TradeSignal[];
 }
 
 function toUnixTime(ts: string): number {
@@ -36,16 +37,44 @@ function downsampleBars(data: OHLCVBar[], max: number): OHLCVBar[] {
   return result;
 }
 
+function signalsToMarkers(signals: TradeSignal[], barTimes: number[]) {
+  if (!signals.length || !barTimes.length) return [];
+  const timeSet = new Set(barTimes);
+  return signals
+    .map((s) => {
+      const sigTime = toUnixTime(s.timestamp);
+      // Snap signal to nearest bar time
+      let best = barTimes[0];
+      let bestDiff = Math.abs(sigTime - best);
+      for (const t of barTimes) {
+        const diff = Math.abs(sigTime - t);
+        if (diff < bestDiff) { best = t; bestDiff = diff; }
+        if (diff > bestDiff && t > sigTime) break;
+      }
+      const isBuy = s.side === "buy";
+      return {
+        time: best as any,
+        position: isBuy ? "belowBar" as const : "aboveBar" as const,
+        color: isBuy ? colors.green : colors.red,
+        shape: isBuy ? "arrowUp" as const : "arrowDown" as const,
+        text: `${isBuy ? "BUY" : "SELL"} ${s.lots}@${s.price.toFixed(0)}`,
+      };
+    })
+    .sort((a, b) => (a.time as number) - (b.time as number));
+}
+
 export function OHLCVChart({
   data,
   height = 340,
   overlays = [],
+  signals = [],
 }: OHLCVChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const overlaySeriesRef = useRef<ISeriesApi<"Line">[]>([]);
+  const markersPluginRef = useRef<ISeriesMarkersPluginApi<any> | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -94,6 +123,7 @@ export function OHLCVChart({
     window.addEventListener("resize", handleResize);
     return () => {
       window.removeEventListener("resize", handleResize);
+      markersPluginRef.current = null;
       chart.remove();
       overlaySeriesRef.current = [];
     };
@@ -124,6 +154,16 @@ export function OHLCVChart({
       })),
     );
 
+    // Trade signal markers (v5 API: createSeriesMarkers)
+    if (markersPluginRef.current) {
+      markersPluginRef.current.setMarkers([]);
+      markersPluginRef.current = null;
+    }
+    if (signals.length > 0) {
+      const markers = signalsToMarkers(signals, times);
+      markersPluginRef.current = createSeriesMarkers(candleSeriesRef.current, markers);
+    }
+
     for (const s of overlaySeriesRef.current) {
       chart.removeSeries(s);
     }
@@ -142,7 +182,7 @@ export function OHLCVChart({
       overlaySeriesRef.current.push(s);
     }
     chart.timeScale().fitContent();
-  }, [data, overlays]);
+  }, [data, overlays, signals]);
 
   return <div ref={containerRef} />;
 }

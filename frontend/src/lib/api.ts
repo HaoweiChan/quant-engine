@@ -35,6 +35,14 @@ export interface StrategyInfo {
   param_grid: Record<string, { label: string; type: string; default: number[]; value?: number }>;
 }
 
+export interface TradeSignal {
+  timestamp: string;
+  side: "buy" | "sell";
+  price: number;
+  lots: number;
+  reason: string;
+}
+
 export interface BacktestResult {
   equity_curve: number[];
   bnh_equity: number[];
@@ -42,6 +50,12 @@ export interface BacktestResult {
   daily_returns: number[];
   bnh_returns: number[];
   bars_count: number;
+  trade_pnls?: number[];
+  trade_signals?: TradeSignal[];
+  timeframe_minutes?: number;
+  symbol?: string;
+  start?: string;
+  end?: string;
 }
 
 export interface OptimizerStatus {
@@ -219,10 +233,16 @@ export interface ParamRun {
   symbol: string;
   objective: string;
   n_trials: number;
+  search_type?: string;
+  source?: string;
   tag: string | null;
   n_candidates: number;
+  best_candidate_id?: number | null;
   best_params?: Record<string, number>;
   best_metrics?: Record<string, number>;
+  train_start?: string | null;
+  train_end?: string | null;
+  notes?: string | null;
 }
 
 export async function fetchActiveParams(strategy: string): Promise<ActiveParams> {
@@ -235,4 +255,8 @@ export async function fetchParamRuns(strategy: string): Promise<{ runs: ParamRun
 
 export async function activateCandidate(candidateId: number): Promise<Record<string, unknown>> {
   return fetchJSON(`/api/params/activate/${candidateId}`, { method: "POST" });
+}
+
+export async function deleteParamRun(runId: number): Promise<{ status: string; had_active?: boolean; auto_activated?: { candidate_id: number; sharpe: number } | null }> {
+  return fetchJSON(`/api/params/runs/${runId}`, { method: "DELETE" });
 }

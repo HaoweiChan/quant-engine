@@ -36,7 +36,7 @@ export function DistributionChart({ values, bins = 30, height = 200 }: Distribut
         <XAxis
           dataKey="mid"
           tick={{ fontSize: 8, fill: colors.dim, fontFamily: "'JetBrains Mono'" }}
-          tickFormatter={(v: number) => v.toFixed(1)}
+          tickFormatter={(v: number) => Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : v.toFixed(0)}
           axisLine={{ stroke: colors.cardBorder }}
         />
         <YAxis
