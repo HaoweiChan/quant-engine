@@ -1,4 +1,5 @@
 """End-to-end pipeline runner: Data -> Prediction -> Position -> Execution."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -98,7 +99,15 @@ class PipelineRunner:
         engine_state = self._engine.get_state()
         self._state.positions = list(engine_state.positions)
         self._state.mode = engine_state.mode
-        self._state.unrealized_pnl = engine_state.total_unrealized_pnl
+
+        unrealized = 0.0
+        for pos in self._state.positions:
+            if pos.direction == "long":
+                unrealized += (snapshot.price - pos.entry_price) * pos.lots * snapshot.point_value
+            else:
+                unrealized += (pos.entry_price - snapshot.price) * pos.lots * snapshot.point_value
+
+        self._state.unrealized_pnl = unrealized
         self._state.last_signal = signal
 
         current_equity = self._state.equity + self._state.realized_pnl + self._state.unrealized_pnl
@@ -142,9 +151,7 @@ class PipelineRunner:
     def _build_account_state(self, snapshot: MarketSnapshot) -> AccountState:
         equity = self._state.equity + self._state.realized_pnl
         unrealized = self._state.unrealized_pnl
-        margin_used = sum(
-            p.lots * snapshot.margin_per_unit for p in self._state.positions
-        )
+        margin_used = sum(p.lots * snapshot.margin_per_unit for p in self._state.positions)
         margin_avail = max(equity - margin_used, 0.0)
         margin_ratio = margin_used / equity if equity > 0 else 0.0
         peak = max(self._equity_curve) if self._equity_curve else equity
