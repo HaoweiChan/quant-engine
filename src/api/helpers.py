@@ -592,13 +592,15 @@ def _init_war_room() -> None:
     from src.broker_gateway.account_db import AccountDB
     from src.broker_gateway.registry import GatewayRegistry
     from src.trading_session.manager import SessionManager
+    from src.trading_session.session_db import SessionDB
     from src.trading_session.store import AccountEquityStore, SnapshotStore
     db = AccountDB()
     _gateway_registry = GatewayRegistry(db=db)
     _gateway_registry.load_all()
     store = SnapshotStore()
-    _session_manager = SessionManager(registry=_gateway_registry, store=store)
-    _session_manager.restore_from_config()
+    session_db = SessionDB()
+    _session_manager = SessionManager(registry=_gateway_registry, store=store, session_db=session_db)
+    _session_manager.restore_from_db()
     _account_equity_store = AccountEquityStore()
 
 

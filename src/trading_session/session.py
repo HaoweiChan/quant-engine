@@ -58,6 +58,7 @@ class TradingSession:
     initial_equity: float
     current_snapshot: SessionSnapshot | None = None
     peak_equity: float = 0.0
+    deployed_candidate_id: int | None = None
 
     @classmethod
     def create(
@@ -66,13 +67,14 @@ class TradingSession:
         strategy_slug: str,
         symbol: str,
         initial_equity: float = 0.0,
+        status: str = "stopped",
     ) -> TradingSession:
         return cls(
             session_id=str(uuid.uuid4()),
             account_id=account_id,
             strategy_slug=strategy_slug,
             symbol=symbol,
-            status="active",
+            status=status,
             started_at=datetime.now(),
             initial_equity=initial_equity,
             peak_equity=initial_equity,
