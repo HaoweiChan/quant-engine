@@ -73,3 +73,6 @@ logs/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+
+# OpenSpec skills (managed by openspec CLI, not version-controlled)
+.claude/skills/openspec-*/
