@@ -79,3 +79,6 @@ logs/
 
 # Strategy backups
 src/strategies/.backup/
+
+# OpenCode agent config (contains local paths and session data)
+.opencode/
