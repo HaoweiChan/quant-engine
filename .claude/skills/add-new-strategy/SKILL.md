@@ -4,193 +4,172 @@ description: "Integrate a new trading strategy into the quant-engine system. Use
 license: MIT
 metadata:
   author: quant-engine
-  version: "1.0"
+  version: "2.0"
 ---
 
 # Add New Strategy
 
 Step-by-step guide for integrating a new trading strategy into the
-quant-engine backtest/MCP/optimization pipeline. Follow ALL steps —
-skipping any one will leave the strategy partially wired and broken.
+quant-engine backtest/MCP/optimization pipeline.
 
 ## Prerequisites
 
 Before starting, decide:
-- **Strategy slug**: lowercase_snake_case identifier (e.g., `ta_orb`, `mean_reversion_v2`)
-- **Timeframe**: `"daily"` or `"intraday"` (determines bar structure and session helpers)
+- **Strategy slug**: lowercase_snake_case identifier (e.g., `vwap_rubber_band`, `ema_pullback`)
+- **Category**: `breakout`, `mean_reversion`, or `trend_following`
+- **Timeframe**: `intraday` (1min/5min bar) or `daily` (daily bars)
 - **Exit style**: force-close at session end, trailing stop, trend-reversal, or hybrid
 
-## Step 1: Create the Strategy Module
+## Step 1: Scaffold the Strategy (Recommended)
 
-Create `src/strategies/<slug>.py`. The file MUST export three things:
+Use the `scaffold_strategy` MCP tool to generate correct boilerplate:
 
-### 1a. `PARAM_SCHEMA` — parameter definitions
-
-```python
-PARAM_SCHEMA: dict[str, dict] = {
-    "param_name": {
-        "type": "int" | "float",       # Required
-        "default": <value>,             # Required — used as the production default
-        "min": <value>,                 # Required — optimizer lower bound
-        "max": <value>,                 # Required — optimizer upper bound
-        "description": "...",           # Recommended
-        "grid": [v1, v2, v3],           # Optional — discrete grid for sweep
+```
+scaffold_strategy(
+    name="vwap_rubber_band",
+    category="mean_reversion",
+    timeframe="intraday",
+    description="VWAP deviation-based mean reversion scalper",
+    params={
+        "vwap_dev_mult": {"type": "float", "default": 2.0, "min": 1.0, "max": 4.0},
     },
-    # ... one entry per tunable parameter
-}
+)
 ```
 
-Rules:
-- Every parameter in `create_<slug>_engine()` (except `max_loss`, `lots`,
-  `contract_type`) MUST appear in `PARAM_SCHEMA`.
-- Every key in `PARAM_SCHEMA` MUST match a kwarg in `create_<slug>_engine()`.
-- Run `validate_schemas()` from `src.strategies.registry` to check consistency.
+This returns a complete Python file with:
+- `PARAM_SCHEMA` with your params
+- `STRATEGY_META` with enum classification
+- Entry/Stop policy class stubs
+- `create_<slug>_engine()` factory with matching signature
 
-### 1b. `STRATEGY_META` — metadata for MCP discovery
+The file is placed in the correct subdirectory:
+`src/strategies/<timeframe>/<category>/<name>.py`
 
-```python
-STRATEGY_META: dict = {
-    "recommended_timeframe": "intraday",   # or "daily"
-    "description": "One-line human-readable description.",
-    "paper": "Optional citation or reference.",
-}
+**CLI alternative:**
+```bash
+python -m src.strategies.scaffold vwap_rubber_band \
+    --category mean_reversion --timeframe intraday --write
 ```
 
-### 1c. `create_<slug>_engine()` — factory function
+## Step 2: Write and Implement
 
-```python
-def create_<slug>_engine(
-    max_loss: float = 150_000,
-    lots: float = 1.0,
-    contract_type: str = "large",
-    # ... all params from PARAM_SCHEMA with matching defaults ...
-) -> "PositionEngine":
-    from src.core.position_engine import PositionEngine
-    entry = MyEntryPolicy(...)
-    stop  = MyStopPolicy(...)
-    return PositionEngine(
-        entry_policy=entry,
-        add_policy=NoAddPolicy(),
-        stop_policy=stop,
-        config=EngineConfig(max_loss=max_loss),
-    )
+Use `write_strategy_file` to save the scaffolded content:
+
+```
+write_strategy_file(
+    filename="intraday/mean_reversion/vwap_rubber_band",
+    content=<scaffold content>,
+)
 ```
 
-### Strategy components
+Then implement the `should_enter()` and `update_stop()` methods.
 
-Your module also defines the policy classes:
+The strategy is **automatically discovered** — no manual registration needed.
+The registry uses recursive scanning and finds any module with `PARAM_SCHEMA` + `create_*_engine`.
 
-| Component | Base class | Purpose |
-|---|---|---|
-| `EntryPolicy` subclass | `src.core.policies.EntryPolicy` | `should_enter()` → `EntryDecision | None` |
-| `StopPolicy` subclass | `src.core.policies.StopPolicy` | `initial_stop()` and `update_stop()` |
-| Add policy (optional) | `src.core.policies.AddPolicy` | For pyramiding; use `NoAddPolicy()` if not needed |
-
-Key types from `src.core.types`:
-- `MarketSnapshot` — current bar data (`.price`, `.timestamp`, `.atr`, `.point_value`)
-- `EntryDecision` — lots, direction, initial_stop, metadata
-- `EngineState` — current positions, mode, PnL
-- `Position` — entry_price, stop_level, direction, lots
-- `EngineConfig` — max_loss, trail_lookback, margin_limit
-
-### Session helpers (intraday strategies)
-
-For TAIFEX intraday strategies, define time-window helpers:
+## Step 3: Verify Discovery
 
 ```python
-from datetime import time
+from src.strategies.registry import get_info, validate_schemas
 
-def _in_day_session(t: time) -> bool:
-    return time(8, 45) <= t <= time(13, 15)
+info = get_info("intraday/mean_reversion/vwap_rubber_band")
+assert info is not None
 
-def _in_or_window(t: time) -> bool:
-    return time(8, 45) <= t < time(9, 0)
-```
-
-TAIFEX sessions: Day 08:45–13:15, Night 15:15–04:30+1.
-
-## Step 2: Register in `_BUILTIN_FACTORIES`
-
-Edit `src/mcp_server/facade.py` — add the strategy to the factory map:
-
-```python
-_BUILTIN_FACTORIES: dict[str, tuple[str, str]] = {
-    "pyramid": ("src.core.position_engine", "create_pyramid_engine"),
-    "atr_mean_reversion": (...),
-    "<slug>": (
-        "src.strategies.<slug>",
-        "create_<slug>_engine",
-    ),
-}
-```
-
-This enables the MCP tools (`run_backtest`, `run_monte_carlo`,
-`run_parameter_sweep`, `get_parameter_schema`) to discover the strategy.
-
-## Step 3: Auto-Discovery Verification
-
-The strategy registry (`src/strategies/registry.py`) auto-discovers any
-`.py` file in `src/strategies/` that exports `PARAM_SCHEMA` + a
-`create_*_engine` function. Verify it works:
-
-```python
-from src.strategies.registry import get_all, validate_schemas
-
-# Check discovery
-strategies = get_all()
-assert "<slug>" in strategies, f"Strategy not discovered: {list(strategies.keys())}"
-
-# Check schema-factory consistency
 errors = validate_schemas()
-assert not errors, f"Schema errors: {errors}"
+assert not errors
 ```
 
 ## Step 4: Smoke-Test via Backtest
 
-Run a quick backtest to confirm end-to-end wiring:
-
-```python
-from src.mcp_server.facade import run_backtest_for_mcp
-
-result = run_backtest_for_mcp(
+```
+run_backtest(
     scenario="strong_bull",
-    strategy="<slug>",
-    n_bars=21000,       # ~1 month for intraday
-    timeframe="intraday",  # or "daily"
+    strategy="intraday/mean_reversion/vwap_rubber_band",
+    n_bars=21000,
+    timeframe="intraday",
 )
-print(result["trade_count"], result["metrics"]["sharpe"])
 ```
 
-Expect: `trade_count > 0` and no exceptions. If `trade_count == 0`:
-- Check that `MarketSnapshot.timestamp` matches your session windows
-- Verify the entry conditions can be triggered by synthetic data
-- For intraday: ensure `_TAIFEX_SESSIONS` in `src/simulator/monte_carlo.py`
-  covers your strategy's time windows (e.g., 08:45 pre-open bars)
+Expect: `trade_count > 0` and no exceptions.
 
-## Step 5: (Optional) Add TOML Config
-
-Create `src/strategies/configs/<slug>.toml` for parameter overrides:
-
-```toml
-[params]
-trend_n_days = 8
-min_slope_pct = 0.0003
-```
-
-These overrides are loaded by `registry.get_active_params()` and take
-priority over `PARAM_SCHEMA` defaults.
-
-## Step 6: (Optional) Run Optimization
+## Step 5: (Optional) Optimization
 
 Use the `optimize-strategy` skill to tune parameters via the
 backtest-engine MCP's 5-stage loop.
 
+## Directory Structure
+
+```
+src/strategies/
+├── intraday/
+│   ├── breakout/
+│   │   └── ta_orb.py
+│   ├── mean_reversion/
+│   │   └── atr_mean_reversion.py
+│   └── trend_following/
+├── daily/
+│   └── trend_following/
+│       └── pyramid_wrapper.py
+├── _session_utils.py       # shared TAIFEX session helpers
+├── _shared_indicators.py   # shared rolling indicators
+└── scaffold.py             # scaffold generator
+```
+
+## Strategy Module Requirements
+
+Each strategy module MUST export:
+
+### `PARAM_SCHEMA` — parameter definitions
+
+```python
+PARAM_SCHEMA: dict[str, dict] = {
+    "param_name": {
+        "type": "int" | "float",
+        "default": <value>,
+        "min": <value>,
+        "max": <value>,
+        "description": "...",
+        "grid": [v1, v2, v3],  # optional
+    },
+}
+```
+
+### `STRATEGY_META` — classification metadata
+
+```python
+from src.strategies import StrategyCategory, StrategyTimeframe
+
+STRATEGY_META: dict = {
+    "category": StrategyCategory.MEAN_REVERSION,
+    "timeframe": StrategyTimeframe.INTRADAY,
+    "session": "both",
+    "description": "...",
+}
+```
+
+### `create_<slug>_engine()` — factory function
+
+Factory kwarg names MUST match `PARAM_SCHEMA` keys (excluding `max_loss`, `lots`, `contract_type`).
+
+## Intraday Session Helpers
+
+Import from `src.strategies._session_utils`:
+
+```python
+from src.strategies._session_utils import (
+    in_day_session,    # 08:45-13:15
+    in_night_session,  # 15:15-04:30
+    in_or_window,      # 08:45-09:00 (Opening Range)
+    in_force_close,    # 13:25-13:45 / 04:50-05:00
+)
+```
+
 ## Checklist
 
-- [ ] `src/strategies/<slug>.py` created with `PARAM_SCHEMA`, `STRATEGY_META`, `create_<slug>_engine()`
-- [ ] Entry/Stop policy classes inherit from `EntryPolicy`/`StopPolicy`
-- [ ] Factory kwarg names match `PARAM_SCHEMA` keys exactly
-- [ ] `_BUILTIN_FACTORIES` in `facade.py` updated
+- [ ] Scaffold generated via `scaffold_strategy` tool or CLI
+- [ ] Entry/Stop policy classes implement required ABC methods
+- [ ] `PARAM_SCHEMA` keys match factory kwargs
+- [ ] `STRATEGY_META` uses `StrategyCategory` and `StrategyTimeframe` enums
 - [ ] `validate_schemas()` returns no errors
 - [ ] Smoke-test backtest shows `trade_count > 0`
 - [ ] (Optional) TOML config for production overrides
@@ -200,22 +179,12 @@ backtest-engine MCP's 5-stage loop.
 
 1. **Timestamp mismatch**: Synthetic data timestamps must cover your entry
    window. If your strategy needs 08:45 bars, ensure `monte_carlo.py`
-   `_TAIFEX_SESSIONS` includes that period.
+   sessions include that period.
 
 2. **Stop ratchet direction**: The engine only ratchets stops in the
-   favorable direction (`max` for long, `min` for short). `update_stop()`
-   cannot widen the stop — only tighten it or keep it unchanged.
+   favorable direction. `update_stop()` cannot widen the stop.
 
-3. **Entry vs stop policy coupling**: If the stop policy needs data from
-   the entry policy (e.g., OR range at entry time), store it on the entry
-   policy as an attribute and pass the entry policy reference to the stop
-   policy constructor.
+3. **Entry vs stop policy coupling**: Store shared state on the entry
+   policy and pass the reference to the stop policy constructor.
 
-4. **`initial_stop` not called by engine**: The engine uses
-   `EntryDecision.initial_stop` from the entry policy, NOT
-   `StopPolicy.initial_stop()`. Use lazy initialization in `update_stop()`
-   to set targets on the first bar after entry.
-
-5. **Schema-factory mismatch**: If `PARAM_SCHEMA` has `stop_or_mult` but
-   the factory takes `stop_mult`, the MCP tools will fail silently.
-   Always run `validate_schemas()`.
+4. **Schema-factory mismatch**: Run `validate_schemas()` after any change.
