@@ -380,3 +380,141 @@ class TestIntegration:
         active = registry.get_active("test_strat")
         assert active == {"bb_len": 20, "rsi_oversold": 30}
         registry.close()
+
+
+class TestResolveStrategySlug:
+    def test_slug_passthrough(self) -> None:
+        from src.mcp_server.facade import resolve_strategy_slug
+        assert resolve_strategy_slug("intraday/trend_following/ema_trend_pullback") == \
+            "intraday/trend_following/ema_trend_pullback"
+
+    def test_module_factory_resolution(self) -> None:
+        from src.mcp_server.facade import resolve_strategy_slug
+        result = resolve_strategy_slug(
+            "src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"
+        )
+        assert result == "intraday/trend_following/ema_trend_pullback"
+
+    def test_unknown_fallback(self) -> None:
+        from src.mcp_server.facade import resolve_strategy_slug
+        assert resolve_strategy_slug("totally_unknown_xyz") == "totally_unknown_xyz"
+
+
+class TestSaveBacktestRun:
+    def test_persists_single_run(self, registry: ParamRegistry) -> None:
+        run_id = registry.save_backtest_run(
+            strategy="ema_trend_pullback", symbol="TX",
+            params={"lots": 4, "ema_fast": 8},
+            metrics={"sharpe": 1.5, "total_pnl": 1520000, "trade_count": 77},
+            tool="run_backtest_realdata",
+        )
+        assert run_id > 0
+        run = registry._conn.execute(
+            "SELECT * FROM param_runs WHERE id = ?", (run_id,),
+        ).fetchone()
+        assert run["search_type"] == "single"
+        assert run["n_trials"] == 1
+        assert run["source"] == "mcp"
+
+    def test_creates_trial_row(self, registry: ParamRegistry) -> None:
+        run_id = registry.save_backtest_run(
+            strategy="ema_trend_pullback", symbol="TX",
+            params={"lots": 4}, metrics={"sharpe": 1.5, "total_pnl": 1520000},
+        )
+        trials = registry._conn.execute(
+            "SELECT * FROM param_trials WHERE run_id = ?", (run_id,),
+        ).fetchall()
+        assert len(trials) == 1
+        assert trials[0]["sharpe"] == 1.5
+
+    def test_auto_candidate_created(self, registry: ParamRegistry) -> None:
+        run_id = registry.save_backtest_run(
+            strategy="ema_trend_pullback", symbol="TX",
+            params={"bar_agg": 5}, metrics={"sharpe": 1.0},
+        )
+        cands = registry._conn.execute(
+            "SELECT * FROM param_candidates WHERE run_id = ?", (run_id,),
+        ).fetchall()
+        assert len(cands) == 1
+        assert cands[0]["is_active"] == 0
+
+    def test_rejects_module_factory_format(self, registry: ParamRegistry) -> None:
+        with pytest.raises(ValueError, match="normalized slug"):
+            registry.save_backtest_run(
+                strategy="src.strategies.foo:bar", symbol="TX",
+                params={}, metrics={},
+            )
+
+
+class TestStrategyNameMigration:
+    def test_migrates_module_factory_names(self, db_path: Path) -> None:
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS param_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_at TEXT NOT NULL, strategy TEXT NOT NULL, symbol TEXT NOT NULL,
+                train_start TEXT, train_end TEXT, test_start TEXT, test_end TEXT,
+                objective TEXT NOT NULL, is_fraction REAL, n_trials INTEGER NOT NULL,
+                search_type TEXT NOT NULL, source TEXT NOT NULL, tag TEXT, notes TEXT
+            );
+            CREATE TABLE IF NOT EXISTS param_trials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,
+                params TEXT NOT NULL, sharpe REAL, calmar REAL, sortino REAL,
+                profit_factor REAL, win_rate REAL, max_drawdown_pct REAL,
+                trade_count INTEGER, total_pnl REAL, is_oos INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS param_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,
+                trial_id INTEGER, strategy TEXT NOT NULL, params TEXT NOT NULL,
+                label TEXT NOT NULL, regime TEXT, is_active INTEGER NOT NULL DEFAULT 0,
+                activated_at TEXT, notes TEXT
+            );
+            INSERT INTO param_runs (run_at, strategy, symbol, objective, n_trials, search_type, source)
+            VALUES ('2026-01-01', 'src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine', 'TX', 'sharpe', 1, 'grid', 'mcp');
+            INSERT INTO param_candidates (run_id, strategy, params, label)
+            VALUES (1, 'src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine', '{}', 'best_sharpe');
+        """)
+        conn.commit()
+        conn.close()
+        registry = ParamRegistry(db_path=db_path)
+        run = registry._conn.execute("SELECT strategy FROM param_runs WHERE id = 1").fetchone()
+        assert run["strategy"] == "intraday/trend_following/ema_trend_pullback"
+        cand = registry._conn.execute("SELECT strategy FROM param_candidates WHERE run_id = 1").fetchone()
+        assert cand["strategy"] == "intraday/trend_following/ema_trend_pullback"
+        registry.close()
+
+    def test_migration_idempotent(self, db_path: Path) -> None:
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS param_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_at TEXT NOT NULL, strategy TEXT NOT NULL, symbol TEXT NOT NULL,
+                train_start TEXT, train_end TEXT, test_start TEXT, test_end TEXT,
+                objective TEXT NOT NULL, is_fraction REAL, n_trials INTEGER NOT NULL,
+                search_type TEXT NOT NULL, source TEXT NOT NULL, tag TEXT, notes TEXT
+            );
+            CREATE TABLE IF NOT EXISTS param_trials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,
+                params TEXT NOT NULL, sharpe REAL, calmar REAL, sortino REAL,
+                profit_factor REAL, win_rate REAL, max_drawdown_pct REAL,
+                trade_count INTEGER, total_pnl REAL, is_oos INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS param_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,
+                trial_id INTEGER, strategy TEXT NOT NULL, params TEXT NOT NULL,
+                label TEXT NOT NULL, regime TEXT, is_active INTEGER NOT NULL DEFAULT 0,
+                activated_at TEXT, notes TEXT
+            );
+            INSERT INTO param_runs (run_at, strategy, symbol, objective, n_trials, search_type, source)
+            VALUES ('2026-01-01', 'src.strategies.foo.bar:create_bar_engine', 'TX', 'sharpe', 1, 'grid', 'mcp');
+        """)
+        conn.commit()
+        conn.close()
+        r1 = ParamRegistry(db_path=db_path)
+        r1.close()
+        r2 = ParamRegistry(db_path=db_path)
+        run = r2._conn.execute("SELECT strategy FROM param_runs WHERE id = 1").fetchone()
+        assert run["strategy"] == "foo/bar"
+        r2.close()

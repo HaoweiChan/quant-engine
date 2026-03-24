@@ -11,6 +11,8 @@ from typing import Any
 _STRATEGIES_DIR = Path(__file__).resolve().parent.parent / "strategies"
 _BACKUP_DIR = _STRATEGIES_DIR / ".backup"
 
+_INFRA_MODULES = frozenset({"registry", "param_registry", "param_loader", "scaffold"})
+
 FORBIDDEN_MODULES = frozenset({"os", "sys", "subprocess", "socket", "requests", "shutil"})
 
 POLICY_METHODS: dict[str, list[str]] = {
@@ -71,29 +73,43 @@ def validate_strategy_content(content: str, filename: str) -> ValidationResult:
 
 
 def backup_strategy_file(filename: str) -> str | None:
-    """Backup an existing strategy file before overwrite. Returns backup path or None."""
+    """Backup an existing strategy file before overwrite. Returns backup path or None.
+
+    Supports path-like filenames (e.g., "intraday/breakout/ta_orb").
+    Preserves subdirectory structure within .backup/.
+    """
     stem = filename.removesuffix(".py")
     source = _STRATEGIES_DIR / f"{stem}.py"
     if not source.exists():
         return None
-    _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    # Preserve subdirectory structure in backup
     dest = _BACKUP_DIR / f"{stem}.{ts}.py"
+    dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, dest)
     return str(dest)
 
 
 def list_strategy_files() -> list[dict[str, Any]]:
-    """List .py files in src/strategies/ (excluding __init__.py)."""
+    """List strategy .py files recursively, returning path-like stems."""
     results: list[dict[str, Any]] = []
     if not _STRATEGIES_DIR.exists():
         return results
-    for p in sorted(_STRATEGIES_DIR.glob("*.py")):
-        if p.name == "__init__.py":
+    for p in sorted(_STRATEGIES_DIR.rglob("*.py")):
+        if p.name.startswith("_") or p.name == "__init__.py":
             continue
+        if p.parent == _STRATEGIES_DIR and p.stem in _INFRA_MODULES:
+            continue
+        # Skip examples directory
+        try:
+            p.relative_to(_STRATEGIES_DIR / "examples")
+            continue
+        except ValueError:
+            pass
+        relative_stem = str(p.relative_to(_STRATEGIES_DIR)).removesuffix(".py")
         stat = p.stat()
         results.append({
-            "filename": p.stem,
+            "filename": relative_stem,
             "size_bytes": stat.st_size,
             "modified": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
         })

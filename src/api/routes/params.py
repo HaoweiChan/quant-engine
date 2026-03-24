@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 router = APIRouter(prefix="/api/params", tags=["params"])
 
 
-@router.get("/active/{strategy}")
+@router.get("/active/{strategy:path}")
 async def get_active_params(strategy: str) -> dict:
     """Return active optimized params or PARAM_SCHEMA defaults."""
     from src.strategies.param_registry import ParamRegistry
@@ -25,7 +25,7 @@ async def get_active_params(strategy: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Unknown strategy '{strategy}'")
 
 
-@router.get("/runs/{strategy}")
+@router.get("/runs/{strategy:path}")
 async def get_run_history(strategy: str, limit: int = 20) -> dict:
     """Return optimization run history for a strategy."""
     from src.strategies.param_registry import ParamRegistry
@@ -52,3 +52,21 @@ async def activate_candidate(candidate_id: int) -> dict:
     )
     registry.close()
     return {"status": "activated", "candidate_id": candidate_id, **(detail or {})}
+
+
+@router.delete("/runs/{run_id}")
+async def delete_run(run_id: int) -> dict:
+    """Delete a run and its associated trials and candidates.
+
+    If the deleted run held the active candidate, auto-activates the
+    remaining candidate with the highest sharpe.
+    """
+    from src.strategies.param_registry import ParamRegistry
+    registry = ParamRegistry()
+    try:
+        info = registry.delete_run(run_id)
+    except ValueError as exc:
+        registry.close()
+        raise HTTPException(status_code=404, detail=str(exc))
+    registry.close()
+    return {"status": "deleted", "run_id": run_id, **info}

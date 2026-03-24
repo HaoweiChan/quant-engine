@@ -528,13 +528,12 @@ def run_strategy_backtest(
     Returns dict with keys: daily_returns (np.ndarray), equity_curve (list),
     bnh_returns (np.ndarray), bnh_equity (list), metrics (dict), bars_count (int).
     """
-    from src.mcp_server.facade import _BUILTIN_FACTORIES, run_backtest_realdata_for_mcp
+    from src.mcp_server.facade import run_backtest_realdata_for_mcp
 
-    # Map strategy_slug to facade strategy name
     info = STRATEGY_REGISTRY.get(strategy_slug)
     if not info:
         raise ValueError(f"Unknown strategy: {strategy_slug}")
-    facade_name = strategy_slug if strategy_slug in _BUILTIN_FACTORIES else f"{info.module}:{info.factory}"
+    facade_name = strategy_slug
 
     merged_params = dict(strategy_params or {})
     merged_params["max_loss"] = max_loss

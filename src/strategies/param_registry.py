@@ -96,13 +96,119 @@ class ParamRegistry:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._ensure_tables()
+        self._migrate_strategy_names()
+
+    @staticmethod
+    def _validate_strategy_slug(strategy: str) -> None:
+        """Reject module:factory format — callers must normalize first."""
+        if ":" in strategy or strategy.startswith("src."):
+            raise ValueError(
+                f"Strategy must be a normalized slug, got '{strategy}'. "
+                "Use resolve_strategy_slug() before calling registry methods."
+            )
 
     def _ensure_tables(self) -> None:
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
 
+    def _migrate_strategy_names(self) -> None:
+        """One-time fix: convert module:factory strategy names to slugs."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT strategy FROM param_runs WHERE strategy LIKE '%:%'"
+        ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            old = row["strategy"]
+            slug = self._resolve_module_to_slug(old)
+            if slug == old:
+                logger.warning("migration_unresolvable", strategy=old)
+                continue
+            self._conn.execute(
+                "UPDATE param_runs SET strategy = ? WHERE strategy = ?", (slug, old),
+            )
+            self._conn.execute(
+                "UPDATE param_candidates SET strategy = ? WHERE strategy = ?", (slug, old),
+            )
+            logger.info("migrated_strategy_name", old=old, new=slug)
+        self._conn.commit()
+
+    @staticmethod
+    def _resolve_module_to_slug(strategy: str) -> str:
+        """Extract slug from module:factory format, e.g.
+        'src.strategies.intraday.trend_following.foo:create_foo_engine'
+        -> 'intraday/trend_following/foo'
+        """
+        if ":" not in strategy:
+            return strategy
+        mod_part = strategy.split(":")[0]
+        prefix = "src.strategies."
+        if mod_part.startswith(prefix):
+            return mod_part[len(prefix):].replace(".", "/")
+        return strategy
+
     def close(self) -> None:
         self._conn.close()
+
+    # -- save_backtest_run ------------------------------------------------
+
+    def save_backtest_run(
+        self,
+        strategy: str,
+        symbol: str,
+        params: dict[str, Any],
+        metrics: dict[str, Any],
+        source: str = "mcp",
+        tool: str = "run_backtest",
+        tag: str | None = None,
+        notes: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        timeframe: str | None = None,
+    ) -> int:
+        """Persist a single backtest result (not a full sweep). Returns run_id or -1 on error."""
+        self._validate_strategy_slug(strategy)
+        try:
+            now = datetime.now(UTC).isoformat(timespec="seconds")
+            run_tag = tag or f"tool:{tool}"
+            tf_notes = f"tf={timeframe}" if timeframe else None
+            combined_notes = "; ".join(filter(None, [notes, tf_notes]))
+            cur = self._conn.execute(
+                """INSERT INTO param_runs
+                   (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
+                    objective, is_fraction, n_trials, search_type, source, tag, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'single', ?, ?, ?)""",
+                (now, strategy, symbol, start, end, None, None,
+                 "sharpe", None, source, run_tag, combined_notes or None),
+            )
+            run_id = cur.lastrowid
+            assert run_id is not None
+            self._conn.execute(
+                """INSERT INTO param_trials
+                   (run_id, params, sharpe, calmar, sortino, profit_factor,
+                    win_rate, max_drawdown_pct, trade_count, total_pnl, is_oos)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                (run_id, json.dumps(params),
+                 metrics.get("sharpe"), metrics.get("calmar"), metrics.get("sortino"),
+                 metrics.get("profit_factor"), metrics.get("win_rate"),
+                 metrics.get("max_drawdown_pct"),
+                 int(metrics.get("trade_count", 0)),
+                 metrics.get("total_pnl")),
+            )
+            # Auto-create a candidate so the run can be activated
+            sharpe_val = metrics.get("sharpe", 0) or 0
+            self._conn.execute(
+                """INSERT INTO param_candidates
+                   (run_id, trial_id, strategy, params, label, regime, is_active, notes)
+                   VALUES (?, NULL, ?, ?, ?, NULL, 0, NULL)""",
+                (run_id, strategy, json.dumps(params),
+                 f"single_sharpe{sharpe_val:.2f}"),
+            )
+            self._conn.commit()
+            return run_id
+        except Exception:
+            logger.exception("save_backtest_run_failed", strategy=strategy, symbol=symbol)
+            return -1
 
     # -- save_run ---------------------------------------------------------
 
@@ -123,6 +229,7 @@ class ParamRegistry:
         notes: str | None = None,
     ) -> int:
         """Persist a full OptimizerResult. Returns the run_id."""
+        self._validate_strategy_slug(strategy)
         trials_dicts = result.trials.to_dicts() if len(result.trials) > 0 else []
         now = datetime.now(UTC).isoformat(timespec="seconds")
         cur = self._conn.execute(
@@ -233,6 +340,50 @@ class ParamRegistry:
         )
         self._conn.commit()
 
+    # -- delete_run -------------------------------------------------------
+
+    def delete_run(self, run_id: int) -> dict[str, Any]:
+        """Delete a run and all its trials and candidates.
+
+        If the deleted run contained the active candidate, auto-activate the
+        remaining candidate with the highest sharpe for that strategy.
+        Returns info about what happened (e.g. auto-activated candidate).
+        """
+        run_row = self._conn.execute(
+            "SELECT id, strategy FROM param_runs WHERE id = ?", (run_id,),
+        ).fetchone()
+        if run_row is None:
+            raise ValueError(f"Run {run_id} not found")
+        strategy = run_row["strategy"]
+        had_active = self._conn.execute(
+            "SELECT id FROM param_candidates WHERE run_id = ? AND is_active = 1",
+            (run_id,),
+        ).fetchone() is not None
+        self._conn.execute("DELETE FROM param_candidates WHERE run_id = ?", (run_id,))
+        self._conn.execute("DELETE FROM param_trials WHERE run_id = ?", (run_id,))
+        self._conn.execute("DELETE FROM param_runs WHERE id = ?", (run_id,))
+        self._conn.commit()
+        result: dict[str, Any] = {"deleted": True, "had_active": had_active}
+        if had_active:
+            auto = self._auto_activate_best(strategy)
+            result["auto_activated"] = auto
+        return result
+
+    def _auto_activate_best(self, strategy: str) -> dict[str, Any] | None:
+        """Activate the candidate with the highest sharpe for a strategy."""
+        row = self._conn.execute(
+            """SELECT c.id AS cid, t.sharpe
+               FROM param_candidates c
+               JOIN param_trials t ON t.run_id = c.run_id AND t.is_oos = 0
+               WHERE c.strategy = ?
+               ORDER BY t.sharpe DESC LIMIT 1""",
+            (strategy,),
+        ).fetchone()
+        if row is None:
+            return None
+        self.activate(row["cid"])
+        return {"candidate_id": row["cid"], "sharpe": row["sharpe"]}
+
     # -- get_active -------------------------------------------------------
 
     def get_active(self, strategy: str) -> dict[str, Any] | None:
@@ -317,19 +468,22 @@ class ParamRegistry:
         self,
         strategy: str,
         limit: int = 20,
+        search_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return recent runs for a strategy, most recent first."""
-        runs = self._conn.execute(
-            """SELECT r.id, r.run_at, r.strategy, r.symbol, r.objective,
-                      r.is_fraction, r.n_trials, r.search_type, r.source,
-                      r.tag, r.notes, r.train_start, r.train_end,
-                      r.test_start, r.test_end
-               FROM param_runs r
-               WHERE r.strategy = ?
-               ORDER BY r.run_at DESC, r.id DESC
-               LIMIT ?""",
-            (strategy, limit),
-        ).fetchall()
+        sql = """SELECT r.id, r.run_at, r.strategy, r.symbol, r.objective,
+                        r.is_fraction, r.n_trials, r.search_type, r.source,
+                        r.tag, r.notes, r.train_start, r.train_end,
+                        r.test_start, r.test_end
+                 FROM param_runs r
+                 WHERE r.strategy = ?"""
+        params: list[Any] = [strategy]
+        if search_type is not None:
+            sql += " AND r.search_type = ?"
+            params.append(search_type)
+        sql += " ORDER BY r.run_at DESC, r.id DESC LIMIT ?"
+        params.append(limit)
+        runs = self._conn.execute(sql, params).fetchall()
         result = []
         for r in runs:
             run_id = r["id"]
@@ -341,10 +495,12 @@ class ParamRegistry:
                    ORDER BY {} DESC LIMIT 1""".format(r["objective"]),
                 (run_id,),
             ).fetchone()
-            n_candidates = self._conn.execute(
-                "SELECT COUNT(*) as cnt FROM param_candidates WHERE run_id = ?",
+            cand_row = self._conn.execute(
+                "SELECT COUNT(*) as cnt, MIN(id) as first_id FROM param_candidates WHERE run_id = ?",
                 (run_id,),
-            ).fetchone()["cnt"]
+            ).fetchone()
+            n_candidates = cand_row["cnt"]
+            best_candidate_id = cand_row["first_id"]
             entry: dict[str, Any] = {
                 "run_id": run_id,
                 "run_at": r["run_at"],
@@ -362,6 +518,7 @@ class ParamRegistry:
                 "test_start": r["test_start"],
                 "test_end": r["test_end"],
                 "n_candidates": n_candidates,
+                "best_candidate_id": best_candidate_id,
             }
             if best:
                 entry["best_params"] = json.loads(best["params"])

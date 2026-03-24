@@ -14,36 +14,48 @@ from src.simulator.types import PRESETS, PathConfig
 # Strategy factory resolution
 # ---------------------------------------------------------------------------
 
-_BUILTIN_FACTORIES: dict[str, tuple[str, str]] = {
-    "pyramid": ("src.core.position_engine", "create_pyramid_engine"),
-    "atr_mean_reversion": (
-        "src.strategies.atr_mean_reversion",
-        "create_atr_mean_reversion_engine",
-    ),
-    "ta_orb": (
-        "src.strategies.ta_orb",
-        "create_ta_orb_engine",
-    ),
-}
-
 
 def resolve_factory(strategy: str) -> Any:
     """Return a callable engine factory for the given strategy name.
 
-    Supports:
-    - Built-in names: "pyramid", "atr_mean_reversion"
-    - Dynamic: "module.path:factory_name"
+    Resolution order:
+    1. Strategy registry (slug or alias)
+    2. "module:factory" format (external strategies)
+    3. Raise ValueError
     """
-    if strategy in _BUILTIN_FACTORIES:
-        mod_path, fn_name = _BUILTIN_FACTORIES[strategy]
-        mod = importlib.import_module(mod_path)
-        return getattr(mod, fn_name)
+    from src.strategies.registry import get_all, get_info
+    try:
+        info = get_info(strategy)
+        mod = importlib.import_module(info.module)
+        return getattr(mod, info.factory)
+    except KeyError:
+        pass
     if ":" in strategy:
         mod_path, fn_name = strategy.rsplit(":", 1)
         mod = importlib.import_module(mod_path)
         return getattr(mod, fn_name)
-    available = list(_BUILTIN_FACTORIES.keys())
+    available = list(get_all().keys())
     raise ValueError(f"Unknown strategy '{strategy}'. Available: {available}")
+
+
+def resolve_strategy_slug(strategy: str) -> str:
+    """Convert any strategy identifier to its canonical registry slug.
+
+    Handles: slug, legacy alias, module:factory format.
+    Falls back to the raw string if resolution fails.
+    """
+    from src.strategies.registry import get_info
+    try:
+        info = get_info(strategy)
+        return info.slug
+    except (KeyError, AttributeError):
+        pass
+    if ":" in strategy:
+        mod_part = strategy.split(":")[0]
+        prefix = "src.strategies."
+        if mod_part.startswith(prefix):
+            return mod_part[len(prefix):].replace(".", "/")
+    return strategy
 
 
 def _build_pyramid_config(params: dict[str, Any] | None) -> PyramidConfig:
@@ -201,6 +213,35 @@ def _format_backtest_result(result, *, label: str, strategy: str, n_bars: int, e
     return out
 
 
+def _extract_trade_pnls(trade_log) -> list[float]:
+    """Pair entry/exit fills to compute per-trade PnL in price points * lots."""
+    pnls: list[float] = []
+    entry = None
+    for fill in trade_log:
+        if entry is None:
+            entry = fill
+        else:
+            if fill.side != entry.side:
+                diff = (fill.fill_price - entry.fill_price) * entry.lots
+                pnls.append(diff if entry.side == "buy" else -diff)
+                entry = None
+    return pnls
+
+
+def _serialize_trade_log(trade_log) -> list[dict[str, Any]]:
+    """Convert Fill objects to JSON-serializable dicts for the frontend."""
+    return [
+        {
+            "timestamp": f.timestamp.isoformat() if hasattr(f.timestamp, "isoformat") else str(f.timestamp),
+            "side": f.side,
+            "price": f.fill_price,
+            "lots": f.lots,
+            "reason": f.reason,
+        }
+        for f in trade_log
+    ]
+
+
 def run_backtest_for_mcp(
     scenario: str,
     strategy_params: dict[str, Any] | None = None,
@@ -219,13 +260,30 @@ def run_backtest_for_mcp(
     paths = generate_paths(1, path_config)
     bars, timestamps = _bars_from_path(paths[0], path_config, timeframe)
     result = runner.run(bars, timestamps=timestamps)
-    return _format_backtest_result(
+    out = _format_backtest_result(
         result,
         label=f"synthetic:{scenario}",
         strategy=strategy,
         n_bars=len(bars),
         extra={"scenario": scenario, "timeframe": timeframe},
     )
+    try:
+        from src.strategies.param_registry import ParamRegistry
+        registry = ParamRegistry()
+        save_metrics = {**out.get("metrics", {}), "total_pnl": out.get("total_pnl")}
+        run_id = registry.save_backtest_run(
+            strategy=resolve_strategy_slug(strategy),
+            symbol=f"synthetic:{scenario}",
+            params=strategy_params or {},
+            metrics=save_metrics,
+            source="mcp", tool="run_backtest",
+        )
+        registry.close()
+        if run_id > 0:
+            out["run_id"] = run_id
+    except Exception:
+        pass
+    return out
 
 
 def run_backtest_realdata_for_mcp(
@@ -298,6 +356,29 @@ def run_backtest_realdata_for_mcp(
     base["bnh_returns"] = bnh_returns
     base["bnh_equity"] = bnh_eq.tolist()
     base["bars_count"] = len(bars)
+    base["trade_pnls"] = _extract_trade_pnls(result.trade_log)
+    base["trade_signals"] = _serialize_trade_log(result.trade_log)
+    # Detect effective timeframe from bar_agg param
+    bar_agg = (strategy_params or {}).get("bar_agg", 1)
+    base["timeframe_minutes"] = int(bar_agg)
+    try:
+        from src.strategies.param_registry import ParamRegistry
+        registry = ParamRegistry()
+        save_metrics = {**base.get("metrics", {}), "total_pnl": base.get("total_pnl")}
+        run_id = registry.save_backtest_run(
+            strategy=resolve_strategy_slug(strategy),
+            symbol=symbol,
+            params=strategy_params or {},
+            metrics=save_metrics,
+            source="mcp", tool="run_backtest_realdata",
+            start=start, end=end,
+            timeframe=f"{bar_agg}min",
+        )
+        registry.close()
+        if run_id > 0:
+            base["run_id"] = run_id
+    except Exception:
+        pass
     return base
 
 
@@ -503,7 +584,8 @@ def run_sweep_for_mcp(
         registry = ParamRegistry()
         search = "random" if n_samples is not None else "grid"
         run_id = registry.save_run(
-            result=result, strategy=strategy, symbol=f"synthetic:{scenario}",
+            result=result, strategy=resolve_strategy_slug(strategy),
+            symbol=f"synthetic:{scenario}",
             objective=metric, search_type=search, source="mcp",
         )
         pareto = registry.get_pareto_frontier(run_id)
@@ -607,13 +689,11 @@ def run_stress_for_mcp(
     return {"strategy": strategy, "results": results}
 
 
-def get_strategy_parameter_schema(strategy: str = "pyramid") -> dict[str, Any]:
+def get_strategy_parameter_schema(strategy: str = "daily/trend_following/pyramid_wrapper") -> dict[str, Any]:
     """Return parameter schema with current values, types, and ranges."""
     from src.strategies.registry import get_schema
-    # Map legacy "pyramid" slug to wrapper module
-    slug = "pyramid_wrapper" if strategy == "pyramid" else strategy
     try:
-        schema = get_schema(slug)
+        schema = get_schema(strategy)
     except KeyError:
         return {"error": f"No schema available for strategy '{strategy}'"}
     schema["scenarios"] = _scenario_descriptions()
