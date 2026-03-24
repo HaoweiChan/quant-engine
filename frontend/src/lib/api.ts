@@ -260,3 +260,85 @@ export async function activateCandidate(candidateId: number): Promise<Record<str
 export async function deleteParamRun(runId: number): Promise<{ status: string; had_active?: boolean; auto_activated?: { candidate_id: number; sharpe: number } | null }> {
   return fetchJSON(`/api/params/runs/${runId}`, { method: "DELETE" });
 }
+
+export async function compareRuns(runIds: number[]): Promise<Record<string, unknown>[]> {
+  return fetchJSON(`/api/params/compare?run_ids=${runIds.join(",")}`);
+}
+
+// --- Deploy & Sessions ---
+
+export interface WarRoomSession {
+  session_id: string;
+  account_id: string;
+  strategy_slug: string;
+  symbol: string;
+  status: "active" | "paused" | "stopped";
+  deployed_candidate_id: number | null;
+  deployed_params: Record<string, number> | null;
+  backtest_metrics: Record<string, number> | null;
+  is_stale: boolean;
+  active_candidate_id: number | null;
+  snapshot: {
+    equity: number;
+    unrealized_pnl: number;
+    drawdown_pct: number;
+    trade_count: number;
+  } | null;
+}
+
+export interface WarRoomData {
+  accounts: Record<string, {
+    display_name: string;
+    broker: string;
+    connected: boolean;
+    connect_error?: string | null;
+    equity: number;
+    margin_used: number;
+    margin_available: number;
+  }>;
+  all_sessions: WarRoomSession[];
+}
+
+export interface DeployLogEntry {
+  id: number;
+  deployed_at: string;
+  account_id: string;
+  session_id: string;
+  strategy: string;
+  symbol: string;
+  candidate_id: number;
+  params: string;
+  source: string;
+}
+
+export async function fetchWarRoomTyped(): Promise<WarRoomData> {
+  return fetchJSON("/api/war-room");
+}
+
+export async function deployToAccount(
+  accountId: string,
+  body: { strategy_slug: string; symbol: string; candidate_id: number },
+): Promise<{ session_id: string; deployed_candidate_id: number; params: Record<string, number>; status: string }> {
+  return fetchJSON(`/api/deploy/${accountId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function fetchDeployHistory(accountId?: string): Promise<DeployLogEntry[]> {
+  const url = accountId ? `/api/deploy/history/${accountId}` : "/api/deploy/history";
+  return fetchJSON(url);
+}
+
+export async function startSession(sessionId: string): Promise<{ session_id: string; status: string }> {
+  return fetchJSON(`/api/sessions/${sessionId}/start`, { method: "POST" });
+}
+
+export async function stopSession(sessionId: string): Promise<{ session_id: string; status: string }> {
+  return fetchJSON(`/api/sessions/${sessionId}/stop`, { method: "POST" });
+}
+
+export async function pauseSession(sessionId: string): Promise<{ session_id: string; status: string }> {
+  return fetchJSON(`/api/sessions/${sessionId}/pause`, { method: "POST" });
+}

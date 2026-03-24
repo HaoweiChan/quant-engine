@@ -6,8 +6,8 @@ import { ChartCard } from "@/components/ChartCard";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
 import { useUiStore } from "@/stores/uiStore";
 import { useTradingStore } from "@/stores/tradingStore";
-import { createAccount, fetchAccounts, fetchWarRoom } from "@/lib/api";
-import type { AccountInfo } from "@/lib/api";
+import { createAccount, fetchAccounts, fetchWarRoomTyped, deployToAccount, fetchDeployHistory, startSession, stopSession, pauseSession, compareRuns, fetchActiveParams, fetchParamRuns } from "@/lib/api";
+import type { AccountInfo, WarRoomSession, WarRoomData, DeployLogEntry, ParamRun } from "@/lib/api";
 import { colors } from "@/lib/theme";
 import { useLiveFeed } from "@/hooks/useLiveFeed";
 import { useRiskAlerts } from "@/hooks/useRiskAlerts";
@@ -173,21 +173,196 @@ function AccountsTab() {
   );
 }
 
-function WarRoomTab() {
-  const [data, setData] = useState<Record<string, unknown> | null>(null);
+const statusColor = (s: string) => s === "active" ? colors.green : s === "paused" ? colors.gold : colors.dim;
+const statusLabel = (s: string) => s.toUpperCase();
+const fmtParams = (p: Record<string, number> | null) => {
+  if (!p) return "—";
+  return Object.entries(p).map(([k, v]) => `${k}=${v}`).join(", ");
+};
+
+function DeployTile({ session, onAction }: { session: WarRoomSession; onAction: () => void }) {
+  const bm = session.backtest_metrics;
+  const handleLifecycle = async (action: "start" | "stop" | "pause") => {
+    try {
+      if (action === "start") await startSession(session.session_id);
+      else if (action === "stop") await stopSession(session.session_id);
+      else await pauseSession(session.session_id);
+      onAction();
+    } catch { /* silently fail */ }
+  };
+  return (
+    <div className="rounded-md p-3" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-[11px] font-medium" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
+          {session.strategy_slug.split("/").pop()} <span style={{ color: colors.muted }}>· {session.symbol}</span>
+        </span>
+        <span className="text-[7px] font-semibold px-1.5 py-0.5 rounded text-white" style={{ background: statusColor(session.status), letterSpacing: "0.5px" }}>
+          {statusLabel(session.status)}
+        </span>
+      </div>
+      {session.deployed_params && (
+        <div className="text-[8px] mb-1 truncate" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
+          {fmtParams(session.deployed_params)}
+        </div>
+      )}
+      {bm && (
+        <div className="flex gap-3 text-[9px] mb-1.5" style={{ fontFamily: "var(--font-mono)" }}>
+          <span style={{ color: (bm.sharpe ?? 0) > 1 ? colors.green : colors.gold }}>S: {bm.sharpe?.toFixed(2)}</span>
+          <span style={{ color: (bm.total_pnl ?? 0) >= 0 ? colors.green : colors.red }}>PnL: ${Math.round(bm.total_pnl ?? 0).toLocaleString()}</span>
+          <span style={{ color: colors.muted }}>WR: {((bm.win_rate ?? 0) * 100).toFixed(0)}%</span>
+        </div>
+      )}
+      {session.snapshot && (
+        <div className="flex gap-3 text-[8px] mb-1.5" style={{ fontFamily: "var(--font-mono)", color: colors.cyan }}>
+          <span>Live Eq: ${session.snapshot.equity.toLocaleString()}</span>
+          <span>DD: {session.snapshot.drawdown_pct.toFixed(1)}%</span>
+          <span>Trades: {session.snapshot.trade_count}</span>
+        </div>
+      )}
+      {!session.snapshot && session.deployed_candidate_id && (
+        <div className="text-[8px] mb-1.5" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>Live: Awaiting data…</div>
+      )}
+      {session.is_stale && (
+        <div className="text-[8px] mb-1.5 px-1.5 py-0.5 rounded inline-block" style={{ background: "rgba(255,165,0,0.12)", color: colors.orange, fontFamily: "var(--font-mono)" }}>
+          New params available
+        </div>
+      )}
+      <div className="flex gap-1.5 mt-1">
+        {session.status === "stopped" && (
+          <button onClick={() => handleLifecycle("start")} disabled={!session.deployed_candidate_id}
+            className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none text-white" style={{ background: session.deployed_candidate_id ? colors.green : colors.dim, fontFamily: "var(--font-mono)" }}
+            title={!session.deployed_candidate_id ? "Deploy params first" : ""}>Start</button>
+        )}
+        {session.status === "active" && (
+          <>
+            <button onClick={() => handleLifecycle("pause")} className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none text-white" style={{ background: colors.gold, fontFamily: "var(--font-mono)" }}>Pause</button>
+            <button onClick={() => handleLifecycle("stop")} className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none text-white" style={{ background: colors.red, fontFamily: "var(--font-mono)" }}>Stop</button>
+          </>
+        )}
+        {session.status === "paused" && (
+          <>
+            <button onClick={() => handleLifecycle("start")} className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none text-white" style={{ background: colors.green, fontFamily: "var(--font-mono)" }}>Resume</button>
+            <button onClick={() => handleLifecycle("stop")} className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none text-white" style={{ background: colors.red, fontFamily: "var(--font-mono)" }}>Stop</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ComparePanel({ strategySlug, onClose }: { strategySlug: string; onClose: () => void }) {
+  const [runs, setRuns] = useState<ParamRun[]>([]);
+  const [selected, setSelected] = useState<number[]>([]);
+  const [compared, setCompared] = useState<Record<string, unknown>[]>([]);
   useEffect(() => {
-    const poll = () => fetchWarRoom().then(setData).catch(() => {});
+    fetchParamRuns(strategySlug).then((r) => setRuns(r.runs)).catch(() => {});
+  }, [strategySlug]);
+  const handleCompare = async () => {
+    if (selected.length < 2) return;
+    const data = await compareRuns(selected);
+    setCompared(data);
+  };
+  const metrics = ["sharpe", "total_pnl", "win_rate", "max_drawdown_pct", "profit_factor", "trade_count"];
+  const metricLabels: Record<string, string> = { sharpe: "Sharpe", total_pnl: "PnL", win_rate: "Win Rate", max_drawdown_pct: "Max DD", profit_factor: "PF", trade_count: "Trades" };
+  const fmtMetric = (key: string, v: number | undefined) => {
+    if (v === undefined) return "—";
+    if (key === "win_rate") return `${(v * 100).toFixed(0)}%`;
+    if (key === "max_drawdown_pct") return `${(v * 100).toFixed(1)}%`;
+    if (key === "total_pnl") return `$${Math.round(v).toLocaleString()}`;
+    return v.toFixed(2);
+  };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.6)" }} onClick={onClose}>
+      <div className="rounded-lg p-5 w-[500px] max-h-[80vh] overflow-y-auto" style={{ background: colors.sidebar, border: `1px solid ${colors.cardBorder}` }} onClick={(e) => e.stopPropagation()}>
+        <div className="flex justify-between items-center mb-3">
+          <span className="text-[12px] font-bold" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>Compare Runs</span>
+          <button onClick={onClose} className="text-[16px] cursor-pointer border-none bg-transparent" style={{ color: colors.muted }}>✕</button>
+        </div>
+        <div className="mb-3">
+          <div className="text-[9px] mb-1" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>Select 2-3 runs:</div>
+          <div className="flex flex-wrap gap-1.5">
+            {runs.map((r) => (
+              <button key={r.run_id} onClick={() => setSelected((prev) => prev.includes(r.run_id) ? prev.filter((x) => x !== r.run_id) : [...prev, r.run_id].slice(-3))}
+                className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none" style={{
+                  fontFamily: "var(--font-mono)",
+                  background: selected.includes(r.run_id) ? "rgba(90,138,242,0.25)" : colors.card,
+                  color: selected.includes(r.run_id) ? colors.blue : colors.muted,
+                  border: `1px solid ${selected.includes(r.run_id) ? colors.blue : colors.cardBorder}`,
+                }}>
+                #{r.run_id} S:{r.best_metrics?.sharpe?.toFixed(2) ?? "—"}
+              </button>
+            ))}
+          </div>
+          <button onClick={handleCompare} disabled={selected.length < 2}
+            className="mt-2 px-3 py-1 rounded text-[9px] cursor-pointer border-none text-white" style={{ background: selected.length >= 2 ? "#2A5A9A" : colors.dim, fontFamily: "var(--font-mono)" }}>
+            Compare
+          </button>
+        </div>
+        {compared.length > 0 && (
+          <table className="w-full text-[9px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
+                <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>Metric</th>
+                {compared.map((c, i) => (
+                  <th key={i} className="text-right py-1 px-2" style={{ color: colors.text }}>Run #{String(c.run_id)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {metrics.map((m) => {
+                const vals = compared.map((c) => {
+                  const bm = c.best_metrics as Record<string, number> | undefined;
+                  return bm?.[m];
+                });
+                const best = m === "max_drawdown_pct"
+                  ? Math.min(...vals.filter((v) => v !== undefined) as number[])
+                  : Math.max(...vals.filter((v) => v !== undefined) as number[]);
+                return (
+                  <tr key={m} style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
+                    <td className="py-1 pr-2" style={{ color: colors.muted }}>{metricLabels[m]}</td>
+                    {vals.map((v, i) => (
+                      <td key={i} className="text-right py-1 px-2" style={{ color: v === best ? colors.green : colors.text }}>
+                        {fmtMetric(m, v)}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WarRoomTab() {
+  const [data, setData] = useState<WarRoomData | null>(null);
+  const [deployHistory, setDeployHistory] = useState<DeployLogEntry[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [compareSlug, setCompareSlug] = useState<string | null>(null);
+  const poll = () => {
+    fetchWarRoomTyped().then(setData).catch(() => {});
+    fetchDeployHistory().then(setDeployHistory).catch(() => {});
+  };
+  useEffect(() => {
     poll();
     const interval = setInterval(poll, 15000);
     return () => clearInterval(interval);
   }, []);
-  const accounts = (data?.accounts ?? {}) as Record<string, { display_name: string; broker: string; connected: boolean; connect_error?: string | null; equity: number; margin_used: number; margin_available: number }>;
+  const accounts = data?.accounts ?? {};
+  const sessions = data?.all_sessions ?? [];
+  const sessionsByAccount: Record<string, WarRoomSession[]> = {};
+  for (const s of sessions) {
+    (sessionsByAccount[s.account_id] ??= []).push(s);
+  }
   return (
-    <div className="p-3">
+    <div className="p-3 overflow-y-auto">
       <SectionLabel>ACCOUNT OVERVIEW</SectionLabel>
       <div className="flex flex-wrap gap-2.5 mb-5">
         {Object.entries(accounts).map(([id, info]) => {
           const marginPct = (info.margin_used + info.margin_available) > 0 ? info.margin_used / (info.margin_used + info.margin_available) * 100 : 0;
+          const acctSessions = sessionsByAccount[id] ?? [];
           return (
             <div key={id} className="rounded-md p-3.5 min-w-[240px] flex-1" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
               <div className="flex items-center justify-between mb-1.5">
@@ -199,15 +374,14 @@ function WarRoomTab() {
               <div className="text-[22px] font-bold mb-0.5" style={{ fontFamily: "var(--font-mono)", color: info.connected ? colors.green : colors.dim }}>
                 {info.connected ? `$${info.equity.toLocaleString()}` : "—"}
               </div>
-              {!info.connected && info.connect_error && (
-                <div className="text-[8px] mt-1 leading-snug" style={{ color: colors.orange, fontFamily: "var(--font-mono)" }}>
-                  {info.connect_error}
-                </div>
-              )}
               {info.connected && (
                 <div className="text-[7px] tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
                   MARGIN <span className="ml-1.5 text-[9px]" style={{ color: marginPct < 50 ? colors.green : marginPct < 80 ? colors.gold : colors.red }}>{marginPct.toFixed(1)}%</span>
+                  <span className="ml-3">STRATEGIES <span className="text-[9px]" style={{ color: colors.cyan }}>{acctSessions.length}</span></span>
                 </div>
+              )}
+              {!info.connected && info.connect_error && (
+                <div className="text-[8px] mt-1 leading-snug" style={{ color: colors.orange, fontFamily: "var(--font-mono)" }}>{info.connect_error}</div>
               )}
             </div>
           );
@@ -216,6 +390,82 @@ function WarRoomTab() {
           <div className="text-[11px] py-5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>No accounts configured.</div>
         )}
       </div>
+      <SectionLabel>STRATEGY DEPLOYMENTS</SectionLabel>
+      {sessions.length === 0 ? (
+        <div className="text-[10px] py-3 mb-4" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+          No strategies deployed. Use the Backtest page to activate params, then deploy here.
+        </div>
+      ) : (
+        <div className="mb-4">
+          {Object.entries(sessionsByAccount).map(([acctId, acctSessions]) => (
+            <div key={acctId} className="mb-3">
+              <div className="text-[9px] mb-1.5 tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+                {accounts[acctId]?.display_name ?? acctId}
+              </div>
+              <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
+                {acctSessions.map((s) => (
+                  <div key={s.session_id}>
+                    <DeployTile session={s} onAction={poll} />
+                    <button onClick={() => setCompareSlug(s.strategy_slug)}
+                      className="mt-1 w-full text-[8px] py-0.5 cursor-pointer border-none rounded" style={{ background: "rgba(90,138,242,0.1)", color: colors.blue, fontFamily: "var(--font-mono)" }}>
+                      Compare Runs
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="rounded-[5px]" style={{ border: `1px solid ${colors.cardBorder}`, background: colors.card }}>
+        <button onClick={() => setHistoryOpen(!historyOpen)}
+          className="w-full flex items-center justify-between px-3 py-2 text-[10px] font-semibold cursor-pointer border-none"
+          style={{ background: "transparent", color: colors.muted, fontFamily: "var(--font-mono)" }}>
+          <span>DEPLOYMENT HISTORY {deployHistory.length > 0 && `(${deployHistory.length})`}</span>
+          <span>{historyOpen ? "▲" : "▼"}</span>
+        </button>
+        {historyOpen && (
+          <div className="px-3 pb-3" style={{ overflowX: "auto" }}>
+            {deployHistory.length === 0 ? (
+              <div className="text-[10px] py-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No deployments yet.</div>
+            ) : (
+              <table className="w-full text-[9px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
+                    {["Time", "Account", "Strategy", "Symbol", "Candidate"].map((h) => (
+                      <th key={h} className="text-left py-1 pr-2" style={{ color: colors.dim }}>{h}</th>
+                    ))}
+                    <th className="text-right py-1" style={{ color: colors.dim }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {deployHistory.map((d) => (
+                    <tr key={d.id} style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
+                      <td className="py-1 pr-2" style={{ color: colors.muted }}>{d.deployed_at?.slice(0, 16).replace("T", " ")}</td>
+                      <td className="py-1 pr-2" style={{ color: colors.text }}>{d.account_id}</td>
+                      <td className="py-1 pr-2" style={{ color: colors.text }}>{d.strategy.split("/").pop()}</td>
+                      <td className="py-1 pr-2" style={{ color: colors.muted }}>{d.symbol}</td>
+                      <td className="py-1 pr-2" style={{ color: colors.cyan }}>#{d.candidate_id}</td>
+                      <td className="text-right py-1">
+                        <button onClick={async () => {
+                          try {
+                            await deployToAccount(d.account_id, { strategy_slug: d.strategy, symbol: d.symbol, candidate_id: d.candidate_id });
+                            poll();
+                          } catch { /* silently fail */ }
+                        }}
+                          className="px-1.5 py-0.5 rounded text-[8px] cursor-pointer border-none" style={{ background: "rgba(90,138,242,0.2)", color: colors.blue, fontFamily: "var(--font-mono)" }}>
+                          Revert
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+      </div>
+      {compareSlug && <ComparePanel strategySlug={compareSlug} onClose={() => setCompareSlug(null)} />}
     </div>
   );
 }
