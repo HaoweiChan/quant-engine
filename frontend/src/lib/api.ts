@@ -243,6 +243,7 @@ export interface ParamRun {
   train_start?: string | null;
   train_end?: string | null;
   notes?: string | null;
+  initial_capital?: number | null;
 }
 
 export async function fetchActiveParams(strategy: string): Promise<ActiveParams> {

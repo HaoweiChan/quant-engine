@@ -328,6 +328,7 @@ export function Backtest() {
                       <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>Period</th>
                       <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>TF</th>
                       <SortHeader label="Type" field="search_type" align="left" />
+                      <th className="text-right py-1 pr-2" style={{ color: colors.dim }}>Capital</th>
                       <SortHeader label="Sharpe" field="sharpe" />
                       <SortHeader label="PnL" field="total_pnl" />
                       <SortHeader label="Win Rate" field="win_rate" />
@@ -370,6 +371,9 @@ export function Backtest() {
                           <td className="py-1 pr-2" style={{ color: colors.dim }}>{period}</td>
                           <td className="py-1 pr-2" style={{ color: colors.cyan }}>{tf}</td>
                           <td className="py-1 pr-2" style={{ color: colors.muted }}>{run.search_type ?? "grid"}</td>
+                          <td className="text-right py-1 pr-2" style={{ color: colors.dim }}>
+                            {run.initial_capital != null ? `$${(run.initial_capital / 1_000_000).toFixed(1)}M` : "—"}
+                          </td>
                           <td className="text-right py-1 pr-2" style={{ color: sharpe != null && sharpe > 1 ? colors.green : sharpe != null && sharpe > 0 ? colors.gold : colors.red }}>
                             {sharpe != null ? sharpe.toFixed(2) : "—"}
                           </td>

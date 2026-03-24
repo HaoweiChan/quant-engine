@@ -248,6 +248,7 @@ def run_backtest_for_mcp(
     strategy: str = "pyramid",
     n_bars: int | None = None,
     timeframe: str = "daily",
+    initial_equity: float = 2_000_000.0,
 ) -> dict[str, Any]:
     """Run a single backtest on synthetic data."""
     from src.simulator.monte_carlo import TAIFEX_BARS_PER_DAY
@@ -256,7 +257,7 @@ def run_backtest_for_mcp(
     path_config = _make_path_config(scenario, n_bars, timeframe)
     is_intraday = timeframe in ("intraday", "1m")
     ppy = TAIFEX_BARS_PER_DAY * 252.0 if is_intraday else 252.0
-    runner = _build_runner(strategy, strategy_params, periods_per_year=ppy)
+    runner = _build_runner(strategy, strategy_params, periods_per_year=ppy, initial_equity=initial_equity)
     paths = generate_paths(1, path_config)
     bars, timestamps = _bars_from_path(paths[0], path_config, timeframe)
     result = runner.run(bars, timestamps=timestamps)
@@ -277,6 +278,7 @@ def run_backtest_for_mcp(
             params=strategy_params or {},
             metrics=save_metrics,
             source="mcp", tool="run_backtest",
+            initial_capital=initial_equity,
         )
         registry.close()
         if run_id > 0:
@@ -373,6 +375,7 @@ def run_backtest_realdata_for_mcp(
             source="mcp", tool="run_backtest_realdata",
             start=start, end=end,
             timeframe=f"{bar_agg}min",
+            initial_capital=initial_equity,
         )
         registry.close()
         if run_id > 0:
@@ -587,6 +590,7 @@ def run_sweep_for_mcp(
             result=result, strategy=resolve_strategy_slug(strategy),
             symbol=f"synthetic:{scenario}",
             objective=metric, search_type=search, source="mcp",
+            initial_capital=2_000_000.0,
         )
         pareto = registry.get_pareto_frontier(run_id)
         pareto_candidates = [

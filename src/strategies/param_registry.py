@@ -28,21 +28,22 @@ _LARGE_TRIAL_THRESHOLD = 5000
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS param_runs (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_at       TEXT NOT NULL,
-    strategy     TEXT NOT NULL,
-    symbol       TEXT NOT NULL,
-    train_start  TEXT,
-    train_end    TEXT,
-    test_start   TEXT,
-    test_end     TEXT,
-    objective    TEXT NOT NULL,
-    is_fraction  REAL,
-    n_trials     INTEGER NOT NULL,
-    search_type  TEXT NOT NULL,
-    source       TEXT NOT NULL,
-    tag          TEXT,
-    notes        TEXT
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at          TEXT NOT NULL,
+    strategy        TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    train_start     TEXT,
+    train_end       TEXT,
+    test_start      TEXT,
+    test_end        TEXT,
+    objective       TEXT NOT NULL,
+    is_fraction     REAL,
+    n_trials        INTEGER NOT NULL,
+    search_type     TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    tag             TEXT,
+    notes           TEXT,
+    initial_capital REAL
 );
 
 CREATE TABLE IF NOT EXISTS param_trials (
@@ -110,6 +111,14 @@ class ParamRegistry:
     def _ensure_tables(self) -> None:
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
+        self._migrate_add_initial_capital()
+
+    def _migrate_add_initial_capital(self) -> None:
+        """Add initial_capital column to param_runs if missing (one-time migration)."""
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(param_runs)").fetchall()]
+        if "initial_capital" not in cols:
+            self._conn.execute("ALTER TABLE param_runs ADD COLUMN initial_capital REAL")
+            self._conn.commit()
 
     def _migrate_strategy_names(self) -> None:
         """One-time fix: convert module:factory strategy names to slugs."""
@@ -165,6 +174,7 @@ class ParamRegistry:
         start: str | None = None,
         end: str | None = None,
         timeframe: str | None = None,
+        initial_capital: float = 2_000_000.0,
     ) -> int:
         """Persist a single backtest result (not a full sweep). Returns run_id or -1 on error."""
         self._validate_strategy_slug(strategy)
@@ -176,10 +186,12 @@ class ParamRegistry:
             cur = self._conn.execute(
                 """INSERT INTO param_runs
                    (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
-                    objective, is_fraction, n_trials, search_type, source, tag, notes)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'single', ?, ?, ?)""",
+                    objective, is_fraction, n_trials, search_type, source, tag, notes,
+                    initial_capital)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'single', ?, ?, ?, ?)""",
                 (now, strategy, symbol, start, end, None, None,
-                 "sharpe", None, source, run_tag, combined_notes or None),
+                 "sharpe", None, source, run_tag, combined_notes or None,
+                 initial_capital),
             )
             run_id = cur.lastrowid
             assert run_id is not None
@@ -227,6 +239,7 @@ class ParamRegistry:
         source: str = "cli",
         tag: str | None = None,
         notes: str | None = None,
+        initial_capital: float = 2_000_000.0,
     ) -> int:
         """Persist a full OptimizerResult. Returns the run_id."""
         self._validate_strategy_slug(strategy)
@@ -235,10 +248,12 @@ class ParamRegistry:
         cur = self._conn.execute(
             """INSERT INTO param_runs
                (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
-                objective, is_fraction, n_trials, search_type, source, tag, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                objective, is_fraction, n_trials, search_type, source, tag, notes,
+                initial_capital)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (now, strategy, symbol, train_start, train_end, test_start, test_end,
-             objective, is_fraction, len(trials_dicts), search_type, source, tag, notes),
+             objective, is_fraction, len(trials_dicts), search_type, source, tag, notes,
+             initial_capital),
         )
         run_id = cur.lastrowid
         assert run_id is not None
@@ -474,7 +489,7 @@ class ParamRegistry:
         sql = """SELECT r.id, r.run_at, r.strategy, r.symbol, r.objective,
                         r.is_fraction, r.n_trials, r.search_type, r.source,
                         r.tag, r.notes, r.train_start, r.train_end,
-                        r.test_start, r.test_end
+                        r.test_start, r.test_end, r.initial_capital
                  FROM param_runs r
                  WHERE r.strategy = ?"""
         params: list[Any] = [strategy]
@@ -519,6 +534,7 @@ class ParamRegistry:
                 "test_end": r["test_end"],
                 "n_candidates": n_candidates,
                 "best_candidate_id": best_candidate_id,
+                "initial_capital": r["initial_capital"],
             }
             if best:
                 entry["best_params"] = json.loads(best["params"])
