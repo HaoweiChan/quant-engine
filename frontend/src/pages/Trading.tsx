@@ -6,7 +6,7 @@ import { ChartCard } from "@/components/ChartCard";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
 import { useUiStore } from "@/stores/uiStore";
 import { useTradingStore } from "@/stores/tradingStore";
-import { createAccount, fetchAccounts, fetchWarRoomTyped, deployToAccount, fetchDeployHistory, startSession, stopSession, pauseSession, compareRuns, fetchActiveParams, fetchParamRuns } from "@/lib/api";
+import { createAccount, fetchAccounts, fetchWarRoomTyped, deployToAccount, fetchDeployHistory, startSession, stopSession, pauseSession, compareRuns, fetchParamRuns } from "@/lib/api";
 import type { AccountInfo, WarRoomSession, WarRoomData, DeployLogEntry, ParamRun } from "@/lib/api";
 import { colors } from "@/lib/theme";
 import { useLiveFeed } from "@/hooks/useLiveFeed";
@@ -336,13 +336,50 @@ function ComparePanel({ strategySlug, onClose }: { strategySlug: string; onClose
   );
 }
 
+import { OHLCVChart } from "@/components/charts/OHLCVChart";
+import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
+
+function CommandChartPane({ activeAccountId }: { activeAccountId: string }) {
+  // We'll use mocked data for now, since we don't have the real live tick data easily accessible in WarRoomData.
+  // The key={activeAccountId} ensures this component (and Lightweight Charts) cleanly unmounts/remounts on account switch.
+  const mockEquity = Array.from({ length: 50 }, (_, i) => 100000 + i * 100 + (Math.random() - 0.5) * 500);
+  
+  return (
+    <div className="flex flex-col gap-2 h-full">
+      <div className="flex-1 min-h-[220px]" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}>
+        <div className="text-[10px] p-2 border-b" style={{ borderColor: colors.cardBorder, color: colors.muted, fontFamily: "var(--font-mono)" }}>
+          LIVE CHART
+        </div>
+        <div className="p-2 h-[calc(100%-30px)]">
+           <OHLCVChart data={[]} height={180} />
+        </div>
+      </div>
+      <div className="flex-1 min-h-[160px]" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}>
+        <div className="text-[10px] p-2 border-b" style={{ borderColor: colors.cardBorder, color: colors.muted, fontFamily: "var(--font-mono)" }}>
+          EQUITY CURVE ({activeAccountId})
+        </div>
+        <div className="p-2 h-[calc(100%-30px)]">
+           <EquityCurveChart equity={mockEquity} height={120} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function WarRoomTab() {
   const [data, setData] = useState<WarRoomData | null>(null);
   const [deployHistory, setDeployHistory] = useState<DeployLogEntry[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [compareSlug, setCompareSlug] = useState<string | null>(null);
+
+  const activeAccountId = useTradingStore((s) => s.activeAccountId);
+  const setActiveAccountId = useTradingStore((s) => s.setActiveAccountId);
+
   const poll = () => {
-    fetchWarRoomTyped().then(setData).catch(() => {});
+    fetchWarRoomTyped().then((res) => {
+      setData(res);
+      useTradingStore.getState().setWarRoomData(res as unknown as Record<string, unknown>);
+    }).catch(() => {});
     fetchDeployHistory().then(setDeployHistory).catch(() => {});
   };
   useEffect(() => {
@@ -350,26 +387,46 @@ function WarRoomTab() {
     const interval = setInterval(poll, 15000);
     return () => clearInterval(interval);
   }, []);
+
   const accounts = data?.accounts ?? {};
-  const sessions = data?.all_sessions ?? [];
+  const allSessions = data?.all_sessions ?? [];
   const sessionsByAccount: Record<string, WarRoomSession[]> = {};
-  for (const s of sessions) {
+  for (const s of allSessions) {
     (sessionsByAccount[s.account_id] ??= []).push(s);
   }
+  const sessions = activeAccountId ? (sessionsByAccount[activeAccountId] || []) : [];
+  const activeAccountData = activeAccountId ? accounts[activeAccountId] : null;
+
   return (
     <div className="p-3 overflow-y-auto">
-      <SectionLabel>ACCOUNT OVERVIEW</SectionLabel>
+      <SectionLabel>ACCOUNT OVERVIEW (Click a card to isolate risk book)</SectionLabel>
       <div className="flex flex-wrap gap-2.5 mb-5">
         {Object.entries(accounts).map(([id, info]) => {
           const marginPct = (info.margin_used + info.margin_available) > 0 ? info.margin_used / (info.margin_used + info.margin_available) * 100 : 0;
           const acctSessions = sessionsByAccount[id] ?? [];
+          const isSelected = activeAccountId === id;
+          const cardClasses = isSelected 
+            ? "rounded-md p-3.5 min-w-[240px] flex-1 cursor-pointer ring-2 ring-[#69f0ae] ring-offset-2 ring-offset-[#0d0d26]" 
+            : "rounded-md p-3.5 min-w-[240px] flex-1 cursor-pointer opacity-50 hover:opacity-80 transition-opacity";
+
           return (
-            <div key={id} className="rounded-md p-3.5 min-w-[240px] flex-1" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
+            <div 
+              key={id} 
+              className={cardClasses} 
+              style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}
+              onClick={() => setActiveAccountId(id)}
+            >
               <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{info.display_name || id}</span>
-                <span className="text-[7px] font-semibold px-1.5 py-0.5 rounded text-white" style={{ background: info.connected ? colors.green : "#6B4040", letterSpacing: "0.5px" }}>
-                  {info.connected ? "LIVE" : "DISCONNECTED"}
+                <span className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
+                  {info.display_name || id} {isSelected && <span style={{color: colors.green, marginLeft: 4}}>◉ SELECTED</span>}
                 </span>
+                {info.broker === "mock" ? (
+                  <span className="text-[7px] font-semibold px-1.5 py-0.5 rounded text-white" style={{ background: colors.cyan, color: "#0d0d26", letterSpacing: "0.5px" }}>MOCK</span>
+                ) : (
+                  <span className="text-[7px] font-semibold px-1.5 py-0.5 rounded text-white" style={{ background: info.connected ? colors.green : "#6B4040", letterSpacing: "0.5px" }}>
+                    {info.connected ? "LIVE" : "DISCONNECTED"}
+                  </span>
+                )}
               </div>
               <div className="text-[22px] font-bold mb-0.5" style={{ fontFamily: "var(--font-mono)", color: info.connected ? colors.green : colors.dim }}>
                 {info.connected ? `$${info.equity.toLocaleString()}` : "—"}
@@ -390,33 +447,58 @@ function WarRoomTab() {
           <div className="text-[11px] py-5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>No accounts configured.</div>
         )}
       </div>
-      <SectionLabel>STRATEGY DEPLOYMENTS</SectionLabel>
-      {sessions.length === 0 ? (
-        <div className="text-[10px] py-3 mb-4" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
-          No strategies deployed. Use the Backtest page to activate params, then deploy here.
-        </div>
-      ) : (
-        <div className="mb-4">
-          {Object.entries(sessionsByAccount).map(([acctId, acctSessions]) => (
-            <div key={acctId} className="mb-3">
-              <div className="text-[9px] mb-1.5 tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-                {accounts[acctId]?.display_name ?? acctId}
-              </div>
-              <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
-                {acctSessions.map((s) => (
-                  <div key={s.session_id}>
-                    <DeployTile session={s} onAction={poll} />
-                    <button onClick={() => setCompareSlug(s.strategy_slug)}
-                      className="mt-1 w-full text-[8px] py-0.5 cursor-pointer border-none rounded" style={{ background: "rgba(90,138,242,0.1)", color: colors.blue, fontFamily: "var(--font-mono)" }}>
-                      Compare Runs
-                    </button>
-                  </div>
-                ))}
-              </div>
+      
+      {activeAccountId && activeAccountData && (
+        <>
+          <SectionLabel>COMMAND CENTER: {activeAccountData.display_name || activeAccountId} (Showing {sessions.length} Configured Strategies)</SectionLabel>
+          <div className="flex flex-col lg:flex-row gap-4 mb-4">
+            <div className="flex-1">
+               <CommandChartPane key={activeAccountId} activeAccountId={activeAccountId} />
             </div>
-          ))}
-        </div>
+            <div className="flex-1 flex flex-col gap-2">
+              <div className="text-[10px] font-semibold tracking-wider mb-1" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>STRATEGY CARDS</div>
+              {sessions.length === 0 ? (
+                <div className="text-[10px] py-3" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+                  No strategies deployed for this account. Use the Backtest page to activate params, then deploy here.
+                </div>
+              ) : (
+                <div className="grid gap-2 grid-cols-1">
+                  {sessions.map((s) => (
+                    <div key={s.session_id}>
+                      <DeployTile session={s} onAction={poll} />
+                      <button onClick={() => setCompareSlug(s.strategy_slug)}
+                        className="mt-1 w-full text-[8px] py-0.5 cursor-pointer border-none rounded" style={{ background: "rgba(90,138,242,0.1)", color: colors.blue, fontFamily: "var(--font-mono)" }}>
+                        Compare Runs
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="mb-5 rounded-[5px]" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
+            <div className="text-[10px] p-2 border-b" style={{ borderColor: colors.cardBorder, color: colors.muted, fontFamily: "var(--font-mono)" }}>
+              ALERTS / ORDER LOG (Unified Blotter - Filtered to {activeAccountData.display_name || activeAccountId})
+            </div>
+            <div className="p-2 text-[9px]" style={{ fontFamily: "var(--font-mono)" }}>
+              {deployHistory.filter((d) => d.account_id === activeAccountId).length === 0 ? (
+                <div className="py-1" style={{ color: colors.dim }}>No recent activity for this account.</div>
+              ) : (
+                deployHistory.filter((d) => d.account_id === activeAccountId).slice(0, 10).map((d) => (
+                  <div key={d.id} className="flex gap-3 py-0.5 border-b last:border-b-0" style={{ borderColor: colors.cardBorder, color: colors.muted }}>
+                    <span style={{ color: colors.dim }}>{d.deployed_at?.slice(0, 16).replace("T", " ")}</span>
+                    <span style={{ color: colors.cyan }}>DEPLOY</span>
+                    <span style={{ color: colors.text }}>{d.strategy.split("/").pop()}</span>
+                    <span>{d.symbol}</span>
+                    <span style={{ color: colors.dim }}>candidate #{d.candidate_id}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </>
       )}
+
       <div className="rounded-[5px]" style={{ border: `1px solid ${colors.cardBorder}`, background: colors.card }}>
         <button onClick={() => setHistoryOpen(!historyOpen)}
           className="w-full flex items-center justify-between px-3 py-2 text-[10px] font-semibold cursor-pointer border-none"
@@ -471,21 +553,48 @@ function WarRoomTab() {
 }
 
 function BlotterTab() {
-  const [filter, setFilter] = useState("all");
+  const activeAccountId = useTradingStore((s) => s.activeAccountId);
+  const [history, setHistory] = useState<DeployLogEntry[]>([]);
+
+  useEffect(() => {
+    if (!activeAccountId) return;
+    fetchDeployHistory(activeAccountId).then(setHistory).catch(() => {});
+  }, [activeAccountId]);
+
   return (
     <div className="flex">
-      <Sidebar>
-        <SectionLabel>FILTER</SectionLabel>
-        <ParamInput label="Account">
-          <select value={filter} onChange={(e) => setFilter(e.target.value)} className="w-full rounded px-1.5 py-1 text-[11px]" style={{ background: "var(--color-qe-input)", border: "1px solid var(--color-qe-input-border)", color: "var(--color-qe-text)", fontFamily: "var(--font-mono)", outline: "none" }}>
-            <option value="all">All Accounts</option>
-          </select>
-        </ParamInput>
-      </Sidebar>
       <div className="flex-1 p-3" style={{ minWidth: 0 }}>
-        <div className="text-[11px] py-5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-          Activity feed will update when trading sessions are active.
-        </div>
+        <SectionLabel>ACTIVITY FEED {activeAccountId ? `— ${activeAccountId}` : ""}</SectionLabel>
+        {!activeAccountId ? (
+          <div className="text-[11px] py-5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+            Select an account in the War Room to view its activity feed.
+          </div>
+        ) : history.length === 0 ? (
+          <div className="text-[10px] py-5" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+            No activity recorded for this account yet.
+          </div>
+        ) : (
+          <table className="w-full text-[9px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
+                {["Time", "Event", "Strategy", "Symbol", "Candidate"].map((h) => (
+                  <th key={h} className="text-left py-1 pr-3" style={{ color: colors.dim }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((d) => (
+                <tr key={d.id} style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
+                  <td className="py-1 pr-3" style={{ color: colors.dim }}>{d.deployed_at?.slice(0, 16).replace("T", " ")}</td>
+                  <td className="py-1 pr-3" style={{ color: colors.cyan }}>DEPLOY</td>
+                  <td className="py-1 pr-3" style={{ color: colors.text }}>{d.strategy.split("/").pop()}</td>
+                  <td className="py-1 pr-3" style={{ color: colors.muted }}>{d.symbol}</td>
+                  <td className="py-1 pr-3" style={{ color: colors.cyan }}>#{d.candidate_id}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );
