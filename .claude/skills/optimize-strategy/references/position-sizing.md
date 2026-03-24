@@ -1,14 +1,7 @@
----
-name: quant-pyramid-math
-description: "Pyramid position sizing mathematics and Kelly criterion. Read when modifying add-trigger thresholds, lot schedules, or position sizes."
-license: MIT
-metadata:
-  author: quant-engine
-  version: "1.0"
----
+# Position Sizing and Pyramid Mathematics
 
 Mathematics behind pyramid lot schedules, add-trigger thresholds,
-Kelly sizing, and margin safety.
+Kelly sizing, and margin safety. Covers both daily and intraday.
 
 ## Why the Lot Schedule Ratio Matters
 
@@ -97,7 +90,7 @@ This is correct: don't trade when you have no edge.
 - Above 0.35: too aggressive, large drawdowns during losing streaks
 - NEVER exceed 0.50 (full Kelly) — this is the mathematical maximum
 
-## Margin Safety Mathematics
+## Margin Safety Mathematics (Daily Strategies)
 
 At any point in the pyramid:
 ```
@@ -118,6 +111,86 @@ Default: `margin_limit = 0.50`
 **Safe pyramid expansion rule:**
 Only add lots if projected margin_ratio after addition < 0.40
 (keeping 0.10 buffer below the 0.50 limit for adverse moves).
+
+## Intraday Margin and Day-Trading Discounts
+
+Brokers typically offer **reduced margin for intraday positions** that are
+guaranteed to be flat by session end. TAIFEX day-trading margin is often
+50% of overnight maintenance margin (varies by broker and product).
+
+```
+margin_per_contract_intraday = margin_per_contract_overnight × discount_factor
+discount_factor: typically 0.50 (check with broker)
+```
+
+**This changes the denominator in all capital allocation formulas:**
+```
+# Daily strategy margin check:
+margin_ratio = Σ(lots × margin_overnight) / equity
+
+# Intraday strategy margin check:
+margin_ratio = Σ(lots × margin_overnight × discount_factor) / equity
+```
+
+**CRITICAL**: The margin discount enables larger positions, but the risk
+per point is UNCHANGED. A 2-lot intraday position loses the same per-tick
+as a 2-lot overnight position. Do NOT confuse cheaper margin with lower
+risk. Always size intraday positions based on risk (ATR × lots), not
+available margin.
+
+**Intraday margin safety rule:**
+Only add lots if projected margin_ratio after addition < 0.30
+(tighter than daily's 0.40 buffer because intraday moves can be fast
+and margin calls execute faster during session hours).
+
+## Capacity Constraints (Intraday Pyramiding)
+
+Intraday pyramiding faces a hard constraint that daily strategies rarely
+encounter: **top-of-book liquidity**.
+
+```
+max_safe_lots_per_add = top_of_book_depth / 2
+```
+
+Where `top_of_book_depth` is the typical number of contracts at best
+bid/ask. For TAIFEX TX:
+```
+Normal hours:    50-200 contracts at best bid/ask
+Opening/close:   100-500 contracts (higher liquidity)
+Overnight lull:  10-50 contracts (thin book)
+```
+
+**Why this matters for pyramiding:**
+- Adding 10 lots when top-of-book is 20 contracts → 50% of visible
+  liquidity consumed → significant market impact and slippage
+- Adding 10 lots when top-of-book is 200 contracts → 5% of visible
+  liquidity → negligible impact
+
+**Intraday max_levels must be capped by liquidity, not just margin:**
+```
+effective_max_levels = min(
+    max_levels_from_margin,
+    max_levels_from_liquidity
+)
+```
+
+Where:
+```
+max_levels_from_liquidity = floor(
+    top_of_book_depth × 0.25 / lots_per_level
+)
+```
+
+The 0.25 factor ensures each add consumes no more than 25% of visible
+depth. Exceeding this threshold degrades fill quality and reveals
+the strategy's intentions to other participants.
+
+**Safe intraday pyramid parameters:**
+```
+max_levels:  1-2  (rarely 3, never 4 for retail accounts)
+lot_per_add: ≤ 25% of typical top-of-book depth
+time_gate:   no adds in last 30 min of session (liquidity thins)
+```
 
 ## Interaction with Stop Parameters
 

@@ -135,8 +135,14 @@ TOOLS: list[Tool] = [
             "PREFER this over run_backtest when comparing two strategies. "
             "ALWAYS run this after writing a strategy file to verify improvement. "
             "Use 200-300 paths for iterative work, 500+ for final validation. "
-            "SKILL: Read quant-overfitting for acceptance criteria (P50>0, win rate floors). "
-            "SKILL: Read optimize-strategy for the full optimization protocol."
+            "IMPORTANT: For intraday strategies, set timeframe='intraday' and n_bars>=63000. "
+            "Verify trade_count >= 100×N_params (degrees of freedom rule). "
+            "Acceptance criteria: P50 PnL>0 across all scenarios, win rate within healthy "
+            "range for strategy type (35%+ daily trend, 45%+ intraday breakout, 55%+ mean-reversion), "
+            "Sharpe P50>0.5. Intraday DoF: require trade_count>=100*N_params; use clustered SE "
+            "by session date for correlated fills. Classify strategy type FIRST (Step 0 in "
+            "optimize-strategy skill) before diagnosing — daily vs intraday have different "
+            "healthy metrics."
         ),
         inputSchema={
             "type": "object",
@@ -195,8 +201,10 @@ TOOLS: list[Tool] = [
             "For grid search: provide sweep_params as {param: [val1, val2, ...]}. "
             "For random search: provide sweep_params as {param: [min, max]} and set n_samples. "
             "Returns: ranked list of parameter combinations by the chosen metric. "
-            "SKILL: Read quant-overfitting for parameter sensitivity and sample size rules. "
-            "SKILL: Read quant-pyramid-math for safe parameter ranges and interactions."
+            "Parameter sensitivity: test optimal ±20%, reject if performance collapses. "
+            "Sample size: need 252*N trading days (daily) or 100*N_params trades (intraday). "
+            "Safe ranges: stop_atr_mult 1.0-2.5, trail_atr_mult 2.0-5.0 (must be > stop). "
+            "Kelly 0.10-0.35. Intraday: max_levels capped by top-of-book liquidity (25% depth rule)."
         ),
         inputSchema={
             "type": "object",
@@ -332,8 +340,12 @@ TOOLS: list[Tool] = [
             "TIP: Use scaffold_strategy first to generate correct boilerplate. "
             "IMPORTANT: Always read_strategy_file first to understand current implementation. "
             "IMPORTANT: Always run run_monte_carlo after writing to verify improvement. "
-            "SKILL: Read quant-trend-following for strategy design principles. "
-            "SKILL: Read quant-stop-diagnosis for stop-loss design patterns."
+            "Design principles: entry filter identifies setups (not predictions), stop-loss limits "
+            "loss, trend/target exit captures profit. Intraday entries: ORB, VWAP reversion, "
+            "time-of-day gates (block 10:30-12:00, 20:00-01:00 low-edge windows). "
+            "Stop architecture: daily=3 layers (initial/breakeven/trailing), intraday=4 layers "
+            "(add mandatory time stop — flatten before session end). "
+            "Classify strategy type FIRST (Step 0 in optimize-strategy skill) before designing."
         ),
         inputSchema={
             "type": "object",
@@ -375,7 +387,11 @@ TOOLS: list[Tool] = [
             "CALL THIS FIRST before any optimization session. "
             "Strategy slug can be path-like (e.g. 'intraday/breakout/ta_orb') "
             "or a legacy flat name (e.g. 'ta_orb'). "
-            "SKILL: Read optimize-strategy for the full 5-stage optimization protocol."
+            "IMPORTANT: After calling this, classify the strategy type using the typology "
+            "in optimize-strategy skill Step 0 before proceeding. Strategy types: "
+            "daily trend-following (35-45% WR, 2.5+ RR), intraday breakout (45-55% WR, 1-2 RR), "
+            "intraday mean-reversion (55-65% WR, 0.6-1.0 RR). Daily vs intraday have "
+            "fundamentally different healthy metrics and diagnosis patterns."
         ),
         inputSchema={
             "type": "object",

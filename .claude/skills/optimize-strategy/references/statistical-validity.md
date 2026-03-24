@@ -1,11 +1,4 @@
----
-name: quant-overfitting
-description: "Overfitting detection and statistical validity. Read when evaluating optimization results or deciding whether to accept a parameter change."
-license: MIT
-metadata:
-  author: quant-engine
-  version: "1.0"
----
+# Statistical Validity and Overfitting Detection
 
 How to detect overfitting during optimization and what constitutes
 statistically valid evidence that a strategy change is real.
@@ -55,6 +48,8 @@ Use `run_parameter_sweep` with a tight grid around the optimal value.
 
 ## Signal 3: Too Many Parameters for the Data
 
+### Daily Strategies
+
 Rule of thumb: need 252 × N independent observations per parameter.
 
 ```
@@ -71,6 +66,39 @@ Minimum data: 1,512 trading days (~6 years)
 In this system's synthetic paths, `n_bars=252` is 1 year. For 6
 parameters, you need `run_monte_carlo` with n_paths >= 500 to get
 enough statistical mass, or optimize on fewer parameters at once.
+
+### Intraday Strategies — Degrees of Freedom (DoF)
+
+**Intraday bars are NOT independent observations.** A 1,500-bar sample
+on a 1-minute chart is less than 2 trading days — near-zero degrees
+of freedom for independent event testing due to high autocorrelation.
+
+Data sufficiency for intraday MUST be measured by the **number of
+independent round-trip trades**, not bars:
+
+```
+Minimum trades = 100 × N   (N = number of tunable parameters)
+
+N=2 → need ≥ 200 independent round-trip trades
+N=3 → need ≥ 300 independent round-trip trades
+N=5 → need ≥ 500 independent round-trip trades
+```
+
+Additionally, trades must span **multiple macroeconomic regimes**
+(e.g., trending months, range-bound months, high-VIX periods).
+A strategy validated on 500 trades from a single 2-month bull run
+is NOT robust.
+
+**Clustered standard errors:** When intraday trades overlap in time
+(e.g., multiple entries within the same session), use clustered
+standard errors grouped by session date. This prevents inflated
+t-statistics from correlated intraday fills.
+
+When using `run_monte_carlo` for intraday strategies:
+- Set `n_bars` to at least 63,000 (~3 months of 1-min bars)
+- Require `trade_count >= 100 × N` in Monte Carlo output
+- If trade count is too low, increase `n_bars` or `n_paths`, do NOT
+  reduce the minimum trade requirement
 
 ## Signal 4: Performance Concentrated in Specific Scenarios
 
