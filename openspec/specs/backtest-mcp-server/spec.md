@@ -19,8 +19,37 @@ app = Server("backtest-engine")
 - **WHEN** an MCP client sends a `tools/list` request
 - **THEN** the server SHALL return all registered tools with their names, descriptions, and input schemas
 
+### Requirement: Strategy slug normalization in facade
+The facade module SHALL provide a `resolve_strategy_slug(strategy: str) -> str` function that converts any strategy identifier to its canonical registry slug. All facade functions that persist results to `param_registry.db` SHALL call this function before writing.
+
+```python
+def resolve_strategy_slug(strategy: str) -> str:
+    """Resolve any strategy identifier to its canonical registry slug.
+
+    Handles: slug, legacy alias, module:factory format.
+    Falls back to the raw string if resolution fails.
+    """
+    ...
+```
+
+#### Scenario: Slug passes through unchanged
+- **WHEN** `resolve_strategy_slug("intraday/trend_following/ema_trend_pullback")` is called
+- **THEN** it SHALL return `"intraday/trend_following/ema_trend_pullback"`
+
+#### Scenario: Legacy alias resolved
+- **WHEN** `resolve_strategy_slug("ta_orb")` is called
+- **THEN** it SHALL return `"intraday/breakout/ta_orb"`
+
+#### Scenario: Module:factory format resolved
+- **WHEN** `resolve_strategy_slug("src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine")` is called
+- **THEN** it SHALL return `"intraday/trend_following/ema_trend_pullback"`
+
+#### Scenario: Unknown strategy falls back
+- **WHEN** `resolve_strategy_slug("unknown_strategy")` is called and no registry entry exists
+- **THEN** it SHALL return `"unknown_strategy"` unchanged
+
 ### Requirement: run_backtest tool
-The server SHALL expose a `run_backtest` tool that runs a single backtest on synthetic price data and returns performance metrics.
+The server SHALL expose a `run_backtest` tool that runs a single backtest on synthetic price data and returns performance metrics. The result SHALL be persisted to `param_registry.db` via `ParamRegistry.save_backtest_run()` with `source="mcp"` and the strategy identifier normalized to a slug.
 
 ```python
 @app.tool()
@@ -47,6 +76,27 @@ async def run_backtest(
 #### Scenario: Result recorded in history
 - **WHEN** a backtest completes successfully
 - **THEN** the result SHALL be appended to the session optimization history
+
+#### Scenario: Result persisted to param registry
+- **WHEN** a backtest completes successfully
+- **THEN** the result metrics and strategy params SHALL be persisted to `param_registry.db` via `ParamRegistry.save_backtest_run()` with `source="mcp"` and the strategy slug normalized via `resolve_strategy_slug()`
+- **AND** the response SHALL include the `run_id` from the registry
+
+#### Scenario: Persistence failure does not block response
+- **WHEN** a backtest completes but `save_backtest_run()` fails
+- **THEN** the backtest result SHALL still be returned to the caller with `run_id=null`
+
+### Requirement: run_backtest_realdata tool
+The server SHALL expose a `run_backtest_realdata` tool that runs a backtest on real historical data from the database. The result SHALL be persisted to `param_registry.db` via `ParamRegistry.save_backtest_run()` with `source="mcp"` and the strategy identifier normalized to a slug. The `symbol` field SHALL record the actual market symbol (e.g., `"TX"`), not a synthetic label.
+
+#### Scenario: Real-data backtest persisted
+- **WHEN** `run_backtest_realdata` is called with `symbol="TX"`, `start="2025-08-01"`, `end="2026-03-14"`, `strategy="intraday/trend_following/ema_trend_pullback"`, and `strategy_params={"lots": 5}`
+- **THEN** the result SHALL be persisted to `param_registry.db` with `strategy="intraday/trend_following/ema_trend_pullback"`, `symbol="TX"`, and the run metrics
+- **AND** the response SHALL include the `run_id`
+
+#### Scenario: Persistence uses normalized slug
+- **WHEN** `run_backtest_realdata` is called with `strategy="src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"`
+- **THEN** the `strategy` stored in `param_registry.db` SHALL be `"intraday/trend_following/ema_trend_pullback"`
 
 ### Requirement: run_monte_carlo tool
 The server SHALL expose a `run_monte_carlo` tool that runs N synthetic price paths and returns distribution metrics.
@@ -109,7 +159,7 @@ async def run_parameter_sweep(
 - **THEN** results SHALL be ranked by the specified metric instead of the default Sharpe
 
 ### Requirement: run_parameter_sweep auto-persistence
-The `run_parameter_sweep` tool SHALL automatically persist its results to the param registry database after completion, in addition to returning the result to the caller.
+The `run_parameter_sweep` tool SHALL automatically persist its results to the param registry database after completion, in addition to returning the result to the caller. The strategy identifier SHALL be normalized to a slug before persistence.
 
 #### Scenario: Sweep results auto-saved
 - **WHEN** `run_parameter_sweep` completes successfully
@@ -119,6 +169,10 @@ The `run_parameter_sweep` tool SHALL automatically persist its results to the pa
 #### Scenario: Sweep result includes candidates
 - **WHEN** `run_parameter_sweep` completes and is persisted
 - **THEN** the response SHALL include the best candidate and any Pareto-optimal candidates with their labels
+
+#### Scenario: Sweep uses normalized strategy slug
+- **WHEN** `run_parameter_sweep` is called with `strategy="src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"`
+- **THEN** the `strategy` column in `param_registry.db` SHALL contain `"intraday/trend_following/ema_trend_pullback"`, not the module:factory string
 
 ### Requirement: run_stress_test tool
 The server SHALL expose a `run_stress_test` tool that tests strategy behavior under extreme scenarios.
@@ -145,48 +199,56 @@ async def run_stress_test(
 - **THEN** each scenario result SHALL include scenario_name, final_pnl, max_drawdown, circuit_breaker_triggered, stops_triggered, and a summary of equity trajectory
 
 ### Requirement: read_strategy_file tool
-The server SHALL expose a `read_strategy_file` tool that returns the content of a strategy policy file.
+The server SHALL expose a `read_strategy_file` tool that returns the content of a strategy policy file. The tool SHALL support path-like filenames for nested directory structures (e.g., `"intraday/breakout/ta_orb"`).
 
 ```python
 @app.tool()
 async def read_strategy_file(filename: str) -> dict: ...
 ```
 
-#### Scenario: Read existing strategy file
-- **WHEN** `read_strategy_file` is called with `filename="example_entry"`
-- **THEN** it SHALL return the full content of `src/strategies/example_entry.py` along with the filename and last-modified timestamp
+#### Scenario: Read nested strategy file
+- **WHEN** `read_strategy_file` is called with `filename="intraday/breakout/ta_orb"`
+- **THEN** it SHALL return the full content of `src/strategies/intraday/breakout/ta_orb.py` along with the filename and last-modified timestamp
+
+#### Scenario: Read with legacy flat filename (backward compat)
+- **WHEN** `read_strategy_file` is called with `filename="ta_orb"` and a slug alias exists
+- **THEN** it SHALL resolve the alias and return the content from the nested location
 
 #### Scenario: Read non-existent file
 - **WHEN** `read_strategy_file` is called with a filename that doesn't exist in `src/strategies/`
-- **THEN** it SHALL return an error listing available strategy files
+- **THEN** it SHALL return an error listing available strategy files with their path-like stems
 
 #### Scenario: List available files
 - **WHEN** `read_strategy_file` is called with `filename="__list__"`
-- **THEN** it SHALL return a list of all `.py` files in `src/strategies/` with their sizes and last-modified timestamps
+- **THEN** it SHALL return a list of all strategy `.py` files with path-like stems, sizes, and timestamps
 
 ### Requirement: write_strategy_file tool
-The server SHALL expose a `write_strategy_file` tool that validates and writes a strategy policy file.
+The server SHALL expose a `write_strategy_file` tool that validates and writes a strategy policy file. The tool SHALL support path-like filenames and auto-create parent directories.
 
 ```python
 @app.tool()
 async def write_strategy_file(filename: str, content: str) -> dict: ...
 ```
 
+#### Scenario: Write to nested path
+- **WHEN** `write_strategy_file` is called with `filename="intraday/trend_following/ema_pullback"` and valid content
+- **THEN** it SHALL create `src/strategies/intraday/trend_following/` if needed, write the file, and invalidate the registry cache
+
 #### Scenario: Valid strategy write
 - **WHEN** `write_strategy_file` is called with syntactically valid Python containing a class implementing a policy ABC
-- **THEN** it SHALL backup the existing file, write the new content, and return success with a reminder to run `run_monte_carlo`
+- **THEN** it SHALL backup the existing file (if any), write the new content, invalidate the registry cache, and return success with a reminder to run `run_monte_carlo`
+
+#### Scenario: Registry invalidated after write
+- **WHEN** `write_strategy_file` completes successfully
+- **THEN** the strategy registry cache SHALL be invalidated so `discover_strategies()` finds the new strategy immediately
 
 #### Scenario: Syntax error rejection
 - **WHEN** the `content` has a Python syntax error
-- **THEN** it SHALL return `{"success": false, "error": "Syntax error on line N: ..."}` without modifying the file
-
-#### Scenario: Missing ABC method rejection
-- **WHEN** the content defines a class that claims to implement `EntryPolicy` but is missing `should_enter`
-- **THEN** it SHALL return `{"success": false, "error": "Class X does not implement required method should_enter"}` without modifying the file
+- **THEN** it SHALL return `{"success": false, "errors": [...]}` without modifying any file
 
 #### Scenario: Forbidden import rejection
-- **WHEN** the content contains `import os`, `import sys`, `import subprocess`, `import socket`, `import requests`, or `import shutil`
-- **THEN** it SHALL return `{"success": false, "error": "Forbidden import: <module>"}` without modifying the file
+- **WHEN** content contains forbidden imports
+- **THEN** it SHALL return `{"success": false, "errors": [...]}` without modifying any file
 
 #### Scenario: Automatic backup
 - **WHEN** a strategy file is about to be overwritten
@@ -325,7 +387,7 @@ The server SHALL maintain optimization history in the persistent `param_registry
 #### Scenario: History append on run
 - **WHEN** any simulation tool completes (run_backtest, run_monte_carlo, run_parameter_sweep, run_stress_test)
 - **THEN** the run parameters, result metrics, tool name, and ISO timestamp SHALL be appended to session history
-- **AND** for `run_parameter_sweep`, the full result SHALL also be persisted to the param registry
+- **AND** for `run_backtest`, `run_backtest_realdata`, and `run_parameter_sweep`, the full result SHALL also be persisted to the param registry
 
 #### Scenario: History entry format
 - **WHEN** a history entry is queried
@@ -361,6 +423,100 @@ Each MCP tool description SHALL include guidance on when to use the tool, precon
 #### Scenario: get_parameter_schema description references master skill
 - **WHEN** the agent reads the `get_parameter_schema` tool description
 - **THEN** it SHALL reference the `optimize-strategy` skill as the optimization protocol to follow
+
+### Requirement: Strategy factory resolution
+The facade module SHALL resolve strategy factories exclusively through the strategy registry, eliminating the hardcoded `_BUILTIN_FACTORIES` dict.
+
+```python
+def resolve_factory(strategy: str) -> Any:
+    """Return a callable engine factory.
+
+    Resolution order:
+    1. Registry lookup (slug or alias)
+    2. "module:factory" format (external strategies)
+    3. Raise ValueError
+    """
+```
+
+#### Scenario: Resolve by new path-like slug
+- **WHEN** `resolve_factory("intraday/breakout/ta_orb")` is called
+- **THEN** it SHALL import `src.strategies.intraday.breakout.ta_orb` and return `create_ta_orb_engine`
+
+#### Scenario: Resolve by legacy flat slug via alias
+- **WHEN** `resolve_factory("ta_orb")` is called
+- **THEN** it SHALL resolve the alias to `"intraday/breakout/ta_orb"` and return the factory
+
+#### Scenario: Resolve by module:factory format
+- **WHEN** `resolve_factory("my_module:my_factory")` is called
+- **THEN** it SHALL import `my_module` and return `my_factory`
+
+#### Scenario: Unknown strategy raises ValueError
+- **WHEN** `resolve_factory("nonexistent")` is called
+- **THEN** it SHALL raise `ValueError` listing all available strategy slugs from the registry
+
+#### Scenario: Newly written strategy resolvable without restart
+- **WHEN** a new strategy file is written via `write_strategy_file` and the registry is invalidated
+- **THEN** `resolve_factory` with the new slug SHALL succeed without MCP server restart
+
+### Requirement: scaffold_strategy MCP tool
+The server SHALL expose a `scaffold_strategy` tool that generates strategy boilerplate for the agent to review before writing.
+
+```python
+Tool(
+    name="scaffold_strategy",
+    description=(
+        "Generate a complete strategy boilerplate file with correct conventions. "
+        "Returns the generated Python content — does NOT write the file. "
+        "After reviewing, use write_strategy_file to save it. "
+        "The scaffolded strategy will be immediately discoverable by the registry."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Strategy name in snake_case (e.g., 'vwap_rubber_band')",
+            },
+            "category": {
+                "type": "string",
+                "enum": ["breakout", "mean_reversion", "trend_following"],
+                "description": "Strategy category",
+            },
+            "timeframe": {
+                "type": "string",
+                "enum": ["intraday", "daily", "multi_day"],
+                "description": "Strategy timeframe",
+            },
+            "description": {
+                "type": "string",
+                "description": "One-line description of the strategy",
+            },
+            "policies": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["entry", "add", "stop"]},
+                "description": "Which policies to scaffold (default: ['entry', 'stop'])",
+            },
+            "params": {
+                "type": "object",
+                "description": "Initial parameter definitions: {name: {type, default, min, max}}",
+            },
+        },
+        "required": ["name", "category", "timeframe"],
+    },
+)
+```
+
+#### Scenario: Scaffold tool returns content without writing
+- **WHEN** the agent calls `scaffold_strategy` with `name="ema_pullback"`
+- **THEN** it SHALL return the generated content, slug, and path but SHALL NOT write any file to disk
+
+#### Scenario: Scaffold result guides next steps
+- **WHEN** `scaffold_strategy` returns a result
+- **THEN** the `next_steps` field SHALL be `["write_strategy_file", "run_monte_carlo"]`
+
+#### Scenario: Tool description guides workflow
+- **WHEN** the agent reads the `scaffold_strategy` tool description
+- **THEN** it SHALL indicate that `write_strategy_file` is needed to persist the result
 
 ### Requirement: Cursor MCP integration config
 The project SHALL include MCP server configuration for Cursor IDE.

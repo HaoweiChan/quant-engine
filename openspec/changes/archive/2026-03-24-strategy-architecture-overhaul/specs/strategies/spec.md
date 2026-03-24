@@ -1,8 +1,4 @@
-## Purpose
-
-A user-editable directory (`src/strategies/`) containing custom policy implementations and engine configuration files. This is the defined sandbox for strategy development — users extend the core policy ABCs here without touching system internals. The directory is the exclusive target of the dashboard code editor.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: User-editable strategy directory
 The project SHALL maintain a `src/strategies/` directory organized into a nested structure with timeframe as the primary axis and strategy type as the secondary axis:
@@ -85,6 +81,8 @@ STRATEGY_META: dict = {
 #### Scenario: Factory functions are module-level and picklable
 - **WHEN** a strategy factory function is defined
 - **THEN** it SHALL be a module-level function (not a lambda or closure) so it can be pickled by `StrategyOptimizer` for parallel execution
+
+## ADDED Requirements
 
 ### Requirement: Strategy classification enums
 The system SHALL define `StrategyCategory` and `StrategyTimeframe` enums in `src/strategies/__init__.py`.
@@ -170,85 +168,8 @@ class RollingMA:
 - **WHEN** fewer than `length` updates have been provided
 - **THEN** the `value` property SHALL return `None`
 
-### Requirement: Engine config files
-The `src/strategies/configs/` directory SHALL contain per-strategy TOML files using the convention `configs/<slug>.toml`. Each strategy's config stores its optimized parameter overrides under a `[params]` table. The legacy `default.toml` is replaced by per-strategy files.
-
-#### Scenario: Pyramid config in its own file
-- **WHEN** `load_strategy_params("pyramid")` is called
-- **THEN** it SHALL read from `src/strategies/configs/pyramid.toml`
-
-#### Scenario: Legacy default.toml is removed
-- **WHEN** the migration is complete
-- **THEN** `src/strategies/configs/default.toml` SHALL NOT exist
-
-### Requirement: Policy ABC compliance
-All `.py` files in `src/strategies/` SHALL implement at least one of the policy ABCs from `src.core.policies`. Classes SHALL be instantiable with a `PyramidConfig` argument and SHALL implement all abstract methods.
-
-#### Scenario: Strategy instantiation succeeds
-- **WHEN** the engine validation pipeline runs
-- **THEN** all strategy classes SHALL instantiate with a default `PyramidConfig` without raising exceptions
-
-### Requirement: Strategy file validation
-The system SHALL provide a validation function that checks strategy file content before it is written to `src/strategies/`.
-
-```python
-@dataclass
-class ValidationResult:
-    valid: bool
-    errors: list[str]
-
-def validate_strategy_content(content: str, filename: str) -> ValidationResult: ...
-```
-
-#### Scenario: Syntax validation
-- **WHEN** `validate_strategy_content` is called with content containing a Python syntax error
-- **THEN** `ValidationResult.valid` SHALL be `False` and `errors` SHALL include the syntax error message with line number
-
-#### Scenario: Forbidden import detection
-- **WHEN** content contains `import os`, `import sys`, `import subprocess`, `import socket`, `import requests`, or `import shutil`
-- **THEN** `ValidationResult.valid` SHALL be `False` and `errors` SHALL include `"Forbidden import: <module>"`
-
-#### Scenario: Forbidden from-import detection
-- **WHEN** content contains `from os import ...` or `from subprocess import ...`
-- **THEN** `ValidationResult.valid` SHALL be `False` and `errors` SHALL include `"Forbidden import: <module>"`
-
-#### Scenario: Policy ABC interface check
-- **WHEN** content defines a class that subclasses `EntryPolicy`, `AddPolicy`, or `StopPolicy`
-- **THEN** validation SHALL verify the class implements all required abstract methods of that ABC
-
-#### Scenario: Missing method detected
-- **WHEN** a class subclasses `StopPolicy` but does not define `initial_stop` or `update_stop`
-- **THEN** `ValidationResult.valid` SHALL be `False` and `errors` SHALL list the missing methods
-
-#### Scenario: Valid content passes
-- **WHEN** content is syntactically valid Python, contains no forbidden imports, and all policy classes implement required methods
-- **THEN** `ValidationResult.valid` SHALL be `True` and `errors` SHALL be empty
-
-### Requirement: Strategy file backup
-The system SHALL provide a backup mechanism for strategy files before they are overwritten. The backup function SHALL preserve the subdirectory structure within `.backup/`.
-
-```python
-def backup_strategy_file(filename: str) -> str | None: ...
-```
-
-#### Scenario: Backup before overwrite
-- **WHEN** `backup_strategy_file` is called for an existing file
-- **THEN** it SHALL copy the current file to `src/strategies/.backup/<filename>.<ISO-timestamp>.py` and return the backup path
-
-#### Scenario: Backup nested strategy file
-- **WHEN** `backup_strategy_file("intraday/breakout/ta_orb")` is called
-- **THEN** it SHALL save to `src/strategies/.backup/intraday/breakout/ta_orb.<timestamp>.py`
-
-#### Scenario: Backup directory creation
-- **WHEN** `src/strategies/.backup/` does not exist
-- **THEN** `backup_strategy_file` SHALL create it before saving the backup
-
-#### Scenario: No backup for new files
-- **WHEN** `backup_strategy_file` is called for a filename that does not exist in `src/strategies/`
-- **THEN** it SHALL return `None` without creating a backup
-
-### Requirement: Strategy file listing
-The system SHALL provide a function to list available strategy files. The function SHALL recursively scan `src/strategies/` subdirectories and return path-like stems.
+### Requirement: Strategy file listing supports nested directories
+The `list_strategy_files()` function SHALL recursively scan `src/strategies/` subdirectories and return path-like stems.
 
 ```python
 def list_strategy_files() -> list[dict[str, Any]]: ...
@@ -262,10 +183,6 @@ def list_strategy_files() -> list[dict[str, Any]]: ...
 - **WHEN** `list_strategy_files()` is called
 - **THEN** the result SHALL NOT include entries for `registry.py`, `param_registry.py`, `param_loader.py`, `scaffold.py`, `_session_utils.py`, or any `__init__.py` file
 
-#### Scenario: Empty strategies directory
-- **WHEN** `src/strategies/` contains no `.py` files (other than excluded infrastructure)
-- **THEN** it SHALL return an empty list
-
 ### Requirement: Strategy file write supports nested paths
 The `write_strategy_file` workflow SHALL support path-like filenames that create parent directories as needed.
 
@@ -277,3 +194,10 @@ The `write_strategy_file` workflow SHALL support path-like filenames that create
 #### Scenario: Registry cache invalidated after write
 - **WHEN** `write_strategy_file` completes successfully
 - **THEN** the strategy registry's cached discovery results SHALL be invalidated so the next access re-discovers
+
+### Requirement: Strategy file backup supports nested paths
+The `backup_strategy_file` function SHALL preserve the subdirectory structure within `.backup/`.
+
+#### Scenario: Backup nested strategy file
+- **WHEN** `backup_strategy_file("intraday/breakout/ta_orb")` is called
+- **THEN** it SHALL save to `src/strategies/.backup/intraday/breakout/ta_orb.<timestamp>.py`
