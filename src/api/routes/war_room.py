@@ -1,11 +1,63 @@
 """War Room data endpoint."""
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter
 
 from src.api.helpers import get_war_room_data
 
 router = APIRouter(prefix="/api", tags=["trading"])
+
+
+def _resolve_deployment_info(session) -> dict:
+    """Resolve deployed candidate → params + backtest metrics + stale flag."""
+    info: dict = {
+        "deployed_candidate_id": session.deployed_candidate_id,
+        "deployed_params": None,
+        "backtest_metrics": None,
+        "is_stale": False,
+        "active_candidate_id": None,
+    }
+    if not session.deployed_candidate_id:
+        return info
+    try:
+        from src.strategies.param_registry import ParamRegistry
+        reg = ParamRegistry()
+        # Get deployed candidate params
+        row = reg._conn.execute(
+            "SELECT params, run_id, strategy FROM param_candidates WHERE id = ?",
+            (session.deployed_candidate_id,),
+        ).fetchone()
+        if row:
+            info["deployed_params"] = json.loads(row["params"])
+            # Get backtest metrics from the associated trial
+            trial = reg._conn.execute(
+                """SELECT sharpe, total_pnl, win_rate, max_drawdown_pct, profit_factor, trade_count
+                   FROM param_trials WHERE run_id = ? ORDER BY sharpe DESC LIMIT 1""",
+                (row["run_id"],),
+            ).fetchone()
+            if trial:
+                info["backtest_metrics"] = {
+                    "sharpe": trial["sharpe"],
+                    "total_pnl": trial["total_pnl"],
+                    "win_rate": trial["win_rate"],
+                    "max_drawdown_pct": trial["max_drawdown_pct"],
+                    "profit_factor": trial["profit_factor"],
+                    "trade_count": trial["trade_count"],
+                }
+            # Check stale: is deployed candidate still the active one?
+            active = reg._conn.execute(
+                "SELECT id FROM param_candidates WHERE strategy = ? AND is_active = 1",
+                (row["strategy"],),
+            ).fetchone()
+            if active:
+                info["active_candidate_id"] = active["id"]
+                info["is_stale"] = active["id"] != session.deployed_candidate_id
+        reg.close()
+    except Exception:
+        pass
+    return info
 
 
 @router.get("/war-room")
@@ -14,7 +66,6 @@ async def war_room() -> dict:
         data = get_war_room_data()
     except Exception as exc:
         return {"error": str(exc), "accounts": {}, "all_sessions": [], "sessions_by_account": {}}
-    # Serialize into JSON-safe format
     accounts = {}
     for acct_id, info in data.get("accounts", {}).items():
         snap = info.get("snapshot")
@@ -46,11 +97,14 @@ async def war_room() -> dict:
     sessions = []
     for s in data.get("all_sessions", []):
         snap = s.current_snapshot
+        deploy_info = _resolve_deployment_info(s)
         sessions.append({
+            "session_id": s.session_id,
             "account_id": s.account_id,
             "strategy_slug": s.strategy_slug,
             "symbol": s.symbol,
             "status": s.status,
+            **deploy_info,
             "snapshot": {
                 "equity": snap.equity,
                 "unrealized_pnl": snap.unrealized_pnl,

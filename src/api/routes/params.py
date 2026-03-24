@@ -70,3 +70,16 @@ async def delete_run(run_id: int) -> dict:
         raise HTTPException(status_code=404, detail=str(exc))
     registry.close()
     return {"status": "deleted", "run_id": run_id, **info}
+
+
+@router.get("/compare")
+async def compare_runs(run_ids: str) -> list[dict]:
+    """Compare multiple runs side-by-side. run_ids is comma-separated."""
+    from src.strategies.param_registry import ParamRegistry
+    ids = [int(x.strip()) for x in run_ids.split(",") if x.strip().isdigit()]
+    if not ids:
+        return []
+    registry = ParamRegistry()
+    results = registry.compare_runs(ids)
+    registry.close()
+    return results
