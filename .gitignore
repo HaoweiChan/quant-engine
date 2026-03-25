@@ -60,7 +60,8 @@ data/
 config/secrets.toml
 
 # Docs (internal architecture notes, not for public consumption)
-docs/
+docs/*
+!docs/TRD-Core-Quant-Engine.md
 
 # MLflow / experiment tracking
 mlruns/
