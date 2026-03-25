@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
+import uuid
 
 
 @dataclass
@@ -89,8 +90,10 @@ class Order:
     lots: float
     price: float | None
     stop_price: float | None
-    reason: str
+    reason: str  # "entry" | "add_level_2" | "stop_loss" | "trailing_stop" | "circuit_breaker" | "disaster_stop"
     metadata: dict[str, Any] = field(default_factory=dict)
+    parent_position_id: str | None = None
+    order_class: Literal["standard", "disaster_stop", "algo_exit"] = "standard"
 
     def __post_init__(self) -> None:
         if self.lots <= 0:
@@ -110,6 +113,7 @@ class Position:
     pyramid_level: int
     entry_timestamp: datetime
     direction: Literal["long", "short"] = "long"
+    position_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def __post_init__(self) -> None:
         if self.stop_level is None:
@@ -148,9 +152,7 @@ class PyramidConfig:
     max_loss: float
     max_levels: int = 4
     add_trigger_atr: list[float] = field(default_factory=lambda: [4.0, 8.0, 12.0])
-    lot_schedule: list[list[int]] = field(
-        default_factory=lambda: [[3, 4], [2, 0], [1, 4], [1, 4]]
-    )
+    lot_schedule: list[list[int]] = field(default_factory=lambda: [[3, 4], [2, 0], [1, 4], [1, 4]])
     stop_atr_mult: float = 1.5
     trail_atr_mult: float = 3.0
     trail_lookback: int = 22
@@ -163,9 +165,7 @@ class PyramidConfig:
             raise ValueError("max_loss must be positive")
         if len(self.lot_schedule) != self.max_levels:
             n = len(self.lot_schedule)
-            raise ValueError(
-                f"lot_schedule length ({n}) must equal max_levels ({self.max_levels})"
-            )
+            raise ValueError(f"lot_schedule length ({n}) must equal max_levels ({self.max_levels})")
         if len(self.add_trigger_atr) != self.max_levels - 1:
             n = len(self.add_trigger_atr)
             raise ValueError(
@@ -205,12 +205,16 @@ class EngineConfig:
     max_loss: float
     margin_limit: float = 0.50
     trail_lookback: int = 22
+    disaster_atr_mult: float = 4.5
+    disaster_stop_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.max_loss <= 0:
             raise ValueError("max_loss must be positive")
         if not (0.0 < self.margin_limit <= 1.0):
             raise ValueError("margin_limit must be in (0.0, 1.0]")
+        if self.disaster_atr_mult <= 0:
+            raise ValueError("disaster_atr_mult must be positive")
 
 
 class RiskAction(Enum):
