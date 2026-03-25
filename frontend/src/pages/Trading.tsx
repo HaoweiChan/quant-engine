@@ -5,7 +5,7 @@ import { StatCard, StatRow } from "@/components/StatCard";
 import { ChartCard } from "@/components/ChartCard";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
 import { useUiStore } from "@/stores/uiStore";
-import { useTradingStore } from "@/stores/tradingStore";
+import { useTradingStore, selectActiveSessions } from "@/stores/tradingStore";
 import { createAccount, fetchAccounts, fetchWarRoomTyped, deployToAccount, fetchDeployHistory, startSession, stopSession, pauseSession, compareRuns, fetchParamRuns } from "@/lib/api";
 import type { AccountInfo, WarRoomSession, WarRoomData, DeployLogEntry, ParamRun } from "@/lib/api";
 import { colors } from "@/lib/theme";
@@ -339,19 +339,28 @@ function ComparePanel({ strategySlug, onClose }: { strategySlug: string; onClose
 import { OHLCVChart } from "@/components/charts/OHLCVChart";
 import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
 
-function CommandChartPane({ activeAccountId }: { activeAccountId: string }) {
-  // We'll use mocked data for now, since we don't have the real live tick data easily accessible in WarRoomData.
-  // The key={activeAccountId} ensures this component (and Lightweight Charts) cleanly unmounts/remounts on account switch.
-  const mockEquity = Array.from({ length: 50 }, (_, i) => 100000 + i * 100 + (Math.random() - 0.5) * 500);
-  
+function CommandChartPane({
+  activeAccountId,
+  equityCurve,
+  livePrice,
+}: {
+  activeAccountId: string;
+  equityCurve: { timestamp: string; equity: number }[];
+  livePrice?: number;
+}) {
+  const equityValues = equityCurve.map((p) => p.equity);
+  const ohlcvData = livePrice != null
+    ? [{ timestamp: equityCurve.at(-1)?.timestamp ?? new Date().toISOString(), open: livePrice, high: livePrice, low: livePrice, close: livePrice, volume: 0 }]
+    : [];
+
   return (
     <div className="flex flex-col gap-2 h-full">
       <div className="flex-1 min-h-[220px]" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}>
         <div className="text-[10px] p-2 border-b" style={{ borderColor: colors.cardBorder, color: colors.muted, fontFamily: "var(--font-mono)" }}>
-          LIVE CHART
+          LIVE CHART {livePrice != null ? `— $${livePrice.toLocaleString()}` : ""}
         </div>
         <div className="p-2 h-[calc(100%-30px)]">
-           <OHLCVChart data={[]} height={180} />
+           <OHLCVChart data={ohlcvData} height={180} />
         </div>
       </div>
       <div className="flex-1 min-h-[160px]" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}>
@@ -359,7 +368,7 @@ function CommandChartPane({ activeAccountId }: { activeAccountId: string }) {
           EQUITY CURVE ({activeAccountId})
         </div>
         <div className="p-2 h-[calc(100%-30px)]">
-           <EquityCurveChart equity={mockEquity} height={120} />
+           <EquityCurveChart equity={equityValues} height={120} />
         </div>
       </div>
     </div>
@@ -374,6 +383,7 @@ function WarRoomTab() {
 
   const activeAccountId = useTradingStore((s) => s.activeAccountId);
   const setActiveAccountId = useTradingStore((s) => s.setActiveAccountId);
+  const sessions = useTradingStore(selectActiveSessions);
 
   const poll = () => {
     fetchWarRoomTyped().then((res) => {
@@ -394,7 +404,6 @@ function WarRoomTab() {
   for (const s of allSessions) {
     (sessionsByAccount[s.account_id] ??= []).push(s);
   }
-  const sessions = activeAccountId ? (sessionsByAccount[activeAccountId] || []) : [];
   const activeAccountData = activeAccountId ? accounts[activeAccountId] : null;
 
   return (
@@ -420,7 +429,7 @@ function WarRoomTab() {
                 <span className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
                   {info.display_name || id} {isSelected && <span style={{color: colors.green, marginLeft: 4}}>◉ SELECTED</span>}
                 </span>
-                {info.broker === "mock" ? (
+                {info.broker?.toLowerCase() === "mock" ? (
                   <span className="text-[7px] font-semibold px-1.5 py-0.5 rounded text-white" style={{ background: colors.cyan, color: "#0d0d26", letterSpacing: "0.5px" }}>MOCK</span>
                 ) : (
                   <span className="text-[7px] font-semibold px-1.5 py-0.5 rounded text-white" style={{ background: info.connected ? colors.green : "#6B4040", letterSpacing: "0.5px" }}>
@@ -440,6 +449,11 @@ function WarRoomTab() {
               {!info.connected && info.connect_error && (
                 <div className="text-[8px] mt-1 leading-snug" style={{ color: colors.orange, fontFamily: "var(--font-mono)" }}>{info.connect_error}</div>
               )}
+              {!info.connected && data?.fetched_at && (
+                <div className="text-[7px] mt-1" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+                  Last updated: {new Date(data.fetched_at).toLocaleTimeString()}
+                </div>
+              )}
             </div>
           );
         })}
@@ -453,7 +467,12 @@ function WarRoomTab() {
           <SectionLabel>COMMAND CENTER: {activeAccountData.display_name || activeAccountId} (Showing {sessions.length} Configured Strategies)</SectionLabel>
           <div className="flex flex-col lg:flex-row gap-4 mb-4">
             <div className="flex-1">
-               <CommandChartPane key={activeAccountId} activeAccountId={activeAccountId} />
+               <CommandChartPane
+                  key={activeAccountId}
+                  activeAccountId={activeAccountId}
+                  equityCurve={activeAccountData?.equity_curve ?? []}
+                  livePrice={sessions[0]?.snapshot?.positions?.[0]?.avg_entry_price}
+                />
             </div>
             <div className="flex-1 flex flex-col gap-2">
               <div className="text-[10px] font-semibold tracking-wider mb-1" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>STRATEGY CARDS</div>

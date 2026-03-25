@@ -296,8 +296,10 @@ export interface WarRoomData {
     equity: number;
     margin_used: number;
     margin_available: number;
+    equity_curve?: { timestamp: string; equity: number }[];
   }>;
   all_sessions: WarRoomSession[];
+  fetched_at?: string;
 }
 
 export interface DeployLogEntry {

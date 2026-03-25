@@ -1,7 +1,9 @@
 """War Room data endpoint."""
+
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
@@ -23,6 +25,7 @@ def _resolve_deployment_info(session) -> dict:
         return info
     try:
         from src.strategies.param_registry import ParamRegistry
+
         reg = ParamRegistry()
         # Get deployed candidate params
         row = reg._conn.execute(
@@ -62,10 +65,17 @@ def _resolve_deployment_info(session) -> dict:
 
 @router.get("/war-room")
 async def war_room() -> dict:
+    fetched_at = datetime.now(timezone.utc).isoformat()
     try:
         data = get_war_room_data()
     except Exception as exc:
-        return {"error": str(exc), "accounts": {}, "all_sessions": [], "sessions_by_account": {}}
+        return {
+            "error": str(exc),
+            "accounts": {},
+            "all_sessions": [],
+            "sessions_by_account": {},
+            "fetched_at": fetched_at,
+        }
     accounts = {}
     for acct_id, info in data.get("accounts", {}).items():
         snap = info.get("snapshot")
@@ -89,41 +99,43 @@ async def war_room() -> dict:
                 }
                 for p in (snap.positions if snap and snap.connected else [])
             ],
-            "equity_curve": [
-                {"timestamp": t.isoformat(), "equity": e}
-                for t, e in equity_curve
-            ],
+            "equity_curve": [{"timestamp": t.isoformat(), "equity": e} for t, e in equity_curve],
         }
     sessions = []
     for s in data.get("all_sessions", []):
         snap = s.current_snapshot
         deploy_info = _resolve_deployment_info(s)
-        sessions.append({
-            "session_id": s.session_id,
-            "account_id": s.account_id,
-            "strategy_slug": s.strategy_slug,
-            "symbol": s.symbol,
-            "status": s.status,
-            **deploy_info,
-            "snapshot": {
-                "equity": snap.equity,
-                "unrealized_pnl": snap.unrealized_pnl,
-                "drawdown_pct": snap.drawdown_pct,
-                "trade_count": snap.trade_count,
-                "positions": [
-                    {
-                        "symbol": p.symbol,
-                        "side": p.side,
-                        "quantity": p.quantity,
-                        "avg_entry_price": p.avg_entry_price,
-                        "unrealized_pnl": p.unrealized_pnl,
-                    }
-                    for p in snap.positions
-                ],
-            } if snap else None,
-        })
+        sessions.append(
+            {
+                "session_id": s.session_id,
+                "account_id": s.account_id,
+                "strategy_slug": s.strategy_slug,
+                "symbol": s.symbol,
+                "status": s.status,
+                **deploy_info,
+                "snapshot": {
+                    "equity": snap.equity,
+                    "unrealized_pnl": snap.unrealized_pnl,
+                    "drawdown_pct": snap.drawdown_pct,
+                    "trade_count": snap.trade_count,
+                    "positions": [
+                        {
+                            "symbol": p.symbol,
+                            "side": p.side,
+                            "quantity": p.quantity,
+                            "avg_entry_price": p.avg_entry_price,
+                            "unrealized_pnl": p.unrealized_pnl,
+                        }
+                        for p in snap.positions
+                    ],
+                }
+                if snap
+                else None,
+            }
+        )
     return {
         "accounts": accounts,
         "all_sessions": sessions,
         "sessions_by_account": data.get("sessions_by_account", {}),
+        "fetched_at": fetched_at,
     }
