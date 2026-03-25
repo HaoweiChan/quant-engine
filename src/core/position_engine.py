@@ -1,4 +1,5 @@
 from collections import deque
+from datetime import datetime
 from typing import Literal
 
 from src.core.policies import (
@@ -98,6 +99,18 @@ class PositionEngine:
             total_unrealized_pnl=pnl,
         )
 
+    def close_position_by_disaster_stop(
+        self,
+        position_id: str,
+        fill_price: float,
+        fill_timestamp: datetime,
+    ) -> Position | None:
+        for i, pos in enumerate(self._positions):
+            if pos.position_id == position_id:
+                self._positions.pop(i)
+                return pos
+        return None
+
     # -- private: stop-loss check (Priority 1) --
 
     def _check_stops(self, snapshot: MarketSnapshot) -> list[Order]:
@@ -123,6 +136,8 @@ class PositionEngine:
                         stop_price=None,
                         reason=reason,
                         metadata={"pyramid_level": pos.pyramid_level},
+                        parent_position_id=pos.position_id,
+                        order_class="algo_exit",
                     )
                 )
                 triggered.append(i)
@@ -151,24 +166,24 @@ class PositionEngine:
             else:
                 new_stop = min(new_stop, pos.stop_level)
             if new_stop != pos.stop_level:
-                updated.append(Position(
-                    entry_price=pos.entry_price,
-                    lots=pos.lots,
-                    contract_type=pos.contract_type,
-                    stop_level=new_stop,
-                    pyramid_level=pos.pyramid_level,
-                    entry_timestamp=pos.entry_timestamp,
-                    direction=pos.direction,
-                ))
+                updated.append(
+                    Position(
+                        entry_price=pos.entry_price,
+                        lots=pos.lots,
+                        contract_type=pos.contract_type,
+                        stop_level=new_stop,
+                        pyramid_level=pos.pyramid_level,
+                        entry_timestamp=pos.entry_timestamp,
+                        direction=pos.direction,
+                    )
+                )
             else:
                 updated.append(pos)
         self._positions = updated
 
     # -- private: margin safety (Priority 3) --
 
-    def _check_margin_safety(
-        self, snapshot: MarketSnapshot, account: AccountState
-    ) -> list[Order]:
+    def _check_margin_safety(self, snapshot: MarketSnapshot, account: AccountState) -> list[Order]:
         orders: list[Order] = []
         if account.margin_ratio > self._config.margin_limit and self._positions:
             pos = self._positions[-1]
@@ -191,9 +206,7 @@ class PositionEngine:
 
     # -- private: execute entry decision --
 
-    def _execute_entry(
-        self, decision: EntryDecision, snapshot: MarketSnapshot
-    ) -> list[Order]:
+    def _execute_entry(self, decision: EntryDecision, snapshot: MarketSnapshot) -> list[Order]:
         entry_side = "buy" if decision.direction == "long" else "sell"
         position = Position(
             entry_price=snapshot.price,
@@ -216,14 +229,13 @@ class PositionEngine:
                 stop_price=None,
                 reason="entry",
                 metadata=decision.metadata,
+                parent_position_id=position.position_id,
             )
         ]
 
     # -- private: execute add decision --
 
-    def _execute_add(
-        self, decision: AddDecision, snapshot: MarketSnapshot
-    ) -> list[Order]:
+    def _execute_add(self, decision: AddDecision, snapshot: MarketSnapshot) -> list[Order]:
         if not self._positions:
             return []
         direction = self._positions[0].direction
@@ -232,20 +244,21 @@ class PositionEngine:
         if decision.move_existing_to_breakeven:
             updated: list[Position] = []
             for pos in self._positions:
-                needs_move = (
-                    (pos.direction == "long" and pos.stop_level < pos.entry_price)
-                    or (pos.direction == "short" and pos.stop_level > pos.entry_price)
+                needs_move = (pos.direction == "long" and pos.stop_level < pos.entry_price) or (
+                    pos.direction == "short" and pos.stop_level > pos.entry_price
                 )
                 if needs_move:
-                    updated.append(Position(
-                        entry_price=pos.entry_price,
-                        lots=pos.lots,
-                        contract_type=pos.contract_type,
-                        stop_level=pos.entry_price,
-                        pyramid_level=pos.pyramid_level,
-                        entry_timestamp=pos.entry_timestamp,
-                        direction=pos.direction,
-                    ))
+                    updated.append(
+                        Position(
+                            entry_price=pos.entry_price,
+                            lots=pos.lots,
+                            contract_type=pos.contract_type,
+                            stop_level=pos.entry_price,
+                            pyramid_level=pos.pyramid_level,
+                            entry_timestamp=pos.entry_timestamp,
+                            direction=pos.direction,
+                        )
+                    )
                 else:
                     updated.append(pos)
             self._positions = updated
@@ -274,6 +287,7 @@ class PositionEngine:
                 stop_price=None,
                 reason=f"add_level_{pyramid_level + 1}",
                 metadata={"pyramid_level": pyramid_level + 1},
+                parent_position_id=new_position.position_id,
             )
         ]
 
@@ -302,6 +316,8 @@ class PositionEngine:
                     stop_price=None,
                     reason="circuit_breaker",
                     metadata={"pyramid_level": pos.pyramid_level},
+                    parent_position_id=pos.position_id,
+                    order_class="algo_exit",
                 )
             )
         self._positions.clear()
@@ -310,9 +326,7 @@ class PositionEngine:
 
     # -- private: helpers --
 
-    def _estimate_drawdown(
-        self, snapshot: MarketSnapshot, account: AccountState | None
-    ) -> float:
+    def _estimate_drawdown(self, snapshot: MarketSnapshot, account: AccountState | None) -> float:
         if account is not None:
             return account.drawdown_pct * account.equity
         total_loss = 0.0
@@ -344,6 +358,11 @@ def create_pyramid_engine(config: PyramidConfig) -> PositionEngine:
         margin_limit=config.margin_limit,
         trail_lookback=config.trail_lookback,
     )
+    if (
+        engine_config.disaster_stop_enabled
+        and engine_config.disaster_atr_mult <= config.stop_atr_mult
+    ):
+        raise ValueError("disaster_atr_mult must exceed stop_atr_mult")
     return PositionEngine(
         entry_policy=PyramidEntryPolicy(config),
         add_policy=PyramidAddPolicy(config),
