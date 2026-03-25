@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { Sidebar, SectionLabel, ParamInput } from "@/components/Sidebar";
 import { StatCard, StatRow } from "@/components/StatCard";
 import { ChartCard } from "@/components/ChartCard";
-import { fetchStrategies, startOptimizer, fetchOptimizerStatus } from "@/lib/api";
-import type { StrategyInfo, OptimizerStatus } from "@/lib/api";
+import { fetchStrategies, startOptimizer, fetchOptimizerStatus, fetchActiveParams } from "@/lib/api";
+import type { StrategyInfo, OptimizerStatus, ActiveParams } from "@/lib/api";
 import { colors } from "@/lib/theme";
 
 const inputStyle: React.CSSProperties = {
@@ -23,6 +23,7 @@ export function Optimizer() {
   const [paramGridStr, setParamGridStr] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<OptimizerStatus | null>(null);
   const [running, setRunning] = useState(false);
+  const [activeParams, setActiveParams] = useState<ActiveParams | null>(null);
 
   useEffect(() => {
     fetchStrategies().then((s) => {
@@ -41,6 +42,11 @@ export function Optimizer() {
     }
     setParamGridStr(defaults);
   }, [strategy, strategies]);
+
+  useEffect(() => {
+    if (!strategy) return;
+    fetchActiveParams(strategy).then(setActiveParams).catch(() => setActiveParams(null));
+  }, [strategy]);
 
   const handleRun = async () => {
     const parsed: Record<string, number[]> = {};
@@ -102,6 +108,11 @@ export function Optimizer() {
         </button>
       </Sidebar>
       <div className="flex-1 p-3 overflow-y-auto" style={{ minWidth: 0 }}>
+        {activeParams?.code_changed === true && (
+          <div className="rounded-[5px] p-3 mb-2.5 text-[11px]" style={{ border: `1px solid ${colors.orange}`, color: colors.orange, fontFamily: "var(--font-mono)", background: "rgba(255,165,0,0.1)" }}>
+            Active parameters were optimized against a different version of this strategy. Re-run optimization.
+          </div>
+        )}
         {/* Status bar */}
         <div className="text-[9px] mb-2.5 min-h-[16px]" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>
           {running ? `Optimizing… ${status?.progress ?? ""}` : status?.error ?? ""}

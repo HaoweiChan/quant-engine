@@ -224,6 +224,8 @@ export interface ActiveParams {
   run_at?: string;
   activated_at?: string;
   symbol?: string;
+  strategy_hash?: string;
+  code_changed?: boolean | null;
 }
 
 export interface ParamRun {
@@ -244,6 +246,7 @@ export interface ParamRun {
   train_end?: string | null;
   notes?: string | null;
   initial_capital?: number | null;
+  strategy_hash?: string | null;
 }
 
 export async function fetchActiveParams(strategy: string): Promise<ActiveParams> {
@@ -284,6 +287,15 @@ export interface WarRoomSession {
     unrealized_pnl: number;
     drawdown_pct: number;
     trade_count: number;
+    positions?: {
+      symbol: string;
+      side: "long" | "short";
+      qty: number;
+      avg_entry_price: number;
+      current_price: number;
+      unrealized_pnl: number;
+      strategy: string;
+    }[];
   } | null;
 }
 

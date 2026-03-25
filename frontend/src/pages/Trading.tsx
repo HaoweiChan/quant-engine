@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Sidebar, SectionLabel, ParamInput } from "@/components/Sidebar";
 import { StatCard, StatRow } from "@/components/StatCard";
 import { ChartCard } from "@/components/ChartCard";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
 import { useUiStore } from "@/stores/uiStore";
-import { useTradingStore, selectActiveSessions } from "@/stores/tradingStore";
+import { useTradingStore } from "@/stores/tradingStore";
+import { useMarketDataStore } from "@/stores/marketDataStore";
+import { useShallow } from "zustand/react/shallow";
 import { createAccount, fetchAccounts, fetchWarRoomTyped, deployToAccount, fetchDeployHistory, startSession, stopSession, pauseSession, compareRuns, fetchParamRuns } from "@/lib/api";
 import type { AccountInfo, WarRoomSession, WarRoomData, DeployLogEntry, ParamRun } from "@/lib/api";
 import { colors } from "@/lib/theme";
@@ -338,29 +340,28 @@ function ComparePanel({ strategySlug, onClose }: { strategySlug: string; onClose
 
 import { OHLCVChart } from "@/components/charts/OHLCVChart";
 import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
+import { LivePriceTicker } from "@/components/trading/LivePriceTicker";
+import { MockLiveFeed } from "@/components/trading/MockLiveFeed";
 
 function CommandChartPane({
   activeAccountId,
   equityCurve,
-  livePrice,
+  bars,
 }: {
   activeAccountId: string;
   equityCurve: { timestamp: string; equity: number }[];
-  livePrice?: number;
+  bars?: { timestamp: string; open: number; high: number; low: number; close: number; volume: number }[];
 }) {
   const equityValues = equityCurve.map((p) => p.equity);
-  const ohlcvData = livePrice != null
-    ? [{ timestamp: equityCurve.at(-1)?.timestamp ?? new Date().toISOString(), open: livePrice, high: livePrice, low: livePrice, close: livePrice, volume: 0 }]
-    : [];
 
   return (
     <div className="flex flex-col gap-2 h-full">
       <div className="flex-1 min-h-[220px]" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}>
         <div className="text-[10px] p-2 border-b" style={{ borderColor: colors.cardBorder, color: colors.muted, fontFamily: "var(--font-mono)" }}>
-          LIVE CHART {livePrice != null ? `— $${livePrice.toLocaleString()}` : ""}
+          LIVE CHART
         </div>
         <div className="p-2 h-[calc(100%-30px)]">
-           <OHLCVChart data={ohlcvData} height={180} />
+           <OHLCVChart data={bars ?? []} height={180} />
         </div>
       </div>
       <div className="flex-1 min-h-[160px]" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}>
@@ -375,7 +376,7 @@ function CommandChartPane({
   );
 }
 
-function WarRoomTab() {
+function WarRoomTab({ mockMode }: { mockMode: boolean }) {
   const [data, setData] = useState<WarRoomData | null>(null);
   const [deployHistory, setDeployHistory] = useState<DeployLogEntry[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -383,9 +384,29 @@ function WarRoomTab() {
 
   const activeAccountId = useTradingStore((s) => s.activeAccountId);
   const setActiveAccountId = useTradingStore((s) => s.setActiveAccountId);
-  const sessions = useTradingStore(selectActiveSessions);
+  const storeAllSessions = useTradingStore(useShallow((s) => s.warRoomData?.all_sessions)) as any[] | null;
+  const prevSessionsRef = useRef<any[] | null>(null);
+  const sessions = useMemo(() => {
+    if (!activeAccountId || !storeAllSessions) {
+      prevSessionsRef.current = null;
+      return [];
+    }
+    const filtered = storeAllSessions.filter((s: any) => s.account_id === activeAccountId);
+    if (
+      prevSessionsRef.current &&
+      prevSessionsRef.current.length === filtered.length &&
+      prevSessionsRef.current.every((v: any, i: number) => v === filtered[i])
+    ) {
+      return prevSessionsRef.current;
+    }
+    prevSessionsRef.current = filtered;
+    return filtered;
+  }, [activeAccountId, storeAllSessions]);
+
+  const marketBars = useMarketDataStore((s) => s.bars);
 
   const poll = () => {
+    if (mockMode) return;
     fetchWarRoomTyped().then((res) => {
       setData(res);
       useTradingStore.getState().setWarRoomData(res as unknown as Record<string, unknown>);
@@ -394,12 +415,15 @@ function WarRoomTab() {
   };
   useEffect(() => {
     poll();
-    const interval = setInterval(poll, 15000);
-    return () => clearInterval(interval);
-  }, []);
+    if (!mockMode) {
+      const interval = setInterval(poll, 15000);
+      return () => clearInterval(interval);
+    }
+  }, [mockMode]);
 
-  const accounts = data?.accounts ?? {};
-  const allSessions = data?.all_sessions ?? [];
+  const warRoomDataFromStore = useTradingStore((s) => s.warRoomData) as WarRoomData | null;
+  const accounts = mockMode ? (warRoomDataFromStore?.accounts ?? {}) : (data?.accounts ?? {});
+  const allSessions = mockMode ? (warRoomDataFromStore?.all_sessions ?? []) : (data?.all_sessions ?? []);
   const sessionsByAccount: Record<string, WarRoomSession[]> = {};
   for (const s of allSessions) {
     (sessionsByAccount[s.account_id] ??= []).push(s);
@@ -471,7 +495,7 @@ function WarRoomTab() {
                   key={activeAccountId}
                   activeAccountId={activeAccountId}
                   equityCurve={activeAccountData?.equity_curve ?? []}
-                  livePrice={sessions[0]?.snapshot?.positions?.[0]?.avg_entry_price}
+                  bars={marketBars}
                 />
             </div>
             <div className="flex-1 flex flex-col gap-2">
@@ -726,12 +750,33 @@ function RiskTab() {
 }
 
 export function Trading() {
+  const [mockMode, setMockMode] = useState(false);
   const subTab = useUiStore((s) => s.tradingSubTab);
   const setSubTab = useUiStore((s) => s.setTradingSubTab);
   useLiveFeed();
 
   return (
     <div>
+      <div style={{ padding: "12px 12px 0" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <LivePriceTicker />
+          <button
+            onClick={() => setMockMode(!mockMode)}
+            style={{
+              padding: "4px 8px",
+              fontSize: 9,
+              fontFamily: "var(--font-mono)",
+              background: mockMode ? colors.green : "transparent",
+              color: mockMode ? "#0d0d26" : colors.dim,
+              border: `1px solid ${mockMode ? colors.green : colors.cardBorder}`,
+              borderRadius: 3,
+              cursor: "pointer",
+            }}
+          >
+            {mockMode ? "MOCK ON" : "MOCK OFF"}
+          </button>
+        </div>
+      </div>
       <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)}>
         <TabsList
           className="h-auto w-full justify-start rounded-none border-b p-0"
@@ -755,9 +800,10 @@ export function Trading() {
         </TabsList>
       </Tabs>
       {subTab === "accounts" && <AccountsTab />}
-      {subTab === "warroom" && <WarRoomTab />}
+      {subTab === "warroom" && <WarRoomTab mockMode={mockMode} />}
       {subTab === "blotter" && <BlotterTab />}
       {subTab === "risk" && <RiskTab />}
+      <MockLiveFeed enabled={mockMode} />
     </div>
   );
 }

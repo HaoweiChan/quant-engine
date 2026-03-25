@@ -241,6 +241,11 @@ export function Backtest() {
             {error}
           </div>
         )}
+        {paramSource?.code_changed === true && (
+          <div className="rounded-[5px] p-3 mb-2.5 text-[11px]" style={{ border: `1px solid ${colors.orange}`, color: colors.orange, fontFamily: "var(--font-mono)", background: "rgba(255,165,0,0.1)" }}>
+            Active parameters were optimized against a different version of this strategy. Re-run optimization.
+          </div>
+        )}
         {!result && !loading && (
           <div className="text-[11px] py-5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
             Configure parameters and click Run Backtest.
@@ -334,6 +339,7 @@ export function Backtest() {
                       <SortHeader label="Win Rate" field="win_rate" />
                       <SortHeader label="Max DD" field="max_drawdown_pct" />
                       <SortHeader label="PF" field="profit_factor" />
+                      <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>Hash</th>
                       <th className="text-right py-1" style={{ color: colors.dim }}></th>
                     </tr>
                   </thead>
@@ -388,6 +394,9 @@ export function Backtest() {
                           </td>
                           <td className="text-right py-1 pr-2" style={{ color: pf != null && pf >= 1.5 ? colors.green : pf != null && pf >= 1 ? colors.gold : colors.red }}>
                             {pf != null ? pf.toFixed(2) : "—"}
+                          </td>
+                          <td className="py-1 pr-2" style={{ color: colors.dim }}>
+                            {run.strategy_hash != null ? run.strategy_hash.slice(0, 8) : "—"}
                           </td>
                           <td className="text-right py-1 whitespace-nowrap">
                             <button
