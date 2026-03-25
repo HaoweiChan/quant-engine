@@ -400,21 +400,21 @@ Each MCP tool description SHALL include guidance on when to use the tool, precon
 - **WHEN** the agent reads the `run_monte_carlo` tool description
 - **THEN** it SHALL state: prefer this over run_backtest for comparing strategies; always run after writing a strategy file; use 200-300 paths for iterative work, 500+ for final validation
 
-#### Scenario: run_monte_carlo description references skills
+#### Scenario: run_monte_carlo description contains inline guidance
 - **WHEN** the agent reads the `run_monte_carlo` tool description
-- **THEN** it SHALL find a reference to the `quant-overfitting` skill for evaluation criteria and the `optimize-strategy` skill for the optimization protocol
+- **THEN** it SHALL find inline reminders for DoF rules, acceptance criteria, and strategy type classification without requiring external skill reads
 
 #### Scenario: write_strategy_file description
 - **WHEN** the agent reads the `write_strategy_file` tool description
 - **THEN** it SHALL state: always read_strategy_file first to understand current implementation; always run_monte_carlo after writing to verify improvement; the file must contain a class implementing the correct Policy ABC
 
-#### Scenario: write_strategy_file description references skills
+#### Scenario: write_strategy_file description contains inline guidance
 - **WHEN** the agent reads the `write_strategy_file` tool description
-- **THEN** it SHALL find a reference to the `quant-trend-following` skill for strategy design principles and the `quant-stop-diagnosis` skill for stop-loss design
+- **THEN** it SHALL find inline guidance for strategy design principles (entry signals, stop architecture) without requiring external skill reads
 
-#### Scenario: run_parameter_sweep description references skills
+#### Scenario: run_parameter_sweep description contains inline guidance
 - **WHEN** the agent reads the `run_parameter_sweep` tool description
-- **THEN** it SHALL find a reference to the `quant-overfitting` skill for parameter sensitivity and the `quant-pyramid-math` skill for safe parameter ranges
+- **THEN** it SHALL find inline guidance for parameter sensitivity rules and safe parameter ranges without requiring external skill reads
 
 #### Scenario: get_parameter_schema description
 - **WHEN** the agent reads the `get_parameter_schema` tool description
