@@ -3,6 +3,7 @@
 All consumers (facade, helpers, MCP tools) read from here instead of
 maintaining their own copies of parameter metadata.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -83,8 +84,12 @@ def _discover() -> dict[str, StrategyInfo]:
         cat = meta.get("category")
         tf = meta.get("timeframe")
         result[slug] = StrategyInfo(
-            name=label, slug=slug, module=mod_name,
-            factory=factory_name, param_schema=schema, meta=meta,
+            name=label,
+            slug=slug,
+            module=mod_name,
+            factory=factory_name,
+            param_schema=schema,
+            meta=meta,
             category=cat if isinstance(cat, StrategyCategory) else None,
             timeframe=tf if isinstance(tf, StrategyTimeframe) else None,
         )
@@ -124,8 +129,12 @@ def register(
     cat = m.get("category")
     tf = m.get("timeframe")
     reg[slug] = StrategyInfo(
-        name=label, slug=slug, module=module,
-        factory=factory, param_schema=param_schema, meta=m,
+        name=label,
+        slug=slug,
+        module=module,
+        factory=factory,
+        param_schema=param_schema,
+        meta=m,
         category=cat if isinstance(cat, StrategyCategory) else None,
         timeframe=tf if isinstance(tf, StrategyTimeframe) else None,
     )
@@ -177,6 +186,7 @@ def get_active_params(slug: str) -> dict[str, Any]:
     defaults = get_defaults(slug)
     try:
         from src.strategies.param_loader import load_strategy_params
+
         overrides = load_strategy_params(_resolve_slug(slug))
         if overrides:
             defaults.update(overrides)
@@ -214,6 +224,65 @@ def get_by_timeframe(timeframe: StrategyTimeframe) -> dict[str, StrategyInfo]:
     return {s: i for s, i in _ensure_loaded().items() if i.timeframe == timeframe}
 
 
+def validate_and_clamp(
+    slug: str,
+    params: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Clamp params to PARAM_SCHEMA bounds and coerce types.
+
+    Returns:
+        (clamped_params, warnings)
+        - clamped_params: new dict with all values within schema bounds
+        - warnings: list of human-readable strings describing each modification
+
+    Does not mutate the input dict.
+    """
+    info = get_info(slug)
+    schema = info.param_schema
+    clamped: dict[str, Any] = {}
+    warnings: list[str] = []
+
+    for key, value in params.items():
+        clamped[key] = value
+
+    for key, spec in schema.items():
+        if key not in params:
+            continue
+        value = params[key]
+        schema_type = spec.get("type", "float")
+
+        if schema_type == "int" and not isinstance(value, int):
+            try:
+                coerced = int(value)
+                if coerced != value:
+                    warnings.append(f"{key} coerced from {value} to {coerced} (int type)")
+                clamped[key] = coerced
+            except (ValueError, TypeError):
+                warnings.append(f"{key} could not be coerced to int, leaving as {value}")
+        elif schema_type == "float" and not isinstance(value, float):
+            if isinstance(value, int):
+                clamped[key] = float(value)
+            elif isinstance(value, str):
+                try:
+                    clamped[key] = float(value)
+                except ValueError:
+                    warnings.append(f"{key} could not be coerced to float, leaving as {value}")
+
+        current = clamped[key]
+        if "min" in spec and current < spec["min"]:
+            clamped[key] = spec["min"]
+            warnings.append(f"{key} clamped from {current} to {spec['min']} (min)")
+        elif "max" in spec and current > spec["max"]:
+            clamped[key] = spec["max"]
+            warnings.append(f"{key} clamped from {current} to {spec['max']} (max)")
+
+    for key in params:
+        if key not in schema:
+            warnings.append(f"{key} is not a known parameter, passing through unchanged")
+
+    return clamped, warnings
+
+
 def validate_schemas() -> list[str]:
     """Check PARAM_SCHEMA keys match factory kwargs for all strategies.
 
@@ -227,7 +296,8 @@ def validate_schemas() -> list[str]:
             fn = getattr(mod, info.factory)
             sig = inspect.signature(fn)
             factory_params = {
-                k for k, v in sig.parameters.items()
+                k
+                for k, v in sig.parameters.items()
                 if k not in skip_params and v.default is not inspect.Parameter.empty
             }
             # If factory takes a single config dataclass (e.g. PyramidConfig),
@@ -237,12 +307,14 @@ def validate_schemas() -> list[str]:
                 non_skip = [p for p in params if p.name not in skip_params]
                 if len(non_skip) == 1 and non_skip[0].annotation is not inspect.Parameter.empty:
                     import dataclasses
+
                     ann = non_skip[0].annotation
                     if isinstance(ann, str):
                         continue
                     if dataclasses.is_dataclass(ann):
                         factory_params = {
-                            f.name for f in dataclasses.fields(ann)
+                            f.name
+                            for f in dataclasses.fields(ann)
                             if f.name not in skip_params and f.default is not dataclasses.MISSING
                         }
         except Exception as exc:
