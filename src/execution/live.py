@@ -33,6 +33,7 @@ class LiveExecutor(ExecutionEngine):
         config: LiveExecutorConfig | None = None,
         rollout_config: Any | None = None,
     ) -> None:
+        super().__init__()
         self._api = api
         self._loop = loop
         self._config = config or LiveExecutorConfig()

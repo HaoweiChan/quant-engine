@@ -20,6 +20,7 @@ class PaperExecutor(ExecutionEngine):
         available_margin: float = float("inf"),
         margin_per_lot: float = 184_000.0,
     ) -> None:
+        super().__init__()
         self._slippage_points = slippage_points
         self._current_price = current_price
         self._available_margin = available_margin
