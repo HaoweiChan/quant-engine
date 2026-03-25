@@ -3,6 +3,7 @@
 Replaces the single-TOML approach with append-only versioning, Pareto frontier
 extraction, and an explicit is_active flag for production param selection.
 """
+
 from __future__ import annotations
 
 import json
@@ -21,8 +22,14 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "param_registry.db"
 _DEFAULT_PARETO_OBJECTIVES = ["sharpe", "calmar"]
 _METRIC_COLS = [
-    "sharpe", "calmar", "sortino", "profit_factor",
-    "win_rate", "max_drawdown_pct", "trade_count", "total_pnl",
+    "sharpe",
+    "calmar",
+    "sortino",
+    "profit_factor",
+    "win_rate",
+    "max_drawdown_pct",
+    "trade_count",
+    "total_pnl",
 ]
 _LARGE_TRIAL_THRESHOLD = 5000
 
@@ -43,7 +50,9 @@ CREATE TABLE IF NOT EXISTS param_runs (
     source          TEXT NOT NULL,
     tag             TEXT,
     notes           TEXT,
-    initial_capital REAL
+    initial_capital REAL,
+    strategy_hash   TEXT,
+    strategy_code   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS param_trials (
@@ -112,6 +121,16 @@ class ParamRegistry:
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
         self._migrate_add_initial_capital()
+        self._migrate_add_code_hash()
+
+    def _migrate_add_code_hash(self) -> None:
+        """Add strategy_hash and strategy_code columns if missing (idempotent)."""
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(param_runs)").fetchall()]
+        if "strategy_hash" not in cols:
+            self._conn.execute("ALTER TABLE param_runs ADD COLUMN strategy_hash TEXT")
+        if "strategy_code" not in cols:
+            self._conn.execute("ALTER TABLE param_runs ADD COLUMN strategy_code TEXT")
+        self._conn.commit()
 
     def _migrate_add_initial_capital(self) -> None:
         """Add initial_capital column to param_runs if missing (one-time migration)."""
@@ -134,10 +153,12 @@ class ParamRegistry:
                 logger.warning("migration_unresolvable", strategy=old)
                 continue
             self._conn.execute(
-                "UPDATE param_runs SET strategy = ? WHERE strategy = ?", (slug, old),
+                "UPDATE param_runs SET strategy = ? WHERE strategy = ?",
+                (slug, old),
             )
             self._conn.execute(
-                "UPDATE param_candidates SET strategy = ? WHERE strategy = ?", (slug, old),
+                "UPDATE param_candidates SET strategy = ? WHERE strategy = ?",
+                (slug, old),
             )
             logger.info("migrated_strategy_name", old=old, new=slug)
         self._conn.commit()
@@ -153,7 +174,7 @@ class ParamRegistry:
         mod_part = strategy.split(":")[0]
         prefix = "src.strategies."
         if mod_part.startswith(prefix):
-            return mod_part[len(prefix):].replace(".", "/")
+            return mod_part[len(prefix) :].replace(".", "/")
         return strategy
 
     def close(self) -> None:
@@ -175,6 +196,8 @@ class ParamRegistry:
         end: str | None = None,
         timeframe: str | None = None,
         initial_capital: float = 2_000_000.0,
+        strategy_hash: str | None = None,
+        strategy_code: str | None = None,
     ) -> int:
         """Persist a single backtest result (not a full sweep). Returns run_id or -1 on error."""
         self._validate_strategy_slug(strategy)
@@ -187,11 +210,25 @@ class ParamRegistry:
                 """INSERT INTO param_runs
                    (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
                     objective, is_fraction, n_trials, search_type, source, tag, notes,
-                    initial_capital)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'single', ?, ?, ?, ?)""",
-                (now, strategy, symbol, start, end, None, None,
-                 "sharpe", None, source, run_tag, combined_notes or None,
-                 initial_capital),
+                    initial_capital, strategy_hash, strategy_code)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'single', ?, ?, ?, ?, ?, ?)""",
+                (
+                    now,
+                    strategy,
+                    symbol,
+                    start,
+                    end,
+                    None,
+                    None,
+                    "sharpe",
+                    None,
+                    source,
+                    run_tag,
+                    combined_notes or None,
+                    initial_capital,
+                    strategy_hash,
+                    strategy_code,
+                ),
             )
             run_id = cur.lastrowid
             assert run_id is not None
@@ -200,12 +237,18 @@ class ParamRegistry:
                    (run_id, params, sharpe, calmar, sortino, profit_factor,
                     win_rate, max_drawdown_pct, trade_count, total_pnl, is_oos)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
-                (run_id, json.dumps(params),
-                 metrics.get("sharpe"), metrics.get("calmar"), metrics.get("sortino"),
-                 metrics.get("profit_factor"), metrics.get("win_rate"),
-                 metrics.get("max_drawdown_pct"),
-                 int(metrics.get("trade_count", 0)),
-                 metrics.get("total_pnl")),
+                (
+                    run_id,
+                    json.dumps(params),
+                    metrics.get("sharpe"),
+                    metrics.get("calmar"),
+                    metrics.get("sortino"),
+                    metrics.get("profit_factor"),
+                    metrics.get("win_rate"),
+                    metrics.get("max_drawdown_pct"),
+                    int(metrics.get("trade_count", 0)),
+                    metrics.get("total_pnl"),
+                ),
             )
             # Auto-create a candidate so the run can be activated
             sharpe_val = metrics.get("sharpe", 0) or 0
@@ -213,8 +256,7 @@ class ParamRegistry:
                 """INSERT INTO param_candidates
                    (run_id, trial_id, strategy, params, label, regime, is_active, notes)
                    VALUES (?, NULL, ?, ?, ?, NULL, 0, NULL)""",
-                (run_id, strategy, json.dumps(params),
-                 f"single_sharpe{sharpe_val:.2f}"),
+                (run_id, strategy, json.dumps(params), f"single_sharpe{sharpe_val:.2f}"),
             )
             self._conn.commit()
             return run_id
@@ -240,6 +282,8 @@ class ParamRegistry:
         tag: str | None = None,
         notes: str | None = None,
         initial_capital: float = 2_000_000.0,
+        strategy_hash: str | None = None,
+        strategy_code: str | None = None,
     ) -> int:
         """Persist a full OptimizerResult. Returns the run_id."""
         self._validate_strategy_slug(strategy)
@@ -249,16 +293,35 @@ class ParamRegistry:
             """INSERT INTO param_runs
                (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
                 objective, is_fraction, n_trials, search_type, source, tag, notes,
-                initial_capital)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (now, strategy, symbol, train_start, train_end, test_start, test_end,
-             objective, is_fraction, len(trials_dicts), search_type, source, tag, notes,
-             initial_capital),
+                initial_capital, strategy_hash, strategy_code)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                now,
+                strategy,
+                symbol,
+                train_start,
+                train_end,
+                test_start,
+                test_end,
+                objective,
+                is_fraction,
+                len(trials_dicts),
+                search_type,
+                source,
+                tag,
+                notes,
+                initial_capital,
+                strategy_hash,
+                strategy_code,
+            ),
         )
         run_id = cur.lastrowid
         assert run_id is not None
-        param_keys = [k for k in (trials_dicts[0].keys() if trials_dicts else [])
-                      if k not in _METRIC_COLS and not k.startswith("_")]
+        param_keys = [
+            k
+            for k in (trials_dicts[0].keys() if trials_dicts else [])
+            if k not in _METRIC_COLS and not k.startswith("_")
+        ]
         for row in trials_dicts:
             params_json = json.dumps({k: row[k] for k in param_keys if k in row})
             self._conn.execute(
@@ -266,12 +329,18 @@ class ParamRegistry:
                    (run_id, params, sharpe, calmar, sortino, profit_factor,
                     win_rate, max_drawdown_pct, trade_count, total_pnl, is_oos)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
-                (run_id, params_json,
-                 row.get("sharpe"), row.get("calmar"), row.get("sortino"),
-                 row.get("profit_factor"), row.get("win_rate"),
-                 row.get("max_drawdown_pct"),
-                 int(row.get("trade_count") or row.get("_trade_count") or 0),
-                 row.get("total_pnl")),
+                (
+                    run_id,
+                    params_json,
+                    row.get("sharpe"),
+                    row.get("calmar"),
+                    row.get("sortino"),
+                    row.get("profit_factor"),
+                    row.get("win_rate"),
+                    row.get("max_drawdown_pct"),
+                    int(row.get("trade_count") or row.get("_trade_count") or 0),
+                    row.get("total_pnl"),
+                ),
             )
         # OOS best result
         if result.best_oos_result:
@@ -281,16 +350,25 @@ class ParamRegistry:
                    (run_id, params, sharpe, calmar, sortino, profit_factor,
                     win_rate, max_drawdown_pct, trade_count, total_pnl, is_oos)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
-                (run_id, json.dumps(result.best_params),
-                 m.get("sharpe"), m.get("calmar"), m.get("sortino"),
-                 m.get("profit_factor"), m.get("win_rate"),
-                 m.get("max_drawdown_pct"), int(m.get("trade_count", 0)),
-                 m.get("total_pnl")),
+                (
+                    run_id,
+                    json.dumps(result.best_params),
+                    m.get("sharpe"),
+                    m.get("calmar"),
+                    m.get("sortino"),
+                    m.get("profit_factor"),
+                    m.get("win_rate"),
+                    m.get("max_drawdown_pct"),
+                    int(m.get("trade_count", 0)),
+                    m.get("total_pnl"),
+                ),
             )
         # Auto-create best candidate
         best_candidate_id = self.save_candidate(
-            run_id=run_id, trial_id=None,
-            params=result.best_params, label=f"best_{objective}",
+            run_id=run_id,
+            trial_id=None,
+            params=result.best_params,
+            label=f"best_{objective}",
         )
         # Auto-extract Pareto frontier
         if len(trials_dicts) > 1:
@@ -302,8 +380,10 @@ class ParamRegistry:
                 s = pt.get("sharpe", 0) or 0
                 c = pt.get("calmar", 0) or 0
                 self.save_candidate(
-                    run_id=run_id, trial_id=None,
-                    params=pt["params"], label=f"pareto_sharpe{s:.2f}_calmar{c:.2f}",
+                    run_id=run_id,
+                    trial_id=None,
+                    params=pt["params"],
+                    label=f"pareto_sharpe{s:.2f}_calmar{c:.2f}",
                 )
         self._conn.commit()
         return run_id
@@ -321,7 +401,8 @@ class ParamRegistry:
     ) -> int:
         """Insert a candidate row. Returns the candidate_id."""
         strategy = self._conn.execute(
-            "SELECT strategy FROM param_runs WHERE id = ?", (run_id,),
+            "SELECT strategy FROM param_runs WHERE id = ?",
+            (run_id,),
         ).fetchone()
         if strategy is None:
             raise ValueError(f"Run {run_id} not found")
@@ -329,8 +410,7 @@ class ParamRegistry:
             """INSERT INTO param_candidates
                (run_id, trial_id, strategy, params, label, regime, is_active, notes)
                VALUES (?, ?, ?, ?, ?, ?, 0, ?)""",
-            (run_id, trial_id, strategy["strategy"], json.dumps(params),
-             label, regime, notes),
+            (run_id, trial_id, strategy["strategy"], json.dumps(params), label, regime, notes),
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
@@ -340,7 +420,8 @@ class ParamRegistry:
     def activate(self, candidate_id: int) -> None:
         """Mark a candidate as active, deactivating all others for that strategy."""
         row = self._conn.execute(
-            "SELECT strategy FROM param_candidates WHERE id = ?", (candidate_id,),
+            "SELECT strategy FROM param_candidates WHERE id = ?",
+            (candidate_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"Candidate {candidate_id} not found")
@@ -365,15 +446,19 @@ class ParamRegistry:
         Returns info about what happened (e.g. auto-activated candidate).
         """
         run_row = self._conn.execute(
-            "SELECT id, strategy FROM param_runs WHERE id = ?", (run_id,),
+            "SELECT id, strategy FROM param_runs WHERE id = ?",
+            (run_id,),
         ).fetchone()
         if run_row is None:
             raise ValueError(f"Run {run_id} not found")
         strategy = run_row["strategy"]
-        had_active = self._conn.execute(
-            "SELECT id FROM param_candidates WHERE run_id = ? AND is_active = 1",
-            (run_id,),
-        ).fetchone() is not None
+        had_active = (
+            self._conn.execute(
+                "SELECT id FROM param_candidates WHERE run_id = ? AND is_active = 1",
+                (run_id,),
+            ).fetchone()
+            is not None
+        )
         self._conn.execute("DELETE FROM param_candidates WHERE run_id = ?", (run_id,))
         self._conn.execute("DELETE FROM param_trials WHERE run_id = ?", (run_id,))
         self._conn.execute("DELETE FROM param_runs WHERE id = ?", (run_id,))
@@ -416,7 +501,7 @@ class ParamRegistry:
         row = self._conn.execute(
             """SELECT c.id, c.run_id, c.params, c.label, c.regime,
                       c.activated_at, c.notes,
-                      r.objective, r.tag, r.run_at, r.symbol
+                      r.objective, r.tag, r.run_at, r.symbol, r.strategy_hash
                FROM param_candidates c
                JOIN param_runs r ON r.id = c.run_id
                WHERE c.strategy = ? AND c.is_active = 1""",
@@ -436,7 +521,49 @@ class ParamRegistry:
             "tag": row["tag"],
             "run_at": row["run_at"],
             "symbol": row["symbol"],
+            "strategy_hash": row["strategy_hash"],
         }
+
+    # -- deactivate_stale_candidates -------------------------------------
+
+    def deactivate_stale_candidates(self, strategy: str, current_hash: str) -> int:
+        """Deactivate active candidates where strategy_hash != current_hash (excluding NULL).
+
+        Returns the count of deactivated candidates.
+        """
+        cur = self._conn.execute(
+            """UPDATE param_candidates
+               SET is_active = 0
+               WHERE strategy = ?
+                 AND is_active = 1
+                 AND run_id IN (
+                     SELECT id FROM param_runs
+                     WHERE strategy = ? AND strategy_hash IS NOT NULL AND strategy_hash != ?
+                 )""",
+            (strategy, strategy, current_hash),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    def check_code_hash_match(self, strategy: str, current_hash: str) -> bool | None:
+        """Check if the active candidate's stored hash matches the current file hash.
+
+        Returns True if hash matches, False if different, None if no active candidate
+        or if the active candidate has a NULL hash (legacy).
+        """
+        row = self._conn.execute(
+            """SELECT r.strategy_hash
+               FROM param_candidates c
+               JOIN param_runs r ON r.id = c.run_id
+               WHERE c.strategy = ? AND c.is_active = 1""",
+            (strategy,),
+        ).fetchone()
+        if row is None:
+            return None
+        stored_hash = row["strategy_hash"]
+        if stored_hash is None:
+            return None
+        return stored_hash == current_hash
 
     # -- Pareto frontier --------------------------------------------------
 
@@ -471,8 +598,9 @@ class ParamRegistry:
             for j, b in enumerate(trials):
                 if i == j or j in dominated:
                     continue
-                if all((b.get(o) or 0) >= (a.get(o) or 0) for o in objs) and \
-                   any((b.get(o) or 0) > (a.get(o) or 0) for o in objs):
+                if all((b.get(o) or 0) >= (a.get(o) or 0) for o in objs) and any(
+                    (b.get(o) or 0) > (a.get(o) or 0) for o in objs
+                ):
                     dominated.add(i)
                     break
         return [t for i, t in enumerate(trials) if i not in dominated]
@@ -489,7 +617,7 @@ class ParamRegistry:
         sql = """SELECT r.id, r.run_at, r.strategy, r.symbol, r.objective,
                         r.is_fraction, r.n_trials, r.search_type, r.source,
                         r.tag, r.notes, r.train_start, r.train_end,
-                        r.test_start, r.test_end, r.initial_capital
+                        r.test_start, r.test_end, r.initial_capital, r.strategy_hash
                  FROM param_runs r
                  WHERE r.strategy = ?"""
         params: list[Any] = [strategy]
@@ -535,6 +663,7 @@ class ParamRegistry:
                 "n_candidates": n_candidates,
                 "best_candidate_id": best_candidate_id,
                 "initial_capital": r["initial_capital"],
+                "strategy_hash": r["strategy_hash"],
             }
             if best:
                 entry["best_params"] = json.loads(best["params"])
@@ -551,7 +680,8 @@ class ParamRegistry:
         result = []
         for rid in run_ids:
             run = self._conn.execute(
-                "SELECT * FROM param_runs WHERE id = ?", (rid,),
+                "SELECT * FROM param_runs WHERE id = ?",
+                (rid,),
             ).fetchone()
             if run is None:
                 continue

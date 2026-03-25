@@ -56,7 +56,20 @@ def _resolve_deployment_info(session) -> dict:
             ).fetchone()
             if active:
                 info["active_candidate_id"] = active["id"]
-                info["is_stale"] = active["id"] != session.deployed_candidate_id
+            # Check code hash mismatch: does current file hash differ from deployed run's hash?
+            try:
+                from src.strategies.code_hash import compute_strategy_hash
+
+                stored_run = reg._conn.execute(
+                    "SELECT strategy_hash FROM param_runs WHERE id = ?",
+                    (row["run_id"],),
+                ).fetchone()
+                if stored_run and stored_run["strategy_hash"]:
+                    current_hash, _ = compute_strategy_hash(row["strategy"])
+                    info["is_stale"] = current_hash != stored_run["strategy_hash"]
+            except Exception:
+                # If hash computation fails, don't mark as stale
+                pass
         reg.close()
     except Exception:
         pass

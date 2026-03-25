@@ -1,4 +1,5 @@
 """MCP tool definitions and handlers for the backtest engine."""
+
 from __future__ import annotations
 
 import json
@@ -59,11 +60,11 @@ TOOLS: list[Tool] = [
                 "strategy": {
                     "type": "string",
                     "description": (
-                            "Strategy slug (path-like or legacy alias). "
-                            "Examples: 'daily/trend_following/pyramid_wrapper', "
-                            "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
-                            "External: 'module:factory'."
-                        ),
+                        "Strategy slug (path-like or legacy alias). "
+                        "Examples: 'daily/trend_following/pyramid_wrapper', "
+                        "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
+                        "External: 'module:factory'."
+                    ),
                     "default": "pyramid",
                 },
                 "n_bars": {
@@ -111,11 +112,11 @@ TOOLS: list[Tool] = [
                 "strategy": {
                     "type": "string",
                     "description": (
-                            "Strategy slug (path-like or legacy alias). "
-                            "Examples: 'daily/trend_following/pyramid_wrapper', "
-                            "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
-                            "External: 'module:factory'."
-                        ),
+                        "Strategy slug (path-like or legacy alias). "
+                        "Examples: 'daily/trend_following/pyramid_wrapper', "
+                        "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
+                        "External: 'module:factory'."
+                    ),
                     "default": "pyramid",
                 },
                 "strategy_params": {
@@ -162,11 +163,11 @@ TOOLS: list[Tool] = [
                 "strategy": {
                     "type": "string",
                     "description": (
-                            "Strategy slug (path-like or legacy alias). "
-                            "Examples: 'daily/trend_following/pyramid_wrapper', "
-                            "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
-                            "External: 'module:factory'."
-                        ),
+                        "Strategy slug (path-like or legacy alias). "
+                        "Examples: 'daily/trend_following/pyramid_wrapper', "
+                        "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
+                        "External: 'module:factory'."
+                    ),
                     "default": "pyramid",
                 },
                 "n_paths": {
@@ -232,8 +233,7 @@ TOOLS: list[Tool] = [
                 "n_samples": {
                     "type": "integer",
                     "description": (
-                        "For random search: number of random samples. "
-                        "Omit for grid search."
+                        "For random search: number of random samples. Omit for grid search."
                     ),
                 },
                 "metric": {
@@ -461,10 +461,10 @@ TOOLS: list[Tool] = [
                 "strategy": {
                     "type": "string",
                     "description": (
-                            "Strategy slug (path-like or legacy alias). "
-                            "Examples: 'daily/trend_following/pyramid_wrapper', "
-                            "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'."
-                        ),
+                        "Strategy slug (path-like or legacy alias). "
+                        "Examples: 'daily/trend_following/pyramid_wrapper', "
+                        "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'."
+                    ),
                     "default": "pyramid",
                 },
             },
@@ -581,7 +581,8 @@ def register_tools(app: Server) -> None:
                     tool="run_monte_carlo",
                     params=arguments.get("strategy_params", {}),
                     metrics={
-                        k: v for k, v in result.items()
+                        k: v
+                        for k, v in result.items()
                         if k not in ("scenario", "strategy", "n_paths", "warning")
                     },
                     scenario=arguments["scenario"],
@@ -624,44 +625,73 @@ def register_tools(app: Server) -> None:
                     return _json_response({"files": list_strategy_files()})
                 # Resolve alias for legacy flat names
                 from src.strategies.registry import _SLUG_ALIASES
+
                 resolved = _SLUG_ALIASES.get(filename, filename)
                 filepath = _STRATEGIES_DIR / f"{resolved}.py"
                 if not filepath.exists():
                     available = list_strategy_files()
-                    return _json_response({
-                        "error": f"File '{filename}.py' not found",
-                        "available": [f["filename"] for f in available],
-                    })
+                    return _json_response(
+                        {
+                            "error": f"File '{filename}.py' not found",
+                            "available": [f["filename"] for f in available],
+                        }
+                    )
                 content = filepath.read_text()
                 stat = filepath.stat()
-                return _json_response({
-                    "filename": resolved,
-                    "content": content,
-                    "size_bytes": stat.st_size,
-                    "modified": stat.st_mtime,
-                })
+                return _json_response(
+                    {
+                        "filename": resolved,
+                        "content": content,
+                        "size_bytes": stat.st_size,
+                        "modified": stat.st_mtime,
+                    }
+                )
 
             if name == "write_strategy_file":
                 filename = arguments["filename"]
                 content = arguments["content"]
                 validation = validate_strategy_content(content, f"{filename}.py")
                 if not validation.valid:
-                    return _json_response({
-                        "success": False,
-                        "errors": validation.errors,
-                    })
+                    return _json_response(
+                        {
+                            "success": False,
+                            "errors": validation.errors,
+                        }
+                    )
                 backup_path = backup_strategy_file(filename)
                 filepath = _STRATEGIES_DIR / f"{filename}.py"
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 filepath.write_text(content)
                 from src.strategies.registry import invalidate
+
                 invalidate()
-                return _json_response({
+                stale_candidates_deactivated = 0
+                deactivation_warning = None
+                try:
+                    from src.strategies.param_registry import ParamRegistry
+                    from src.strategies.code_hash import compute_strategy_hash
+
+                    try:
+                        new_hash, _ = compute_strategy_hash(filename)
+                        registry = ParamRegistry()
+                        stale_candidates_deactivated = registry.deactivate_stale_candidates(
+                            filename, new_hash
+                        )
+                        registry.close()
+                    except FileNotFoundError:
+                        pass
+                except Exception as e:
+                    deactivation_warning = f"Stale candidate deactivation failed: {e}"
+                response = {
                     "success": True,
                     "filename": filename,
                     "backup": backup_path,
                     "message": "File written. Run run_monte_carlo to evaluate the change.",
-                })
+                    "stale_candidates_deactivated": stale_candidates_deactivated,
+                }
+                if deactivation_warning:
+                    response["warning"] = deactivation_warning
+                return _json_response(response)
 
             if name == "get_optimization_history":
                 # Combine session history with persistent registry
@@ -671,12 +701,14 @@ def register_tools(app: Server) -> None:
                     db_runs = db_result.get("runs", [])
                 except Exception:
                     db_runs = []
-                return _json_response({
-                    "session_runs": session_runs,
-                    "session_count": history.count,
-                    "persisted_runs": db_runs,
-                    "persisted_count": len(db_runs),
-                })
+                return _json_response(
+                    {
+                        "session_runs": session_runs,
+                        "session_count": history.count,
+                        "persisted_runs": db_runs,
+                        "persisted_count": len(db_runs),
+                    }
+                )
 
             if name == "get_parameter_schema":
                 strategy = arguments.get("strategy", "daily/trend_following/pyramid_wrapper")
@@ -705,6 +737,7 @@ def register_tools(app: Server) -> None:
             if name == "scaffold_strategy":
                 from src.strategies import StrategyCategory, StrategyTimeframe
                 from src.strategies.scaffold import scaffold_strategy
+
                 try:
                     cat = StrategyCategory(arguments["category"])
                     tf = StrategyTimeframe(arguments["timeframe"])

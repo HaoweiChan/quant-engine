@@ -2,6 +2,7 @@
 
 All functions accept flat dicts and return JSON-serializable dicts.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -9,6 +10,17 @@ from typing import Any
 
 from src.core.types import PyramidConfig
 from src.simulator.types import PRESETS, PathConfig
+
+
+def _compute_code_hash(slug: str) -> tuple[str | None, str | None]:
+    """Compute strategy hash and code, returning None on FileNotFoundError."""
+    try:
+        from src.strategies.code_hash import compute_strategy_hash
+
+        return compute_strategy_hash(slug)
+    except FileNotFoundError:
+        return (None, None)
+
 
 # ---------------------------------------------------------------------------
 # Strategy factory resolution
@@ -24,6 +36,7 @@ def resolve_factory(strategy: str) -> Any:
     3. Raise ValueError
     """
     from src.strategies.registry import get_all, get_info
+
     try:
         info = get_info(strategy)
         mod = importlib.import_module(info.module)
@@ -45,6 +58,7 @@ def resolve_strategy_slug(strategy: str) -> str:
     Falls back to the raw string if resolution fails.
     """
     from src.strategies.registry import get_info
+
     try:
         info = get_info(strategy)
         return info.slug
@@ -54,7 +68,7 @@ def resolve_strategy_slug(strategy: str) -> str:
         mod_part = strategy.split(":")[0]
         prefix = "src.strategies."
         if mod_part.startswith(prefix):
-            return mod_part[len(prefix):].replace(".", "/")
+            return mod_part[len(prefix) :].replace(".", "/")
     return strategy
 
 
@@ -70,6 +84,7 @@ def _load_default_pyramid_params() -> dict[str, Any]:
     """Load pyramid params from registry (PARAM_SCHEMA defaults + TOML overrides)."""
     try:
         from src.strategies.registry import get_active_params
+
         params = get_active_params("pyramid_wrapper")
         params.setdefault("max_loss", 500_000)
         params.setdefault("add_trigger_atr", [4.0, 8.0, 12.0])
@@ -94,6 +109,7 @@ def _load_default_pyramid_params() -> dict[str, Any]:
 def _get_adapter():  # type: ignore[no-untyped-def]
     """Create a TaifexAdapter for backtest use."""
     from src.adapters.taifex import TaifexAdapter
+
     return TaifexAdapter()
 
 
@@ -108,6 +124,7 @@ def _resolve_path_config(scenario: str) -> PathConfig:
 # MCP facade functions
 # ---------------------------------------------------------------------------
 
+
 def _make_path_config(
     scenario: str,
     n_bars: int | None = None,
@@ -116,6 +133,7 @@ def _make_path_config(
     """Create a PathConfig, rescaling daily-calibrated params for intraday."""
     import math
     from src.simulator.monte_carlo import TAIFEX_BARS_PER_DAY
+
     base = _resolve_path_config(scenario)
     is_intraday = timeframe in ("intraday", "1m")
     bpd = TAIFEX_BARS_PER_DAY  # 1050
@@ -124,13 +142,21 @@ def _make_path_config(
         if n_bars is None:
             return base
         return PathConfig(
-            drift=base.drift, volatility=base.volatility,
-            garch_omega=base.garch_omega, garch_alpha=base.garch_alpha,
-            garch_beta=base.garch_beta, student_t_df=base.student_t_df,
-            jump_intensity=base.jump_intensity, jump_mean=base.jump_mean,
-            jump_std=base.jump_std, ou_theta=base.ou_theta,
-            ou_mu=base.ou_mu, ou_sigma=base.ou_sigma,
-            n_bars=effective_n, start_price=base.start_price, seed=base.seed,
+            drift=base.drift,
+            volatility=base.volatility,
+            garch_omega=base.garch_omega,
+            garch_alpha=base.garch_alpha,
+            garch_beta=base.garch_beta,
+            student_t_df=base.student_t_df,
+            jump_intensity=base.jump_intensity,
+            jump_mean=base.jump_mean,
+            jump_std=base.jump_std,
+            ou_theta=base.ou_theta,
+            ou_mu=base.ou_mu,
+            ou_sigma=base.ou_sigma,
+            n_bars=effective_n,
+            start_price=base.start_price,
+            seed=base.seed,
         )
     sqrt_bpd = math.sqrt(bpd)
     vol_1m = base.volatility / sqrt_bpd
@@ -157,13 +183,17 @@ def _make_path_config(
 
 
 def _bars_from_path(
-    path, config: PathConfig, timeframe: str = "daily",
+    path,
+    config: PathConfig,
+    timeframe: str = "daily",
 ):
     """Generate bars with correct timestamps for the given timeframe."""
     if timeframe in ("intraday", "1m"):
         from src.simulator.monte_carlo import _path_to_intraday_bars
+
         return _path_to_intraday_bars(path, config)
     from src.simulator.monte_carlo import _path_to_bars
+
     return _path_to_bars(path, config)
 
 
@@ -177,26 +207,35 @@ def _build_runner(
     """Build a BacktestRunner for any strategy. Single source of truth."""
     from src.simulator.backtester import BacktestRunner
     from src.simulator.fill_model import ClosePriceFillModel
+
     factory = resolve_factory(strategy)
     adapter = _get_adapter()
     fm = fill_model or ClosePriceFillModel(slippage_points=1.0)
     if strategy == "pyramid":
         config = _build_pyramid_config(strategy_params)
         return BacktestRunner(
-            config, adapter, fill_model=fm,
-            initial_equity=initial_equity, periods_per_year=periods_per_year,
+            config,
+            adapter,
+            fill_model=fm,
+            initial_equity=initial_equity,
+            periods_per_year=periods_per_year,
         )
     merged = dict(strategy_params or {})
     if "max_loss" not in merged:
         merged["max_loss"] = 500_000
     engine_factory = lambda: factory(**merged)  # noqa: E731
     return BacktestRunner(
-        engine_factory, adapter, fill_model=fm,
-        initial_equity=initial_equity, periods_per_year=periods_per_year,
+        engine_factory,
+        adapter,
+        fill_model=fm,
+        initial_equity=initial_equity,
+        periods_per_year=periods_per_year,
     )
 
 
-def _format_backtest_result(result, *, label: str, strategy: str, n_bars: int, extra: dict | None = None):
+def _format_backtest_result(
+    result, *, label: str, strategy: str, n_bars: int, extra: dict | None = None
+):
     """Format a BacktestResult into a JSON-serializable dict."""
     out = {
         "label": label,
@@ -232,7 +271,9 @@ def _serialize_trade_log(trade_log) -> list[dict[str, Any]]:
     """Convert Fill objects to JSON-serializable dicts for the frontend."""
     return [
         {
-            "timestamp": f.timestamp.isoformat() if hasattr(f.timestamp, "isoformat") else str(f.timestamp),
+            "timestamp": f.timestamp.isoformat()
+            if hasattr(f.timestamp, "isoformat")
+            else str(f.timestamp),
             "side": f.side,
             "price": f.fill_price,
             "lots": f.lots,
@@ -254,10 +295,19 @@ def run_backtest_for_mcp(
     from src.simulator.monte_carlo import TAIFEX_BARS_PER_DAY
     from src.simulator.price_gen import generate_paths
 
+    resolved_slug = resolve_strategy_slug(strategy)
+    clamped_params, param_warnings = ({} if strategy_params is None else strategy_params), []
+    if strategy_params:
+        from src.strategies.registry import validate_and_clamp
+
+        clamped_params, param_warnings = validate_and_clamp(resolved_slug, strategy_params)
+
     path_config = _make_path_config(scenario, n_bars, timeframe)
     is_intraday = timeframe in ("intraday", "1m")
     ppy = TAIFEX_BARS_PER_DAY * 252.0 if is_intraday else 252.0
-    runner = _build_runner(strategy, strategy_params, periods_per_year=ppy, initial_equity=initial_equity)
+    runner = _build_runner(
+        resolved_slug, clamped_params, periods_per_year=ppy, initial_equity=initial_equity
+    )
     paths = generate_paths(1, path_config)
     bars, timestamps = _bars_from_path(paths[0], path_config, timeframe)
     result = runner.run(bars, timestamps=timestamps)
@@ -268,17 +318,25 @@ def run_backtest_for_mcp(
         n_bars=len(bars),
         extra={"scenario": scenario, "timeframe": timeframe},
     )
+    out["param_warnings"] = param_warnings
+    strategy_hash, strategy_code = _compute_code_hash(resolved_slug)
+    if strategy_hash is not None:
+        out["strategy_hash"] = strategy_hash
     try:
         from src.strategies.param_registry import ParamRegistry
+
         registry = ParamRegistry()
         save_metrics = {**out.get("metrics", {}), "total_pnl": out.get("total_pnl")}
         run_id = registry.save_backtest_run(
-            strategy=resolve_strategy_slug(strategy),
+            strategy=resolved_slug,
             symbol=f"synthetic:{scenario}",
             params=strategy_params or {},
             metrics=save_metrics,
-            source="mcp", tool="run_backtest",
+            source="mcp",
+            tool="run_backtest",
             initial_capital=initial_equity,
+            strategy_hash=strategy_hash,
+            strategy_code=strategy_code,
         )
         registry.close()
         if run_id > 0:
@@ -313,6 +371,7 @@ def run_backtest_realdata_for_mcp(
         return {"error": f"Database not found at {db_path}"}
 
     from src.data.db import Database
+
     db = Database(f"sqlite:///{db_path}")
     start_dt = datetime.fromisoformat(start)
     end_dt = datetime.fromisoformat(end)
@@ -320,20 +379,35 @@ def run_backtest_realdata_for_mcp(
     if not raw:
         return {"error": f"No data for {symbol} in {start}–{end}"}
 
+    resolved_slug = resolve_strategy_slug(strategy)
+    clamped_params, param_warnings = ({} if strategy_params is None else strategy_params), []
+    if strategy_params:
+        from src.strategies.registry import validate_and_clamp
+
+        clamped_params, param_warnings = validate_and_clamp(resolved_slug, strategy_params)
+
     daily_atr = _mean(b.high - b.low for b in raw)
     trading_days = len({b.timestamp.date() for b in raw})
     bars_per_day = len(raw) / max(trading_days, 1)
     periods_per_year = bars_per_day * 252 if bars_per_day > 10 else 252.0
     runner = _build_runner(
-        strategy, strategy_params,
+        resolved_slug,
+        clamped_params,
         periods_per_year=periods_per_year,
         initial_equity=initial_equity,
     )
 
     bars = [
-        {"symbol": symbol, "price": b.close, "open": b.open, "high": b.high,
-         "low": b.low, "close": b.close, "daily_atr": daily_atr,
-         "timestamp": b.timestamp}
+        {
+            "symbol": symbol,
+            "price": b.close,
+            "open": b.open,
+            "high": b.high,
+            "low": b.low,
+            "close": b.close,
+            "daily_atr": daily_atr,
+            "timestamp": b.timestamp,
+        }
         for b in raw
     ]
     timestamps = [b.timestamp for b in raw]
@@ -363,19 +437,28 @@ def run_backtest_realdata_for_mcp(
     # Detect effective timeframe from bar_agg param
     bar_agg = (strategy_params or {}).get("bar_agg", 1)
     base["timeframe_minutes"] = int(bar_agg)
+    base["param_warnings"] = param_warnings
+    strategy_hash, strategy_code = _compute_code_hash(resolved_slug)
+    if strategy_hash is not None:
+        base["strategy_hash"] = strategy_hash
     try:
         from src.strategies.param_registry import ParamRegistry
+
         registry = ParamRegistry()
         save_metrics = {**base.get("metrics", {}), "total_pnl": base.get("total_pnl")}
         run_id = registry.save_backtest_run(
-            strategy=resolve_strategy_slug(strategy),
+            strategy=resolved_slug,
             symbol=symbol,
             params=strategy_params or {},
             metrics=save_metrics,
-            source="mcp", tool="run_backtest_realdata",
-            start=start, end=end,
+            source="mcp",
+            tool="run_backtest_realdata",
+            start=start,
+            end=end,
             timeframe=f"{bar_agg}min",
             initial_capital=initial_equity,
+            strategy_hash=strategy_hash,
+            strategy_code=strategy_code,
         )
         registry.close()
         if run_id > 0:
@@ -399,17 +482,24 @@ def run_monte_carlo_for_mcp(
     clamped = min(n_paths, 1000)
     warning = f"n_paths clamped from {n_paths} to 1000" if n_paths > 1000 else None
 
+    resolved_slug = resolve_strategy_slug(strategy)
+    clamped_params, param_warnings = ({} if strategy_params is None else strategy_params), []
+    if strategy_params:
+        from src.strategies.registry import validate_and_clamp
+
+        clamped_params, param_warnings = validate_and_clamp(resolved_slug, strategy_params)
+
     path_config = _make_path_config(scenario, n_bars, timeframe)
     adapter = _get_adapter()
 
-    if strategy == "pyramid":
-        config = _build_pyramid_config(strategy_params)
+    if resolved_slug == "pyramid" or strategy == "pyramid":
+        config = _build_pyramid_config(clamped_params if strategy_params else None)
         mc_result = run_monte_carlo(clamped, config, adapter, path_config)
     else:
-        merged = dict(strategy_params or {})
+        merged = dict(clamped_params)
         if "max_loss" not in merged:
             merged["max_loss"] = 500_000
-        mc_result = _run_mc_with_runner(strategy, merged, clamped, path_config, timeframe)
+        mc_result = _run_mc_with_runner(resolved_slug, merged, clamped, path_config, timeframe)
 
     result: dict[str, Any] = {
         "scenario": scenario,
@@ -417,8 +507,7 @@ def run_monte_carlo_for_mcp(
         "n_paths": clamped,
         "percentiles": mc_result.percentiles,
         "mean_pnl": (
-            sum(mc_result.terminal_pnl_distribution)
-            / len(mc_result.terminal_pnl_distribution)
+            sum(mc_result.terminal_pnl_distribution) / len(mc_result.terminal_pnl_distribution)
             if mc_result.terminal_pnl_distribution
             else 0.0
         ),
@@ -426,13 +515,16 @@ def run_monte_carlo_for_mcp(
         "ruin_probability": mc_result.ruin_probability,
         "max_drawdown_p50": sorted(mc_result.max_drawdown_distribution)[
             len(mc_result.max_drawdown_distribution) // 2
-        ] if mc_result.max_drawdown_distribution else 0.0,
-        "sharpe_p50": sorted(mc_result.sharpe_distribution)[
-            len(mc_result.sharpe_distribution) // 2
-        ] if mc_result.sharpe_distribution else 0.0,
+        ]
+        if mc_result.max_drawdown_distribution
+        else 0.0,
+        "sharpe_p50": sorted(mc_result.sharpe_distribution)[len(mc_result.sharpe_distribution) // 2]
+        if mc_result.sharpe_distribution
+        else 0.0,
     }
     if warning:
         result["warning"] = warning
+    result["param_warnings"] = param_warnings
     return result
 
 
@@ -441,6 +533,7 @@ def _mc_single_path(args: tuple) -> tuple[float, float, float]:
     strategy_name, strategy_params, path_array, path_config, timeframe = args
     from src.simulator.backtester import BacktestRunner
     from src.simulator.metrics import max_drawdown_pct, sharpe_ratio
+
     factory = resolve_factory(strategy_name)
     engine_factory = lambda: factory(**strategy_params)  # noqa: E731
     adapter = _get_adapter()
@@ -470,16 +563,17 @@ def _run_mc_with_runner(
     use_mp = timeframe in ("intraday", "1m") and n_paths > 1
     if use_mp:
         from concurrent.futures import ProcessPoolExecutor
+
         workers = min(n_paths, os.cpu_count() or 4)
         work_items = [
-            (strategy_name, strategy_params, path, path_config, timeframe)
-            for path in paths
+            (strategy_name, strategy_params, path, path_config, timeframe) for path in paths
         ]
         with ProcessPoolExecutor(max_workers=workers) as pool:
             results_list = list(pool.map(_mc_single_path, work_items))
     else:
         from src.simulator.backtester import BacktestRunner
         from src.simulator.metrics import max_drawdown_pct, sharpe_ratio
+
         factory = resolve_factory(strategy_name)
         engine_factory = lambda: factory(**strategy_params)  # noqa: E731
         adapter = _get_adapter()
@@ -489,7 +583,9 @@ def _run_mc_with_runner(
             bars, timestamps = _bars_from_path(path, path_config, timeframe)
             result = runner.run(bars, timestamps=timestamps)
             pnl = result.equity_curve[-1] - result.equity_curve[0]
-            results_list.append((pnl, max_drawdown_pct(result.equity_curve), sharpe_ratio(result.equity_curve)))
+            results_list.append(
+                (pnl, max_drawdown_pct(result.equity_curve), sharpe_ratio(result.equity_curve))
+            )
 
     terminal_pnls = [r[0] for r in results_list]
     max_dds = [r[1] for r in results_list]
@@ -539,11 +635,17 @@ def run_sweep_for_mcp(
     from src.simulator.price_gen import generate_paths
     from src.simulator.strategy_optimizer import StrategyOptimizer
 
+    resolved_slug = resolve_strategy_slug(strategy)
+    clamped_base, param_warnings = base_params, []
+    from src.strategies.registry import validate_and_clamp
+
+    clamped_base, param_warnings = validate_and_clamp(resolved_slug, base_params)
+
     path_config = _make_path_config(scenario, n_bars, timeframe)
     paths = generate_paths(1, path_config)
     bars, timestamps = _bars_from_path(paths[0], path_config, timeframe)
     adapter = _get_adapter()
-    factory = resolve_factory(strategy)
+    factory = resolve_factory(resolved_slug)
     optimizer = StrategyOptimizer(adapter)
 
     if n_samples is not None:
@@ -555,7 +657,7 @@ def run_sweep_for_mcp(
             else:
                 return {"error": f"For random search, sweep_params['{k}'] must be [min, max]"}
         result = optimizer.random_search(
-            engine_factory=lambda **p: factory(**{**base_params, **p}),
+            engine_factory=lambda **p: factory(**{**clamped_base, **p}),
             param_bounds=param_bounds,
             bars=bars,
             timestamps=timestamps,
@@ -571,7 +673,7 @@ def run_sweep_for_mcp(
             else:
                 return {"error": f"For grid search, sweep_params['{k}'] must be a list of values"}
         result = optimizer.grid_search(
-            engine_factory=lambda **p: factory(**{**base_params, **p}),
+            engine_factory=lambda **p: factory(**{**clamped_base, **p}),
             param_grid=param_grid,
             bars=bars,
             timestamps=timestamps,
@@ -582,15 +684,22 @@ def run_sweep_for_mcp(
     # Persist to param registry
     run_id = None
     pareto_candidates = []
+    strategy_hash, strategy_code = _compute_code_hash(resolved_slug)
     try:
         from src.strategies.param_registry import ParamRegistry
+
         registry = ParamRegistry()
         search = "random" if n_samples is not None else "grid"
         run_id = registry.save_run(
-            result=result, strategy=resolve_strategy_slug(strategy),
+            result=result,
+            strategy=resolved_slug,
             symbol=f"synthetic:{scenario}",
-            objective=metric, search_type=search, source="mcp",
+            objective=metric,
+            search_type=search,
+            source="mcp",
             initial_capital=2_000_000.0,
+            strategy_hash=strategy_hash,
+            strategy_code=strategy_code,
         )
         pareto = registry.get_pareto_frontier(run_id)
         pareto_candidates = [
@@ -610,6 +719,7 @@ def run_sweep_for_mcp(
         "n_trials": len(trials_data),
         "top_5": trials_data[:5],
         "warnings": result.warnings,
+        "param_warnings": param_warnings,
     }
     if run_id is not None:
         out["run_id"] = run_id
@@ -647,18 +757,26 @@ def run_stress_for_mcp(
     if invalid:
         return {"error": f"Unknown scenarios: {invalid}. Available: {list(all_scenarios.keys())}"}
 
+    resolved_slug = resolve_strategy_slug(strategy)
+    clamped_params, param_warnings = ({} if strategy_params is None else strategy_params), []
+    if strategy_params:
+        from src.strategies.registry import validate_and_clamp
+
+        clamped_params, param_warnings = validate_and_clamp(resolved_slug, strategy_params)
+
     adapter = _get_adapter()
     results = []
 
     for name in names:
         scenario_obj = all_scenarios[name]()
-        if strategy == "pyramid":
-            config = _build_pyramid_config(strategy_params)
+        if resolved_slug == "pyramid" or strategy == "pyramid":
+            config = _build_pyramid_config(clamped_params if strategy_params else None)
             stress_result = run_stress_test(scenario_obj, config, adapter)
         else:
             from src.simulator.backtester import BacktestRunner
-            factory = resolve_factory(strategy)
-            merged = dict(strategy_params or {})
+
+            factory = resolve_factory(resolved_slug)
+            merged = dict(clamped_params)
             if "max_loss" not in merged:
                 merged["max_loss"] = 500_000
             engine_factory = lambda: factory(**merged)  # noqa: E731
@@ -666,14 +784,10 @@ def run_stress_for_mcp(
             prices = _generate_scenario_prices(scenario_obj, 20000.0)
             bars, timestamps = _prices_to_bars(prices)
             result = runner.run(bars, timestamps=timestamps)
-            cb_triggered = any(
-                f.reason == "circuit_breaker" for f in result.trade_log
-            )
-            stops = [
-                f.reason for f in result.trade_log
-                if "stop" in f.reason.lower()
-            ]
+            cb_triggered = any(f.reason == "circuit_breaker" for f in result.trade_log)
+            stops = [f.reason for f in result.trade_log if "stop" in f.reason.lower()]
             from src.simulator.types import StressResult
+
             stress_result = StressResult(
                 scenario_name=scenario_obj.name,
                 final_pnl=result.equity_curve[-1] - result.equity_curve[0],
@@ -682,30 +796,39 @@ def run_stress_for_mcp(
                 stops_triggered=stops,
                 equity_curve=result.equity_curve,
             )
-        results.append({
-            "scenario": stress_result.scenario_name,
-            "final_pnl": stress_result.final_pnl,
-            "max_drawdown": stress_result.max_drawdown,
-            "circuit_breaker_triggered": stress_result.circuit_breaker_triggered,
-            "stops_triggered": stress_result.stops_triggered,
-        })
+        results.append(
+            {
+                "scenario": stress_result.scenario_name,
+                "final_pnl": stress_result.final_pnl,
+                "max_drawdown": stress_result.max_drawdown,
+                "circuit_breaker_triggered": stress_result.circuit_breaker_triggered,
+                "stops_triggered": stress_result.stops_triggered,
+            }
+        )
 
-    return {"strategy": strategy, "results": results}
+    return {"strategy": strategy, "results": results, "param_warnings": param_warnings}
 
 
-def get_strategy_parameter_schema(strategy: str = "daily/trend_following/pyramid_wrapper") -> dict[str, Any]:
+def get_strategy_parameter_schema(
+    strategy: str = "daily/trend_following/pyramid_wrapper",
+) -> dict[str, Any]:
     """Return parameter schema with current values, types, and ranges."""
     from src.strategies.registry import get_schema
+
     try:
         schema = get_schema(strategy)
     except KeyError:
         return {"error": f"No schema available for strategy '{strategy}'"}
     schema["scenarios"] = _scenario_descriptions()
     # Inject max_loss as a fixed param (not from PARAM_SCHEMA)
-    schema["parameters"].setdefault("max_loss", {
-        "current": 500_000, "type": "float",
-        "description": "Maximum dollar loss before engine halts. DO NOT CHANGE.",
-    })
+    schema["parameters"].setdefault(
+        "max_loss",
+        {
+            "current": 500_000,
+            "type": "float",
+            "description": "Maximum dollar loss before engine halts. DO NOT CHANGE.",
+        },
+    )
     return schema
 
 
@@ -725,18 +848,21 @@ def _scenario_descriptions() -> dict[str, str]:
 # Param registry facade functions (for MCP tools)
 # ---------------------------------------------------------------------------
 
+
 def get_run_history_for_mcp(
     strategy: str | None = None,
     limit: int = 10,
 ) -> dict[str, Any]:
     """Query persisted optimization runs from the registry."""
     from src.strategies.param_registry import ParamRegistry
+
     registry = ParamRegistry()
     if strategy:
         runs = registry.get_run_history(strategy, limit=limit)
     else:
         # Cross-strategy: query each known strategy
         from src.strategies.registry import get_all
+
         runs = []
         for slug in get_all():
             runs.extend(registry.get_run_history(slug, limit=limit))
@@ -749,6 +875,7 @@ def get_run_history_for_mcp(
 def activate_candidate_for_mcp(candidate_id: int) -> dict[str, Any]:
     """Activate a parameter candidate for production use."""
     from src.strategies.param_registry import ParamRegistry
+
     registry = ParamRegistry()
     try:
         registry.activate(candidate_id)
@@ -765,6 +892,7 @@ def activate_candidate_for_mcp(candidate_id: int) -> dict[str, Any]:
     ).fetchone()
     registry.close()
     import json
+
     return {
         "status": "activated",
         "candidate_id": candidate_id,
@@ -780,6 +908,7 @@ def activate_candidate_for_mcp(candidate_id: int) -> dict[str, Any]:
 def get_active_params_for_mcp(strategy: str = "pyramid") -> dict[str, Any]:
     """Return currently active optimized params, or schema defaults."""
     from src.strategies.param_registry import ParamRegistry
+
     registry = ParamRegistry()
     detail = registry.get_active_detail(strategy)
     registry.close()
@@ -789,8 +918,12 @@ def get_active_params_for_mcp(strategy: str = "pyramid") -> dict[str, Any]:
     slug = "pyramid_wrapper" if strategy == "pyramid" else strategy
     try:
         from src.strategies.registry import get_defaults
+
         defaults = get_defaults(slug)
-        return {"params": defaults, "source": "defaults",
-                "note": "No optimized params found; returning PARAM_SCHEMA defaults."}
+        return {
+            "params": defaults,
+            "source": "defaults",
+            "note": "No optimized params found; returning PARAM_SCHEMA defaults.",
+        }
     except KeyError:
         return {"error": f"Unknown strategy '{strategy}'"}
