@@ -28,6 +28,10 @@ class AccountCreateRequest(BaseModel):
     password: str | None = None
 
 
+class UpdateStrategiesRequest(BaseModel):
+    strategies: list[dict]
+
+
 def _get_db():
     from src.broker_gateway.account_db import AccountDB
     return AccountDB()
@@ -112,6 +116,28 @@ async def create_account(req: AccountCreateRequest) -> dict:
         "display_name": config.display_name,
         "credential_warning": cred_msg or None,
     }
+
+
+@router.patch("/accounts/{account_id}/strategies")
+async def update_strategies(account_id: str, req: UpdateStrategiesRequest) -> dict:
+    db = _get_db()
+    config = db.load_account(account_id)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    config.strategies = req.strategies
+    db.save_account(config)
+    # Ensure sessions exist for all strategy+symbol pairs
+    try:
+        from src.api.helpers import get_session_manager
+        mgr = get_session_manager()
+        for entry in req.strategies:
+            slug = entry.get("slug", "")
+            symbol = entry.get("symbol", "")
+            if slug and symbol:
+                mgr.create_session(account_id, slug, symbol)
+    except Exception:
+        pass
+    return {"id": account_id, "strategies": req.strategies}
 
 
 def _check_credentials(account_id: str) -> dict[str, bool]:

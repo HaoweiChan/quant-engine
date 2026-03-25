@@ -108,9 +108,21 @@ async def war_room() -> dict:
                     "side": p.side,
                     "quantity": p.quantity,
                     "avg_entry_price": p.avg_entry_price,
+                    "current_price": p.current_price,
                     "unrealized_pnl": p.unrealized_pnl,
                 }
                 for p in (snap.positions if snap and snap.connected else [])
+            ],
+            "recent_fills": [
+                {
+                    "timestamp": f.timestamp.isoformat() if hasattr(f.timestamp, "isoformat") else str(f.timestamp),
+                    "symbol": f.symbol,
+                    "side": f.side,
+                    "price": f.price,
+                    "quantity": f.quantity,
+                    "fee": f.fee,
+                }
+                for f in (snap.recent_fills if snap and snap.connected else [])
             ],
             "equity_curve": [{"timestamp": t.isoformat(), "equity": e} for t, e in equity_curve],
         }

@@ -1,6 +1,9 @@
 """FastAPI application for the quant engine — REST + WebSocket API."""
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,11 +11,27 @@ from src.api.routes import accounts, backtest, coverage, crawl, deploy, editor, 
 from src.api.ws import backtest as ws_backtest
 from src.api.ws import live_feed, risk
 
+_main_loop: asyncio.AbstractEventLoop | None = None
+
+
+def get_main_loop() -> asyncio.AbstractEventLoop | None:
+    return _main_loop
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _main_loop
+    _main_loop = asyncio.get_running_loop()
+    yield
+    _main_loop = None
+
+
 app = FastAPI(
     title="Quant Engine API",
     version="0.1.0",
     docs_url="/docs",
     redoc_url=None,
+    lifespan=lifespan,
 )
 
 app.add_middleware(

@@ -1,6 +1,8 @@
-"""SinopacGateway — live account state from shioaji (TAIFEX futures)."""
+"""SinopacGateway — live account state + market data from shioaji (TAIFEX futures)."""
 from __future__ import annotations
 
+import asyncio
+import threading
 from datetime import datetime
 from typing import Any
 
@@ -12,6 +14,7 @@ from src.broker_gateway.types import AccountSnapshot, Fill, LivePosition
 logger = structlog.get_logger(__name__)
 
 sj: Any = None
+_SUBSCRIBED_CONTRACTS: list[str] = []
 
 
 def _ensure_shioaji() -> Any:
@@ -29,14 +32,32 @@ def _ensure_shioaji() -> Any:
     return sj
 
 
+def _get_or_create_loop() -> asyncio.AbstractEventLoop:
+    """Get the running asyncio event loop or create one for bridging."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    try:
+        loop = asyncio.get_event_loop()
+        if not loop.is_closed():
+            return loop
+    except RuntimeError:
+        pass
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    return loop
+
+
 class SinopacGateway(BrokerGateway):
-    """Read-only account state from Sinopac via shioaji."""
+    """Read-only account state + live market data from Sinopac via shioaji."""
 
     def __init__(self, cache_ttl: float = 10.0) -> None:
         super().__init__(cache_ttl=cache_ttl)
         self._api: Any = None
         self._connected = False
         self._connect_error: str | None = None
+        self._tick_loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def broker_name(self) -> str:
@@ -93,17 +114,95 @@ class SinopacGateway(BrokerGateway):
             self._connected = True
             self._connect_error = None
             logger.info("sinopac_gateway_connected", account_id=account_id)
+            self._subscribe_market_data()
         except Exception as exc:
             self._connect_error = f"Login failed: {exc}"
             logger.warning("sinopac_login_failed", account_id=account_id, error=str(exc))
 
+    def _subscribe_market_data(self) -> None:
+        """Subscribe to near-month TX tick data and bridge to WebSocket broadcaster."""
+        import time
+        global _SUBSCRIBED_CONTRACTS
+        if not self._api:
+            return
+        try:
+            from src.api.ws.live_feed import push_tick
+        except ImportError:
+            logger.warning("sinopac_push_tick_unavailable")
+            return
+        try:
+            from src.api.main import get_main_loop
+            loop = get_main_loop()
+            if loop and not loop.is_closed():
+                self._tick_loop = loop
+                logger.info("sinopac_main_loop_captured")
+            else:
+                logger.warning("sinopac_no_event_loop")
+        except Exception:
+            pass
+        # Register tick callback BEFORE subscribing
+        def _on_tick(exchange: Any, tick: Any) -> None:
+            code = getattr(tick, "code", "")
+            price = float(getattr(tick, "close", 0))
+            volume = int(getattr(tick, "volume", 0))
+            if price <= 0:
+                return
+            symbol = "TX" if code.startswith("TXF") else "MTX" if code.startswith("MXF") else code
+            try:
+                loop = self._tick_loop
+                if not loop or loop.is_closed():
+                    from src.api.main import get_main_loop
+                    loop = get_main_loop()
+                    self._tick_loop = loop
+                if loop and loop.is_running():
+                    asyncio.run_coroutine_threadsafe(push_tick(symbol, price, volume), loop)
+            except Exception as exc:
+                logger.debug("sinopac_tick_push_error", error=str(exc))
+        try:
+            self._api.quote.set_on_tick_fop_v1_callback(_on_tick)
+            logger.info("sinopac_tick_callback_registered")
+        except Exception as exc:
+            logger.warning("sinopac_tick_callback_failed", error=str(exc))
+        # Register event handler to capture subscribe confirmations
+        @self._api.on_event
+        def _on_event(resp_code: int, event_code: int, info: str, event: str) -> None:
+            logger.info("sinopac_event", resp_code=resp_code, event_code=event_code, info=info, msg=event)
+        # Wait for contracts to be fully loaded
+        time.sleep(2)
+        futures_groups = [
+            ("TX", "TXF"),
+            ("MTX", "MXF"),
+        ]
+        for symbol, group_name in futures_groups:
+            if symbol in _SUBSCRIBED_CONTRACTS:
+                continue
+            try:
+                group = getattr(self._api.Contracts.Futures, group_name)
+                candidates = [c for c in group if getattr(c, "code", "")[-2:] not in ("R1", "R2")]
+                if not candidates:
+                    logger.warning("sinopac_no_contracts_found", symbol=symbol)
+                    continue
+                contract = min(candidates, key=lambda c: getattr(c, "delivery_date", "9999"))
+                code = getattr(contract, "code", "?")
+                self._api.quote.subscribe(
+                    contract,
+                    quote_type=sj.constant.QuoteType.Tick,
+                    version=sj.constant.QuoteVersion.v1,
+                )
+                _SUBSCRIBED_CONTRACTS.append(symbol)
+                logger.info("sinopac_tick_subscribed", symbol=symbol, code=code)
+            except Exception as exc:
+                logger.warning("sinopac_tick_subscribe_failed", symbol=symbol, error=str(exc))
+
     def disconnect(self) -> None:
+        global _SUBSCRIBED_CONTRACTS
         if self._api:
             try:
                 self._api.logout()
             except Exception:
                 pass
         self._connected = False
+        _SUBSCRIBED_CONTRACTS.clear()
 
     def _fetch_snapshot(self) -> AccountSnapshot:
         if not self._connected or not self._api:
