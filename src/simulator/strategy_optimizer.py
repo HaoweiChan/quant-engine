@@ -28,7 +28,7 @@ import polars as pl
 from src.core.adapter import BaseAdapter
 from src.core.position_engine import PositionEngine
 from src.simulator.backtester import BacktestRunner
-from src.simulator.fill_model import ClosePriceFillModel, FillModel
+from src.simulator.fill_model import FillModel, MarketImpactFillModel
 from src.simulator.types import (
     BacktestResult,
     OptimizerResult,
@@ -64,7 +64,7 @@ def _run_single_trial(
     a_cls = getattr(a_mod, adapter_class)
     adapter = a_cls(**adapter_kwargs)
 
-    fill_model = ClosePriceFillModel(slippage_points=slippage)
+    fill_model = MarketImpactFillModel()
     runner = BacktestRunner(
         config=lambda: engine,
         adapter=adapter,
@@ -93,7 +93,7 @@ class StrategyOptimizer:
         n_jobs: int = 1,
     ) -> None:
         self._adapter = adapter
-        self._fill_model = fill_model or ClosePriceFillModel(slippage_points=1.0)
+        self._fill_model = fill_model or MarketImpactFillModel()
         self._initial_equity = initial_equity
         self._n_jobs = n_jobs
         self._slippage = getattr(self._fill_model, "_slippage", 1.0)

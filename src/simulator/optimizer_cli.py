@@ -100,7 +100,7 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
 
     from src.adapters.taifex import TaifexAdapter
     from src.data.db import Database
-    from src.simulator.fill_model import ClosePriceFillModel
+    from src.simulator.fill_model import MarketImpactFillModel
     from src.simulator.strategy_optimizer import StrategyOptimizer
 
     factory_module = cfg.get("factory_module", "src.strategies.atr_mean_reversion")
@@ -133,7 +133,7 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
 
     opt = StrategyOptimizer(
         adapter=TaifexAdapter(),
-        fill_model=ClosePriceFillModel(slippage_points=1.0),
+        fill_model=MarketImpactFillModel(),
         n_jobs=n_jobs,
     )
     result = opt.grid_search(

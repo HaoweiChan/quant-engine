@@ -206,11 +206,11 @@ def _build_runner(
 ):
     """Build a BacktestRunner for any strategy. Single source of truth."""
     from src.simulator.backtester import BacktestRunner
-    from src.simulator.fill_model import ClosePriceFillModel
+    from src.simulator.fill_model import MarketImpactFillModel
 
     factory = resolve_factory(strategy)
     adapter = _get_adapter()
-    fm = fill_model or ClosePriceFillModel(slippage_points=1.0)
+    fm = fill_model or MarketImpactFillModel()
     if strategy == "pyramid":
         config = _build_pyramid_config(strategy_params)
         return BacktestRunner(
@@ -247,6 +247,16 @@ def _format_backtest_result(
         "equity_end": result.equity_curve[-1],
         "total_pnl": result.equity_curve[-1] - result.equity_curve[0],
     }
+    if result.impact_report is not None:
+        out["impact_report"] = {
+            "naive_pnl": result.impact_report.naive_pnl,
+            "realistic_pnl": result.impact_report.realistic_pnl,
+            "pnl_ratio": result.impact_report.pnl_ratio,
+            "total_market_impact": result.impact_report.total_market_impact,
+            "total_spread_cost": result.impact_report.total_spread_cost,
+            "avg_latency_ms": result.impact_report.avg_latency_ms,
+            "partial_fill_count": result.impact_report.partial_fill_count,
+        }
     if extra:
         out.update(extra)
     return out

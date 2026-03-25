@@ -18,6 +18,25 @@ class Fill:
     slippage: float
     timestamp: datetime
     reason: str
+    market_impact: float = 0.0
+    spread_cost: float = 0.0
+    latency_ms: float = 0.0
+    fill_qty: float = 0.0
+    remaining_qty: float = 0.0
+    is_partial: bool = False
+
+
+@dataclass
+class ImpactReport:
+    """Naive vs realistic PnL comparison from market impact simulation."""
+    naive_pnl: float
+    realistic_pnl: float
+    pnl_ratio: float
+    total_market_impact: float
+    total_spread_cost: float
+    avg_latency_ms: float
+    partial_fill_count: int
+    per_trade_impact_breakdown: list[dict[str, float]]
 
 
 @dataclass
@@ -28,6 +47,7 @@ class BacktestResult:
     metrics: dict[str, float]
     monthly_returns: dict[str, float]
     yearly_returns: dict[str, float]
+    impact_report: ImpactReport | None = None
 
 
 @dataclass

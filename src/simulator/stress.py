@@ -10,7 +10,7 @@ import numpy.typing as npt
 from src.core.adapter import BaseAdapter
 from src.core.types import PyramidConfig
 from src.simulator.backtester import BacktestRunner
-from src.simulator.fill_model import ClosePriceFillModel, FillModel
+from src.simulator.fill_model import FillModel, MarketImpactFillModel
 from src.simulator.types import StressResult, StressScenario
 
 
@@ -86,7 +86,9 @@ def run_liquidity_crisis(
     base_slippage: float = 1.0,
 ) -> StressResult:
     """Run a liquidity crisis with degraded fill quality."""
-    fill_model = ClosePriceFillModel(slippage_points=base_slippage * spread_multiplier)
+    from src.core.types import ImpactParams
+    params = ImpactParams(spread_bps=base_slippage * spread_multiplier * 100)
+    fill_model = MarketImpactFillModel(params)
     scenario = liquidity_crisis_scenario(spread_multiplier, duration)
     return run_stress_test(
         scenario, config, adapter, fill_model, initial_equity, start_price
