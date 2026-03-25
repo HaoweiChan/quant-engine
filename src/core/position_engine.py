@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from collections import deque
 from datetime import datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from src.core.policies import (
     AddPolicy,
@@ -23,6 +25,9 @@ from src.core.types import (
     PyramidConfig,
 )
 
+if TYPE_CHECKING:
+    from src.risk.pre_trade import PreTradeRiskCheck
+
 
 class PositionEngine:
     def __init__(
@@ -31,11 +36,13 @@ class PositionEngine:
         add_policy: AddPolicy,
         stop_policy: StopPolicy,
         config: EngineConfig,
+        pre_trade_check: PreTradeRiskCheck | None = None,
     ) -> None:
         self._entry_policy = entry_policy
         self._add_policy = add_policy
         self._stop_policy = stop_policy
         self._config = config
+        self._pre_trade_check = pre_trade_check
         self._positions: list[Position] = []
         self._mode: Literal["model_assisted", "rule_only", "halted"] = "model_assisted"
         self._high_history: deque[float] = deque(maxlen=config.trail_lookback)
@@ -68,7 +75,9 @@ class PositionEngine:
         if not self._positions and self._mode != "halted":
             decision = self._entry_policy.should_enter(snapshot, effective_signal, state)
             if decision is not None:
-                orders.extend(self._execute_entry(decision, snapshot))
+                entry_orders = self._execute_entry(decision, snapshot)
+                entry_orders = self._gate_orders(entry_orders, snapshot, account)
+                orders.extend(entry_orders)
 
         # Priority 5: add position (delegate to policy, engine gates on margin)
         if self._positions and self._mode != "halted":
@@ -78,7 +87,9 @@ class PositionEngine:
                 add_state = self.get_state()
                 add_decision = self._add_policy.should_add(snapshot, effective_signal, add_state)
                 if add_decision is not None:
-                    orders.extend(self._execute_add(add_decision, snapshot))
+                    add_orders = self._execute_add(add_decision, snapshot)
+                    add_orders = self._gate_orders(add_orders, snapshot, account)
+                    orders.extend(add_orders)
 
         # Priority 6: circuit breaker
         orders.extend(self._check_circuit_breaker(snapshot, account))
@@ -135,7 +146,7 @@ class PositionEngine:
                         price=None,
                         stop_price=None,
                         reason=reason,
-                        metadata={"pyramid_level": pos.pyramid_level},
+                        metadata={"pyramid_level": pos.pyramid_level, "urgency": "immediate"},
                         parent_position_id=pos.position_id,
                         order_class="algo_exit",
                     )
@@ -218,6 +229,7 @@ class PositionEngine:
             direction=decision.direction,
         )
         self._positions.append(position)
+        meta = {**decision.metadata, "urgency": "normal"}
         return [
             Order(
                 order_type="market",
@@ -228,7 +240,7 @@ class PositionEngine:
                 price=None,
                 stop_price=None,
                 reason="entry",
-                metadata=decision.metadata,
+                metadata=meta,
                 parent_position_id=position.position_id,
             )
         ]
@@ -286,7 +298,7 @@ class PositionEngine:
                 price=None,
                 stop_price=None,
                 reason=f"add_level_{pyramid_level + 1}",
-                metadata={"pyramid_level": pyramid_level + 1},
+                metadata={"pyramid_level": pyramid_level + 1, "urgency": "normal"},
                 parent_position_id=new_position.position_id,
             )
         ]
@@ -324,6 +336,24 @@ class PositionEngine:
         self._mode = "halted"
         return orders
 
+    # -- private: pre-trade risk gate --
+
+    def _gate_orders(
+        self, orders: list[Order], snapshot: MarketSnapshot, account: AccountState | None,
+    ) -> list[Order]:
+        if self._pre_trade_check is None or account is None:
+            return orders
+        approved: list[Order] = []
+        for order in orders:
+            market_data = {
+                "margin_per_unit": snapshot.margin_per_unit,
+                "adv": snapshot.contract_specs.lot_types.get("large", 50000.0),
+            }
+            result = self._pre_trade_check.evaluate(order, account, market_data)
+            if result.approved:
+                approved.append(order)
+        return approved
+
     # -- private: helpers --
 
     def _estimate_drawdown(self, snapshot: MarketSnapshot, account: AccountState | None) -> float:
@@ -351,7 +381,10 @@ class PositionEngine:
         return total
 
 
-def create_pyramid_engine(config: PyramidConfig) -> PositionEngine:
+def create_pyramid_engine(
+    config: PyramidConfig,
+    pre_trade_check: PreTradeRiskCheck | None = None,
+) -> PositionEngine:
     """Factory: build a PositionEngine with pyramid strategy policies."""
     engine_config = EngineConfig(
         max_loss=config.max_loss,
@@ -368,4 +401,5 @@ def create_pyramid_engine(config: PyramidConfig) -> PositionEngine:
         add_policy=PyramidAddPolicy(config),
         stop_policy=ChandelierStopPolicy(config),
         config=engine_config,
+        pre_trade_check=pre_trade_check,
     )

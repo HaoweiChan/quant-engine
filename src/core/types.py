@@ -1,8 +1,8 @@
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
-import uuid
 
 
 @dataclass
@@ -222,3 +222,118 @@ class RiskAction(Enum):
     REDUCE_HALF = "reduce_half"
     HALT_NEW_ENTRIES = "halt_new_entries"
     CLOSE_ALL = "close_all"
+
+
+@dataclass
+class ImpactParams:
+    """Parameters for the square-root market impact model."""
+    k: float = 1.0
+    sigma_source: str = "daily"
+    adv_lookback: int = 20
+    spread_bps: float = 1.0
+    min_latency_ms: float = 5.0
+    max_latency_ms: float = 50.0
+    max_adv_participation: float = 0.10
+    seed: int | None = None
+
+
+@dataclass
+class OMSConfig:
+    """Order Management System configuration."""
+    passthrough_threshold_pct: float = 0.01
+    default_algorithm: str = "auto"
+    twap_default_slices: int = 10
+    vwap_lookback_days: int = 20
+    pov_participation_rate: float = 0.05
+    max_execution_window_minutes: int = 60
+    enabled: bool = True
+
+
+@dataclass
+class PreTradeRiskConfig:
+    """Pre-trade risk check thresholds."""
+    max_gross_exposure_pct: float = 0.80
+    max_adv_participation_pct: float = 0.05
+    max_beta_absolute: float = 2.0
+    max_concentration_pct: float = 0.50
+    max_var_pct: float = 0.05
+    enabled: bool = True
+
+
+@dataclass
+class PreTradeResult:
+    """Result of a pre-trade risk evaluation."""
+    approved: bool
+    violations: list[str] = field(default_factory=list)
+    risk_metrics: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class ChildOrder:
+    """A single slice from an OMS decomposition."""
+    order: Order
+    scheduled_time: datetime
+    slice_pct: float
+
+
+@dataclass
+class SlicedOrder:
+    """Parent order decomposed into child orders by the OMS."""
+    parent_order: Order
+    child_orders: list[ChildOrder]
+    algorithm: str
+    estimated_impact: float
+    schedule: list[datetime] = field(default_factory=list)
+
+
+@dataclass
+class PITRecord:
+    """Bi-temporal record for point-in-time data integrity."""
+    event_time: datetime
+    knowledge_time: datetime
+    valid_from: datetime
+    valid_to: datetime | None = None
+    source: str = "exchange"
+
+
+@dataclass
+class StitchedSeries:
+    """Continuous futures series with roll-adjusted prices."""
+    adjusted_prices: list[float]
+    unadjusted_prices: list[float]
+    timestamps: list[datetime]
+    roll_dates: list[datetime]
+    adjustment_factors: list[float]
+
+
+@dataclass
+class VaRResult:
+    """Value-at-Risk computation results for 1-day and 10-day horizons."""
+    var_99_1d: float
+    var_95_1d: float
+    var_99_10d: float
+    var_95_10d: float
+    expected_shortfall_99: float
+    position_var: dict[str, float] = field(default_factory=dict)
+    correlation_matrix: list[list[float]] | None = None
+    timestamp: datetime = field(default_factory=datetime.now)
+    is_fallback: bool = False
+
+
+@dataclass
+class StressScenario:
+    """Configurable stress test scenario for margin / volatility / correlation."""
+    name: str
+    margin_multiplier: float = 1.0
+    volatility_multiplier: float = 1.0
+    correlation_override: float | None = None
+
+
+@dataclass
+class StressResult:
+    """Outcome of running a stress scenario against the portfolio."""
+    scenario: StressScenario
+    stressed_var: float
+    margin_call: bool
+    shortfall: float = 0.0
+    details: dict[str, float] = field(default_factory=dict)

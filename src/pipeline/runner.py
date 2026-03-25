@@ -1,4 +1,4 @@
-"""End-to-end pipeline runner: Data -> Prediction -> Position -> Execution."""
+"""End-to-end pipeline runner: Data -> Prediction -> Position -> OMS -> Execution."""
 
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ from src.core.types import (
 )
 from src.execution.engine import ExecutionEngine, ExecutionResult
 from src.execution.paper import PaperExecutor
+from src.oms.oms import OrderManagementSystem
 from src.risk.monitor import RiskMonitor
+from src.risk.portfolio import PortfolioRiskEngine
 
 logger = structlog.get_logger(__name__)
 
@@ -46,7 +48,7 @@ class PipelineResult:
 
 
 class PipelineRunner:
-    """Orchestrates the full pipeline: snapshot -> signal -> engine -> execution."""
+    """Orchestrates the full pipeline: snapshot -> signal -> OMS -> execution."""
 
     def __init__(
         self,
@@ -55,11 +57,17 @@ class PipelineRunner:
         risk_monitor: RiskMonitor | None = None,
         initial_equity: float = 2_000_000.0,
         dispatcher: NotificationDispatcher | None = None,
+        oms: OrderManagementSystem | None = None,
+        portfolio_risk: PortfolioRiskEngine | None = None,
     ) -> None:
         self._engine = position_engine
         self._executor = executor
         self._risk_monitor = risk_monitor
         self._dispatcher = dispatcher
+        self._oms = oms
+        self._portfolio_risk = portfolio_risk
+        if self._risk_monitor is not None and portfolio_risk is not None:
+            self._risk_monitor._portfolio_risk = portfolio_risk
         self._state = PipelineState(equity=initial_equity)
         self._equity_curve: list[float] = [initial_equity]
         self._trade_log: list[ExecutionResult] = []
@@ -88,7 +96,20 @@ class PipelineRunner:
 
         orders = self._engine.on_snapshot(snapshot, signal, account)
 
-        results = await self._executor.execute(orders) if orders else []
+        if not orders:
+            results: list[ExecutionResult] = []
+        elif self._oms is not None:
+            market_data = {
+                "adv": snapshot.atr.get("daily", 0.0) * 100,
+                "volatility": (
+                    snapshot.atr.get("daily", 0.0) / snapshot.price if snapshot.price > 0 else 0.0
+                ),
+                "volume": snapshot.atr.get("daily", 0.0) * 50,
+            }
+            sliced = self._oms.schedule(orders, market_data)
+            results = await self._executor.execute_sliced(sliced, mid_price=snapshot.price)
+        else:
+            results = await self._executor.execute(orders)
         for r in results:
             self._trade_log.append(r)
             if r.status == "filled":

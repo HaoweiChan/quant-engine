@@ -13,14 +13,14 @@ from src.core.types import (
     MarketSnapshot,
     PyramidConfig,
 )
-from src.simulator.fill_model import ClosePriceFillModel, FillModel
+from src.simulator.fill_model import FillModel, MarketImpactFillModel
 from src.simulator.metrics import (
     compute_all_metrics,
     drawdown_series,
     monthly_returns,
     yearly_returns,
 )
-from src.simulator.types import BacktestResult, Fill
+from src.simulator.types import BacktestResult, Fill, ImpactReport
 
 
 class BacktestRunner:
@@ -37,7 +37,7 @@ class BacktestRunner:
         else:
             self._engine_factory = lambda: create_pyramid_engine(config)  # type: ignore[arg-type]
         self._adapter = adapter
-        self._fill_model = fill_model or ClosePriceFillModel()
+        self._fill_model = fill_model or MarketImpactFillModel()
         self._initial_equity = initial_equity
         self._periods_per_year = periods_per_year
 
@@ -73,9 +73,10 @@ class BacktestRunner:
                     if fill.side != entry_side:
                         # Closing position (opposite side)
                         if entry_side == "buy":
-                            pnl = (fill.fill_price - entry_price) * entry_lots * snapshot.point_value
+                            delta = fill.fill_price - entry_price
                         else:
-                            pnl = (entry_price - fill.fill_price) * entry_lots * snapshot.point_value
+                            delta = entry_price - fill.fill_price
+                        pnl = delta * entry_lots * snapshot.point_value
                         realized_pnl += pnl
                         del open_entries[sym]
                     else:
@@ -94,6 +95,11 @@ class BacktestRunner:
         metrics = compute_all_metrics(equity_curve, trade_log, self._periods_per_year)
         m_returns = monthly_returns(equity_curve[1:], ts_list) if ts_list else {}
         y_returns = yearly_returns(equity_curve[1:], ts_list) if ts_list else {}
+        impact_report = self._build_impact_report(trade_log, equity_curve)
+        metrics["total_market_impact"] = impact_report.total_market_impact
+        metrics["total_spread_cost"] = impact_report.total_spread_cost
+        metrics["avg_latency_ms"] = impact_report.avg_latency_ms
+        metrics["partial_fill_count"] = float(impact_report.partial_fill_count)
 
         return BacktestResult(
             equity_curve=equity_curve,
@@ -102,6 +108,7 @@ class BacktestRunner:
             metrics=metrics,
             monthly_returns=m_returns,
             yearly_returns=y_returns,
+            impact_report=impact_report,
         )
 
     def _make_account(
@@ -128,6 +135,42 @@ class BacktestRunner:
             drawdown_pct=dd_pct,
             positions=list(state.positions),
             timestamp=snapshot.timestamp,
+        )
+
+    @staticmethod
+    def _build_impact_report(trade_log: list[Fill], equity_curve: list[float]) -> ImpactReport:
+        total_impact = sum(abs(f.market_impact) for f in trade_log)
+        total_spread = sum(abs(f.spread_cost) for f in trade_log)
+        latencies = [f.latency_ms for f in trade_log if f.latency_ms > 0]
+        avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
+        partial_count = sum(1 for f in trade_log if f.is_partial)
+        naive_pnl = equity_curve[-1] - equity_curve[0] + total_impact + total_spread
+        realistic_pnl = equity_curve[-1] - equity_curve[0]
+        ratio = realistic_pnl / naive_pnl if naive_pnl != 0 else 1.0
+        breakdown = [
+            {
+                "timestamp": (
+                    f.timestamp.isoformat()
+                    if hasattr(f.timestamp, "isoformat") else str(f.timestamp)
+                ),
+                "side": f.side,
+                "lots": f.lots,
+                "market_impact": f.market_impact,
+                "spread_cost": f.spread_cost,
+                "latency_ms": f.latency_ms,
+                "is_partial": float(f.is_partial),
+            }
+            for f in trade_log
+        ]
+        return ImpactReport(
+            naive_pnl=naive_pnl,
+            realistic_pnl=realistic_pnl,
+            pnl_ratio=ratio,
+            total_market_impact=total_impact,
+            total_spread_cost=total_spread,
+            avg_latency_ms=avg_latency,
+            partial_fill_count=partial_count,
+            per_trade_impact_breakdown=breakdown,
         )
 
     def _calc_unrealized(
