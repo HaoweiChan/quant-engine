@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { createChart, createSeriesMarkers, type IChartApi, type ISeriesApi, type ISeriesMarkersPluginApi, type LineWidth, CandlestickSeries, HistogramSeries, LineSeries } from "lightweight-charts";
 import type { OHLCVBar, TradeSignal } from "@/lib/api";
 import { colors } from "@/lib/theme";
+import { useMarketDataStore } from "@/stores/marketDataStore";
 
 export interface IndicatorOverlay {
   label: string;
@@ -75,6 +76,8 @@ export function OHLCVChart({
   const volSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const overlaySeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<any> | null>(null);
+
+  const lastLiveTick = useMarketDataStore((s) => s.lastLiveTick);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -183,6 +186,23 @@ export function OHLCVChart({
     }
     chart.timeScale().fitContent();
   }, [data, overlays, signals]);
+
+  useEffect(() => {
+    if (!lastLiveTick || !candleSeriesRef.current || !volSeriesRef.current) return;
+    const tickTime = toUnixTime(lastLiveTick.timestamp);
+    candleSeriesRef.current.update({
+      time: tickTime as any,
+      open: lastLiveTick.open,
+      high: lastLiveTick.high,
+      low: lastLiveTick.low,
+      close: lastLiveTick.close,
+    });
+    volSeriesRef.current.update({
+      time: tickTime as any,
+      value: lastLiveTick.volume,
+      color: lastLiveTick.close >= lastLiveTick.open ? "rgba(38,166,154,0.3)" : "rgba(255,82,82,0.3)",
+    });
+  }, [lastLiveTick]);
 
   return <div ref={containerRef} />;
 }

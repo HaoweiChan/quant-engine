@@ -1,10 +1,13 @@
 import { useEffect, useRef, useCallback } from "react";
 import { useTradingStore } from "@/stores/tradingStore";
+import { useMarketDataStore } from "@/stores/marketDataStore";
 
 export function useLiveFeed() {
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef(0);
   const setWsConnected = useTradingStore((s) => s.setWsConnected);
+  const processLiveTick = useMarketDataStore((s) => s.processLiveTick);
+  const connectRef = useRef<() => void>(() => {});
 
   const connect = useCallback(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -19,19 +22,23 @@ export function useLiveFeed() {
       setWsConnected(false);
       const delay = Math.min(1000 * 2 ** retryRef.current, 30000);
       retryRef.current++;
-      setTimeout(connect, delay);
+      setTimeout(connectRef.current, delay);
     };
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "tick" || msg.type === "order") {
-          // Update store with tick data — positions update is driven by war-room polling
+        if (msg.type === "tick") {
+          processLiveTick({ price: msg.price, volume: msg.volume, timestamp: msg.timestamp });
         }
       } catch {
         // ignore malformed messages
       }
     };
-  }, [setWsConnected]);
+  }, [setWsConnected, processLiveTick]);
+
+  useEffect(() => {
+    connectRef.current = connect;
+  }, [connect]);
 
   useEffect(() => {
     connect();
