@@ -12,6 +12,10 @@ entry_conf_threshold = 0.65
 [pyramid.lot_schedule]
 levels = [[3, 4], [2, 0], [1, 4], [1, 4]]
 
+[engine]
+disaster_atr_mult = 4.5
+disaster_stop_enabled = false
+
 [risk]
 margin_ratio_threshold = 0.30
 signal_staleness_hours = 2.0
