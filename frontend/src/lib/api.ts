@@ -73,6 +73,8 @@ export interface AccountInfo {
   guards: Record<string, number>;
   strategies: Record<string, unknown>[];
   credential_status?: Record<string, boolean>;
+  sandbox_mode?: boolean;
+  demo_trading?: boolean;
 }
 
 export interface CrawlStatus {
@@ -162,6 +164,17 @@ export async function createAccount(
 
 export async function fetchWarRoom(): Promise<Record<string, unknown>> {
   return fetchJSON("/api/war-room");
+}
+
+export async function updateAccountStrategies(
+  accountId: string,
+  strategies: { slug: string; symbol: string }[],
+): Promise<{ id: string; strategies: { slug: string; symbol: string }[] }> {
+  return fetchJSON(`/api/accounts/${accountId}/strategies`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ strategies }),
+  });
 }
 
 export async function startCrawl(
@@ -299,6 +312,24 @@ export interface WarRoomSession {
   } | null;
 }
 
+export interface AccountPosition {
+  symbol: string;
+  side: string;
+  quantity: number;
+  avg_entry_price: number;
+  current_price: number;
+  unrealized_pnl: number;
+}
+
+export interface AccountFill {
+  timestamp: string;
+  symbol: string;
+  side: string;
+  price: number;
+  quantity: number;
+  fee: number;
+}
+
 export interface WarRoomData {
   accounts: Record<string, {
     display_name: string;
@@ -308,6 +339,8 @@ export interface WarRoomData {
     equity: number;
     margin_used: number;
     margin_available: number;
+    positions?: AccountPosition[];
+    recent_fills?: AccountFill[];
     equity_curve?: { timestamp: string; equity: number }[];
   }>;
   all_sessions: WarRoomSession[];
