@@ -49,7 +49,7 @@ def resolve_strategy_slug(strategy: str) -> str:
 - **THEN** it SHALL return `"unknown_strategy"` unchanged
 
 ### Requirement: run_backtest tool
-The server SHALL expose a `run_backtest` tool that runs a single backtest on synthetic price data and returns performance metrics. The result SHALL be persisted to `param_registry.db` via `ParamRegistry.save_backtest_run()` with `source="mcp"` and the strategy identifier normalized to a slug.
+The server SHALL expose a `run_backtest` tool that runs a single backtest on synthetic price data and returns performance metrics. The result SHALL be persisted to `param_registry.db` via `ParamRegistry.save_backtest_run()` with `source="mcp"` and the strategy identifier normalized to a slug. The response SHALL include `param_warnings` from parameter clamping and the `strategy_hash` of the code used.
 
 ```python
 @app.tool()
@@ -86,8 +86,16 @@ async def run_backtest(
 - **WHEN** a backtest completes but `save_backtest_run()` fails
 - **THEN** the backtest result SHALL still be returned to the caller with `run_id=null`
 
+#### Scenario: param_warnings included in response
+- **WHEN** `run_backtest` is called with out-of-range strategy params
+- **THEN** the response SHALL include `"param_warnings"` listing each clamping action taken
+
+#### Scenario: strategy_hash included in response
+- **WHEN** `run_backtest` completes and the strategy file was successfully hashed
+- **THEN** the response SHALL include `"strategy_hash"` with the SHA-256 of the strategy file used
+
 ### Requirement: run_backtest_realdata tool
-The server SHALL expose a `run_backtest_realdata` tool that runs a backtest on real historical data from the database. The result SHALL be persisted to `param_registry.db` via `ParamRegistry.save_backtest_run()` with `source="mcp"` and the strategy identifier normalized to a slug. The `symbol` field SHALL record the actual market symbol (e.g., `"TX"`), not a synthetic label.
+The server SHALL expose a `run_backtest_realdata` tool that runs a backtest on real historical data from the database. The result SHALL be persisted to `param_registry.db` via `ParamRegistry.save_backtest_run()` with `source="mcp"` and the strategy identifier normalized to a slug. The `symbol` field SHALL record the actual market symbol (e.g., `"TX"`), not a synthetic label. The response SHALL include `param_warnings` and `strategy_hash`.
 
 #### Scenario: Real-data backtest persisted
 - **WHEN** `run_backtest_realdata` is called with `symbol="TX"`, `start="2025-08-01"`, `end="2026-03-14"`, `strategy="intraday/trend_following/ema_trend_pullback"`, and `strategy_params={"lots": 5}`
@@ -98,8 +106,12 @@ The server SHALL expose a `run_backtest_realdata` tool that runs a backtest on r
 - **WHEN** `run_backtest_realdata` is called with `strategy="src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"`
 - **THEN** the `strategy` stored in `param_registry.db` SHALL be `"intraday/trend_following/ema_trend_pullback"`
 
+#### Scenario: param_warnings included in response
+- **WHEN** `run_backtest_realdata` is called with out-of-range strategy params
+- **THEN** the response SHALL include `"param_warnings"` listing each clamping action taken
+
 ### Requirement: run_monte_carlo tool
-The server SHALL expose a `run_monte_carlo` tool that runs N synthetic price paths and returns distribution metrics.
+The server SHALL expose a `run_monte_carlo` tool that runs N synthetic price paths and returns distribution metrics. The response SHALL include `param_warnings` from parameter clamping.
 
 ```python
 @app.tool()
@@ -127,8 +139,12 @@ async def run_monte_carlo(
 - **WHEN** a Monte Carlo run completes
 - **THEN** the result SHALL be appended to session history with params, metrics, scenario, and timestamp
 
+#### Scenario: param_warnings included in response
+- **WHEN** `run_monte_carlo` is called with out-of-range strategy params
+- **THEN** the response SHALL include `"param_warnings"` listing each clamping action taken
+
 ### Requirement: run_parameter_sweep tool
-The server SHALL expose a `run_parameter_sweep` tool that searches over a parameter space and returns ranked results.
+The server SHALL expose a `run_parameter_sweep` tool that searches over a parameter space and returns ranked results. The response SHALL include `param_warnings` from base parameter clamping.
 
 ```python
 @app.tool()
@@ -158,6 +174,10 @@ async def run_parameter_sweep(
 - **WHEN** `metric` is set to `"calmar"` or `"p50_pnl"`
 - **THEN** results SHALL be ranked by the specified metric instead of the default Sharpe
 
+#### Scenario: param_warnings included in response
+- **WHEN** `run_parameter_sweep` is called with out-of-range base params
+- **THEN** the response SHALL include `"param_warnings"` listing each clamping action applied to `base_params`
+
 ### Requirement: run_parameter_sweep auto-persistence
 The `run_parameter_sweep` tool SHALL automatically persist its results to the param registry database after completion, in addition to returning the result to the caller. The strategy identifier SHALL be normalized to a slug before persistence.
 
@@ -175,7 +195,7 @@ The `run_parameter_sweep` tool SHALL automatically persist its results to the pa
 - **THEN** the `strategy` column in `param_registry.db` SHALL contain `"intraday/trend_following/ema_trend_pullback"`, not the module:factory string
 
 ### Requirement: run_stress_test tool
-The server SHALL expose a `run_stress_test` tool that tests strategy behavior under extreme scenarios.
+The server SHALL expose a `run_stress_test` tool that tests strategy behavior under extreme scenarios. The response SHALL include `param_warnings` from parameter clamping.
 
 ```python
 @app.tool()
@@ -197,6 +217,10 @@ async def run_stress_test(
 #### Scenario: Stress result format
 - **WHEN** a stress test completes
 - **THEN** each scenario result SHALL include scenario_name, final_pnl, max_drawdown, circuit_breaker_triggered, stops_triggered, and a summary of equity trajectory
+
+#### Scenario: param_warnings included in response
+- **WHEN** `run_stress_test` is called with out-of-range strategy params
+- **THEN** the response SHALL include `"param_warnings"` listing each clamping action taken
 
 ### Requirement: read_strategy_file tool
 The server SHALL expose a `read_strategy_file` tool that returns the content of a strategy policy file. The tool SHALL support path-like filenames for nested directory structures (e.g., `"intraday/breakout/ta_orb"`).
@@ -223,7 +247,7 @@ async def read_strategy_file(filename: str) -> dict: ...
 - **THEN** it SHALL return a list of all strategy `.py` files with path-like stems, sizes, and timestamps
 
 ### Requirement: write_strategy_file tool
-The server SHALL expose a `write_strategy_file` tool that validates and writes a strategy policy file. The tool SHALL support path-like filenames and auto-create parent directories.
+The server SHALL expose a `write_strategy_file` tool that validates and writes a strategy policy file. After a successful write, it SHALL compute the new strategy hash, call `deactivate_stale_candidates()` on the param registry, and report any deactivated candidates in the response.
 
 ```python
 @app.tool()
@@ -241,6 +265,16 @@ async def write_strategy_file(filename: str, content: str) -> dict: ...
 #### Scenario: Registry invalidated after write
 - **WHEN** `write_strategy_file` completes successfully
 - **THEN** the strategy registry cache SHALL be invalidated so `discover_strategies()` finds the new strategy immediately
+
+#### Scenario: Stale candidates deactivated after write
+- **WHEN** `write_strategy_file` writes content that changes the strategy's SHA-256 hash
+- **THEN** `ParamRegistry.deactivate_stale_candidates()` SHALL be called with the new hash
+- **AND** the response SHALL include `"stale_candidates_deactivated": <count>`
+
+#### Scenario: Deactivation failure does not block write
+- **WHEN** `deactivate_stale_candidates()` raises an exception
+- **THEN** the file write SHALL still report success
+- **AND** the response SHALL include a warning about the deactivation failure
 
 #### Scenario: Syntax error rejection
 - **WHEN** the `content` has a Python syntax error
@@ -322,7 +356,7 @@ async def save_optimization_run(
 - **THEN** it SHALL return an error message indicating no sweep results are available
 
 ### Requirement: get_run_history MCP tool
-The server SHALL expose a `get_run_history` tool that queries persisted optimization runs from the registry database.
+The server SHALL expose a `get_run_history` tool that queries persisted optimization runs from the registry database. Each run entry SHALL include `strategy_hash` if available.
 
 ```python
 @app.tool()
@@ -334,7 +368,7 @@ async def get_run_history(
 
 #### Scenario: Query all runs for a strategy
 - **WHEN** `get_run_history` is called with `strategy="atr_mean_reversion"`
-- **THEN** it SHALL return the most recent runs for that strategy, each with `run_id`, `run_at`, `objective`, `best_params`, best metrics, `n_trials`, `tag`, and candidate count
+- **THEN** it SHALL return the most recent runs for that strategy, each with `run_id`, `run_at`, `objective`, `best_params`, best metrics, `n_trials`, `tag`, candidate count, and `strategy_hash`
 
 #### Scenario: Query all strategies
 - **WHEN** `get_run_history` is called without a strategy filter
@@ -360,7 +394,7 @@ async def activate_candidate(
 - **THEN** it SHALL return an error message
 
 ### Requirement: get_active_params MCP tool
-The server SHALL expose a `get_active_params` tool that returns the currently active optimized parameters for a strategy.
+The server SHALL expose a `get_active_params` tool that returns the currently active optimized parameters for a strategy. The response SHALL include `strategy_hash` and `code_changed` if the API can compute the current file hash.
 
 ```python
 @app.tool()
