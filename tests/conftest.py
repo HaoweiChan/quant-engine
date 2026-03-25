@@ -1,7 +1,11 @@
+import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 
+import polars as pl
 import pytest
 
+from src.broker_gateway.mock import MockGateway
 from src.core.types import (
     AccountState,
     ContractSpecs,
@@ -113,3 +117,49 @@ def make_account(
         positions=[],
         timestamp=datetime.now(UTC),
     )
+
+
+@pytest.fixture
+def in_memory_db() -> sqlite3.Connection:
+    """Provides a fresh in-memory SQLite connection."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    yield conn
+    conn.close()
+
+
+@pytest.fixture
+def temp_db(tmp_path: Path) -> Path:
+    """Provides a path to a temporary SQLite database file."""
+    db_path = tmp_path / "test_trading.db"
+    return db_path
+
+
+@pytest.fixture
+def mock_market_data() -> pl.DataFrame:
+    """Provides a deterministic synthetic OHLCV polars DataFrame."""
+    return pl.DataFrame(
+        {
+            "timestamp": [
+                datetime(2025, 1, 1, 9, 0, tzinfo=UTC),
+                datetime(2025, 1, 1, 9, 5, tzinfo=UTC),
+                datetime(2025, 1, 1, 9, 10, tzinfo=UTC),
+                datetime(2025, 1, 1, 9, 15, tzinfo=UTC),
+                datetime(2025, 1, 1, 9, 20, tzinfo=UTC),
+            ],
+            "open": [100.0, 101.0, 102.0, 101.5, 103.0],
+            "high": [101.5, 102.5, 103.0, 103.5, 104.0],
+            "low": [99.5, 100.5, 101.0, 101.0, 102.5],
+            "close": [101.0, 102.0, 101.5, 103.0, 103.5],
+            "volume": [1000, 1500, 1200, 2000, 1800],
+        }
+    )
+
+
+@pytest.fixture
+def mock_gateway() -> MockGateway:
+    """Instantiates a MockGateway for execution tests."""
+    gateway = MockGateway(initial_equity=1_000_000.0, seed=42)
+    gateway.connect()
+    yield gateway
+    gateway.disconnect()
