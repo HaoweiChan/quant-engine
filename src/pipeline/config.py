@@ -20,6 +20,10 @@ class RiskConfig:
     spread_spike_multiplier: float = 10.0
     max_loss: float = 500_000.0
     check_interval_seconds: float = 30.0
+    max_var_pct: float = 0.05
+    max_beta_absolute: float = 2.0
+    max_concentration_pct: float = 0.50
+    portfolio_risk_enabled: bool = False
 
 
 @dataclass
@@ -97,6 +101,10 @@ def load_engine_config(path: Path | None = None) -> PipelineConfig:
         spread_spike_multiplier=float(r.get("spread_spike_multiplier", 10.0)),
         max_loss=float(r.get("max_loss", 500_000)),
         check_interval_seconds=float(r.get("check_interval_seconds", 30)),
+        max_var_pct=float(r.get("max_var_pct", 0.05)),
+        max_beta_absolute=float(r.get("max_beta_absolute", 2.0)),
+        max_concentration_pct=float(r.get("max_concentration_pct", 0.50)),
+        portfolio_risk_enabled=bool(r.get("portfolio_risk_enabled", False)),
     )
     e = cfg.get("execution", {})
     execution = ExecutionConfig(

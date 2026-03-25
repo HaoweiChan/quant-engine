@@ -27,12 +27,14 @@ class TaifexAdapter(BaseAdapter):
         feature_store: FeatureStore | None = None,
         atr_values: dict[str, float] | None = None,
         db: Database | None = None,
+        backtest_mode: bool = False,
     ) -> None:
         path = config_path or _DEFAULT_CONFIG
         with open(path, "rb") as f:
             self._cfg: dict[str, Any] = tomllib.load(f)
         self._atr = atr_values or {}
         self._db = db
+        self._backtest_mode = backtest_mode
         if feature_store is not None:
             plugin = TaifexFeaturePlugin()
             feature_store.register_plugin(plugin)
@@ -40,7 +42,8 @@ class TaifexAdapter(BaseAdapter):
     def to_snapshot(self, raw_data: Any) -> MarketSnapshot:
         data: dict[str, Any] = raw_data
         symbol = str(data.get("symbol", "TX"))
-        specs = self.get_contract_specs(symbol)
+        as_of = data.get("timestamp") if self._backtest_mode else None
+        specs = self.get_contract_specs(symbol, as_of=as_of)
         atr = dict(self._atr)
         if "daily" not in atr:
             atr["daily"] = float(data.get("daily_atr", 100.0))
@@ -73,7 +76,9 @@ class TaifexAdapter(BaseAdapter):
             timezone=day["timezone"],
         )
 
-    def get_contract_specs(self, symbol: str) -> ContractSpecs:
+    def get_contract_specs(
+        self, symbol: str, as_of: datetime | None = None,
+    ) -> ContractSpecs:
         c = self._cfg["contracts"][symbol]
         day = self._cfg["trading_hours"]["day"]
         hours = TradingHours(
@@ -84,7 +89,7 @@ class TaifexAdapter(BaseAdapter):
         margin_initial = float(c["margin_initial"])
         margin_maintenance = float(c["margin_maintenance"])
         if self._db is not None:
-            latest = self._db.get_latest_margin(symbol)
+            latest = self._db.get_latest_margin(symbol, as_of=as_of)
             if latest is not None:
                 margin_initial = latest.margin_initial
                 margin_maintenance = latest.margin_maintenance

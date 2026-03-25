@@ -31,16 +31,27 @@ class RiskMonitor:
         config: RiskConfig,
         on_mode_change: Callable[[str], None] | None = None,
         on_force_close: Callable[[], list[Any]] | None = None,
+        portfolio_risk: Any | None = None,
     ) -> None:
         self._config = config
         self._on_mode_change = on_mode_change
         self._on_force_close = on_force_close
+        self._portfolio_risk = portfolio_risk
         self._last_signal_time: datetime | None = None
         self._last_feed_time: datetime | None = None
         self._current_spread: float = 0.0
         self._normal_spread: float = 1.0
         self._events: list[RiskEvent] = []
         self._task: asyncio.Task[None] | None = None
+        self._returns: dict[str, list[float]] = {}
+        self._prices: dict[str, float] = {}
+
+    def update_market_data(
+        self, returns: dict[str, list[float]], prices: dict[str, float],
+    ) -> None:
+        """Feed current returns and prices for portfolio risk checks."""
+        self._returns = returns
+        self._prices = prices
 
     def check(self, account: AccountState) -> RiskAction:
         """Evaluate all risk conditions and return the highest priority action."""
@@ -83,6 +94,12 @@ class RiskMonitor:
                 })
                 return RiskAction.HALT_NEW_ENTRIES
 
+        # Priority 3.5: Portfolio risk checks (VaR, beta, concentration)
+        if self._portfolio_risk is not None and self._config.portfolio_risk_enabled:
+            action = self._check_portfolio_risk(account, now)
+            if action != RiskAction.NORMAL:
+                return action
+
         # Priority 4: Signal staleness
         if self._last_signal_time is not None:
             signal_age = now - self._last_signal_time
@@ -104,6 +121,53 @@ class RiskMonitor:
             })
             return RiskAction.REDUCE_HALF
 
+        return RiskAction.NORMAL
+
+    def _check_portfolio_risk(
+        self, account: AccountState, now: datetime,
+    ) -> RiskAction:
+        """Check VaR, beta, and concentration limits from PortfolioRiskEngine."""
+        from src.risk.portfolio import PortfolioRiskEngine
+        engine: PortfolioRiskEngine = self._portfolio_risk
+        try:
+            summary = engine.get_risk_summary(
+                account.positions, self._returns, account, self._prices,
+            )
+        except Exception:
+            logger.exception("portfolio_risk_check_failed")
+            return RiskAction.NORMAL
+        equity = account.equity
+        base_details = {
+            "var_99_1d": summary.var.var_99_1d,
+            "portfolio_beta": summary.portfolio_beta,
+            "concentration": summary.concentration,
+        }
+        # VaR limit breach
+        if equity > 0:
+            var_pct = summary.var.var_99_1d / equity
+            if var_pct > self._config.max_var_pct:
+                self._emit_event(
+                    now, RiskAction.HALT_NEW_ENTRIES, "var_limit_breach",
+                    {**base_details, "var_pct": var_pct,
+                     "limit": self._config.max_var_pct},
+                )
+                return RiskAction.HALT_NEW_ENTRIES
+        # Beta limit breach
+        if abs(summary.portfolio_beta) > self._config.max_beta_absolute:
+            self._emit_event(
+                now, RiskAction.HALT_NEW_ENTRIES, "beta_breach",
+                {**base_details, "limit": self._config.max_beta_absolute},
+            )
+            return RiskAction.HALT_NEW_ENTRIES
+        # Concentration breach
+        for sym, conc in summary.concentration.items():
+            if conc > self._config.max_concentration_pct:
+                self._emit_event(
+                    now, RiskAction.HALT_NEW_ENTRIES, "concentration_breach",
+                    {**base_details, "symbol": sym, "concentration_pct": conc,
+                     "limit": self._config.max_concentration_pct},
+                )
+                return RiskAction.HALT_NEW_ENTRIES
         return RiskAction.NORMAL
 
     def update_signal_time(self, ts: datetime) -> None:
