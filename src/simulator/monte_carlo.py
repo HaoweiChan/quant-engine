@@ -1,4 +1,5 @@
 """Monte Carlo simulation runner."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -115,22 +116,24 @@ def _path_to_bars(
     for i in range(1, len(price_path)):
         p = float(price_path[i])
         prev = float(price_path[i - 1])
-        bars.append({
-            "price": p,
-            "symbol": "TX",
-            "daily_atr": abs(p - prev) * 2,
-            "open": prev,
-            "high": max(p, prev) * 1.001,
-            "low": min(p, prev) * 0.999,
-            "close": p,
-        })
+        bars.append(
+            {
+                "price": p,
+                "symbol": "TX",
+                "daily_atr": abs(p - prev) * 2,
+                "open": prev,
+                "high": max(p, prev) * 1.001,
+                "low": min(p, prev) * 0.999,
+                "close": p,
+            }
+        )
         timestamps.append(base_ts + timedelta(days=i))
     return bars, timestamps
 
 
 _TAIFEX_SESSIONS = [
-    (8, 45, 15),    # Pre-open: 08:45–09:00 (15 minutes, ORB window)
-    (9, 0, 255),    # Day session: 09:00–13:15 (255 minutes)
+    (8, 45, 15),  # Pre-open: 08:45–09:00 (15 minutes, ORB window)
+    (9, 0, 255),  # Day session: 09:00–13:15 (255 minutes)
     (15, 15, 795),  # Night session: 15:15–04:30+1 (795 minutes)
 ]
 TAIFEX_BARS_PER_DAY = sum(s[2] for s in _TAIFEX_SESSIONS)  # 1065
@@ -186,11 +189,14 @@ def _path_to_intraday_bars(
     Adds microstructure noise (bid-ask bounce, OU at the bar level) so
     mean-reversion strategies have realistic short-term reversal patterns.
     """
+    import random
+
     adjusted = _add_microstructure(price_path)
     n = len(adjusted) - 1
     timestamps = _generate_taifex_timestamps(n)
     bars: list[dict[str, Any]] = []
     atr_window: list[float] = []
+    rng = random.Random(42)
     for i in range(1, len(adjusted)):
         p = float(adjusted[i])
         prev = float(adjusted[i - 1])
@@ -198,13 +204,16 @@ def _path_to_intraday_bars(
         if len(atr_window) > 14:
             atr_window.pop(0)
         daily_atr = sum(atr_window) / len(atr_window) * 14
-        bars.append({
-            "price": p,
-            "symbol": "TX",
-            "daily_atr": daily_atr,
-            "open": prev,
-            "high": max(p, prev) * 1.0002,
-            "low": min(p, prev) * 0.9998,
-            "close": p,
-        })
+        bars.append(
+            {
+                "price": p,
+                "symbol": "TX",
+                "daily_atr": daily_atr,
+                "open": prev,
+                "high": max(p, prev) * 1.0002,
+                "low": min(p, prev) * 0.9998,
+                "close": p,
+                "volume": rng.uniform(1000, 5000),
+            }
+        )
     return bars, timestamps
