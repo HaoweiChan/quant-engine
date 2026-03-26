@@ -20,7 +20,7 @@ const inputStyle: React.CSSProperties = {
   outline: "none",
 };
 
-type SortKey = "run_at" | "sharpe" | "total_pnl" | "win_rate" | "max_drawdown_pct" | "profit_factor" | "n_trials" | "search_type" | "symbol";
+type SortKey = "run_at" | "sharpe" | "sortino" | "total_pnl" | "win_rate" | "max_drawdown_pct" | "profit_factor" | "n_trials" | "search_type" | "symbol";
 type SortDir = "asc" | "desc";
 
 function getMetric(run: ParamRun, key: string): number | null {
@@ -33,7 +33,7 @@ export function Backtest() {
   const [symbol, setSymbol] = useState("TX");
   const [start, setStart] = useState("2025-08-01");
   const [end, setEnd] = useState("2026-03-14");
-  const [maxLoss, setMaxLoss] = useState(100000);
+  const [maxLoss, setMaxLoss] = useState(500000);
   const [params, setParams] = useState<Record<string, number>>({});
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -324,7 +324,7 @@ export function Backtest() {
                   No optimization history for this strategy.
                 </div>
               ) : (
-                <table className="w-full text-[10px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse", minWidth: 900 }}>
+                <table className="w-full text-[10px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse", minWidth: 970 }}>
                   <thead>
                     <tr style={{ borderBottom: "1px solid var(--color-qe-card-border)" }}>
                       <th className="text-left py-1 pr-1" style={{ color: colors.dim, width: 16 }}></th>
@@ -335,6 +335,7 @@ export function Backtest() {
                       <SortHeader label="Type" field="search_type" align="left" />
                       <th className="text-right py-1 pr-2" style={{ color: colors.dim }}>Capital</th>
                       <SortHeader label="Sharpe" field="sharpe" />
+                      <SortHeader label="Sortino" field="sortino" />
                       <SortHeader label="PnL" field="total_pnl" />
                       <SortHeader label="Win Rate" field="win_rate" />
                       <SortHeader label="Max DD" field="max_drawdown_pct" />
@@ -346,6 +347,7 @@ export function Backtest() {
                   <tbody>
                     {sortedRuns.map((run) => {
                       const sharpe = getMetric(run, "sharpe");
+                      const sortino = getMetric(run, "sortino");
                       const pnl = getMetric(run, "total_pnl");
                       const wr = getMetric(run, "win_rate");
                       const dd = getMetric(run, "max_drawdown_pct");
@@ -382,6 +384,9 @@ export function Backtest() {
                           </td>
                           <td className="text-right py-1 pr-2" style={{ color: sharpe != null && sharpe > 1 ? colors.green : sharpe != null && sharpe > 0 ? colors.gold : colors.red }}>
                             {sharpe != null ? sharpe.toFixed(2) : "—"}
+                          </td>
+                          <td className="text-right py-1 pr-2" style={{ color: sortino != null && sortino > 1.5 ? colors.green : sortino != null && sortino > 0 ? colors.gold : colors.red }}>
+                            {sortino != null ? sortino.toFixed(2) : "—"}
                           </td>
                           <td className="text-right py-1 pr-2" style={{ color: pnl != null ? pnlColor(pnl) : colors.dim }}>
                             {pnl != null ? `$${pnl >= 0 ? "+" : ""}${Math.round(pnl).toLocaleString()}` : "—"}
