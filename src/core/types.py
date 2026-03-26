@@ -46,6 +46,7 @@ class MarketSnapshot:
     point_value: float
     min_lot: float
     contract_specs: ContractSpecs
+    volume: float = 0.0
 
     def __post_init__(self) -> None:
         if self.price <= 0:
@@ -224,9 +225,108 @@ class RiskAction(Enum):
     CLOSE_ALL = "close_all"
 
 
+class EventType(Enum):
+    MARKET = "market"
+    SIGNAL = "signal"
+    ORDER = "order"
+    FILL = "fill"
+    RISK = "risk"
+    AUDIT = "audit"
+
+
+@dataclass
+class Event:
+    event_type: EventType
+    timestamp: datetime
+    data: Any
+
+
+@dataclass
+class MarketEvent(Event):
+    symbol: str = ""
+    open_price: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    close: float = 0.0
+    volume: float = 0.0
+    atr: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.event_type = EventType.MARKET
+
+
+@dataclass
+class SignalEvent(Event):
+    signal: MarketSignal | None = None
+
+    def __post_init__(self) -> None:
+        self.event_type = EventType.SIGNAL
+
+
+@dataclass
+class OrderEvent(Event):
+    order: Order | None = None
+
+    def __post_init__(self) -> None:
+        self.event_type = EventType.ORDER
+
+
+@dataclass
+class FillEvent(Event):
+    fill_price: float = 0.0
+    fill_lots: float = 0.0
+    side: str = ""
+    symbol: str = ""
+
+    def __post_init__(self) -> None:
+        self.event_type = EventType.FILL
+
+
+@dataclass
+class RiskEvent(Event):
+    action: RiskAction = RiskAction.NORMAL
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        self.event_type = EventType.RISK
+
+
+@dataclass
+class AuditRecord:
+    sequence_id: int
+    timestamp: datetime
+    event_type: str
+    engine_state_hash: str
+    account_state: AccountState
+    event_data: dict[str, Any]
+    prev_hash: str
+    record_hash: str
+    git_commit: str | None = None
+
+
+@dataclass
+class AuditConfig:
+    enabled: bool = True
+    store_backend: str = "sqlite"
+    db_path: str = "audit.db"
+    retention_days: int = 365
+    include_full_account_state: bool = True
+    include_git_commit: bool = True
+
+
+@dataclass
+class EventEngineConfig:
+    tick_drill_atr_mult: float = 2.0
+    tick_drill_enabled: bool = True
+    latency_delay_ms: float = 10.0
+    max_events_per_bar: int = 1000
+    audit_enabled: bool = True
+
+
 @dataclass
 class ImpactParams:
     """Parameters for the square-root market impact model."""
+
     k: float = 1.0
     sigma_source: str = "daily"
     adv_lookback: int = 20
@@ -240,6 +340,7 @@ class ImpactParams:
 @dataclass
 class OMSConfig:
     """Order Management System configuration."""
+
     passthrough_threshold_pct: float = 0.01
     default_algorithm: str = "auto"
     twap_default_slices: int = 10
@@ -252,6 +353,7 @@ class OMSConfig:
 @dataclass
 class PreTradeRiskConfig:
     """Pre-trade risk check thresholds."""
+
     max_gross_exposure_pct: float = 0.80
     max_adv_participation_pct: float = 0.05
     max_beta_absolute: float = 2.0
@@ -263,6 +365,7 @@ class PreTradeRiskConfig:
 @dataclass
 class PreTradeResult:
     """Result of a pre-trade risk evaluation."""
+
     approved: bool
     violations: list[str] = field(default_factory=list)
     risk_metrics: dict[str, float] = field(default_factory=dict)
@@ -271,6 +374,7 @@ class PreTradeResult:
 @dataclass
 class ChildOrder:
     """A single slice from an OMS decomposition."""
+
     order: Order
     scheduled_time: datetime
     slice_pct: float
@@ -279,6 +383,7 @@ class ChildOrder:
 @dataclass
 class SlicedOrder:
     """Parent order decomposed into child orders by the OMS."""
+
     parent_order: Order
     child_orders: list[ChildOrder]
     algorithm: str
@@ -289,6 +394,7 @@ class SlicedOrder:
 @dataclass
 class PITRecord:
     """Bi-temporal record for point-in-time data integrity."""
+
     event_time: datetime
     knowledge_time: datetime
     valid_from: datetime
@@ -299,6 +405,7 @@ class PITRecord:
 @dataclass
 class StitchedSeries:
     """Continuous futures series with roll-adjusted prices."""
+
     adjusted_prices: list[float]
     unadjusted_prices: list[float]
     timestamps: list[datetime]
@@ -309,6 +416,7 @@ class StitchedSeries:
 @dataclass
 class VaRResult:
     """Value-at-Risk computation results for 1-day and 10-day horizons."""
+
     var_99_1d: float
     var_95_1d: float
     var_99_10d: float
@@ -323,6 +431,7 @@ class VaRResult:
 @dataclass
 class StressScenario:
     """Configurable stress test scenario for margin / volatility / correlation."""
+
     name: str
     margin_multiplier: float = 1.0
     volatility_multiplier: float = 1.0
@@ -332,6 +441,7 @@ class StressScenario:
 @dataclass
 class StressResult:
     """Outcome of running a stress scenario against the portfolio."""
+
     scenario: StressScenario
     stressed_var: float
     margin_call: bool

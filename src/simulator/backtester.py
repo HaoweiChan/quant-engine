@@ -1,4 +1,5 @@
 """BacktestRunner: feeds historical bars through production PositionEngine."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -9,10 +10,19 @@ from src.core.adapter import BaseAdapter
 from src.core.position_engine import PositionEngine, create_pyramid_engine
 from src.core.types import (
     AccountState,
+    Event,
+    EventEngineConfig,
+    EventType,
+    FillEvent,
+    MarketEvent,
     MarketSignal,
     MarketSnapshot,
+    Order,
+    OrderEvent,
     PyramidConfig,
+    SignalEvent,
 )
+from src.simulator.event_engine import EventEngine
 from src.simulator.fill_model import FillModel, MarketImpactFillModel
 from src.simulator.metrics import (
     compute_all_metrics,
@@ -31,6 +41,7 @@ class BacktestRunner:
         fill_model: FillModel | None = None,
         initial_equity: float = 2_000_000.0,
         periods_per_year: float = 252.0,
+        event_engine_config: EventEngineConfig | None = None,
     ) -> None:
         if callable(config) and not isinstance(config, PyramidConfig):
             self._engine_factory = config
@@ -40,6 +51,7 @@ class BacktestRunner:
         self._fill_model = fill_model or MarketImpactFillModel()
         self._initial_equity = initial_equity
         self._periods_per_year = periods_per_year
+        self._ee_config = event_engine_config
 
     def run(
         self,
@@ -53,8 +65,23 @@ class BacktestRunner:
         trade_log: list[Fill] = []
         ts_list: list[datetime] = []
         realized_pnl = 0.0
-        # (entry_price, lots, entry_side) — supports both long and short
         open_entries: dict[str, tuple[float, float, str]] = {}
+
+        # Build EventEngine for event dispatch per bar
+        ee = EventEngine(config=self._ee_config)
+
+        def on_market(event: MarketEvent) -> list[Event]:
+            return []
+
+        def on_order(event: OrderEvent) -> list[Event]:
+            return []
+
+        def on_fill(event: FillEvent) -> list[Event]:
+            return []
+
+        ee.register_handler(EventType.MARKET, on_market)
+        ee.register_handler(EventType.ORDER, on_order)
+        ee.register_handler(EventType.FILL, on_fill)
 
         for i, bar in enumerate(bars):
             signal = signals[i] if signals else None
@@ -62,16 +89,56 @@ class BacktestRunner:
             ts_list.append(ts)
             snapshot = self._adapter.to_snapshot({**bar, "timestamp": ts})
             account = self._make_account(equity, realized_pnl, engine, snapshot)
+
+            # Dispatch MarketEvent through EventEngine
+            market_event = MarketEvent(
+                event_type=EventType.MARKET,
+                timestamp=ts,
+                data=bar,
+                symbol=bar.get("symbol", ""),
+                open_price=bar.get("open", 0.0),
+                high=bar.get("high", 0.0),
+                low=bar.get("low", 0.0),
+                close=bar.get("close", 0.0),
+                volume=bar.get("volume", 0.0),
+                atr=snapshot.atr.get("daily", 0.0) if hasattr(snapshot, "atr") else 0.0,
+            )
+            ee.push(market_event)
+            ee.run()
+
             orders = engine.on_snapshot(snapshot, signal, account)
 
             for order in orders:
+                # Dispatch OrderEvent
+                order_event = OrderEvent(
+                    event_type=EventType.ORDER,
+                    timestamp=ts,
+                    data={"order": order},
+                    order=order,
+                )
+                ee.push(order_event)
+                ee.run()
+
                 fill = self._fill_model.simulate(order, bar, ts)
                 trade_log.append(fill)
+
+                # Dispatch FillEvent
+                fill_event = FillEvent(
+                    event_type=EventType.FILL,
+                    timestamp=ts,
+                    data={"fill": fill},
+                    fill_price=fill.fill_price,
+                    fill_lots=fill.lots,
+                    side=fill.side,
+                    symbol=fill.symbol,
+                )
+                ee.push(fill_event)
+                ee.run()
+
                 sym = fill.symbol
                 if sym in open_entries:
                     entry_price, entry_lots, entry_side = open_entries[sym]
                     if fill.side != entry_side:
-                        # Closing position (opposite side)
                         if entry_side == "buy":
                             delta = fill.fill_price - entry_price
                         else:
@@ -80,7 +147,6 @@ class BacktestRunner:
                         realized_pnl += pnl
                         del open_entries[sym]
                     else:
-                        # Adding to position (same side, e.g. pyramid)
                         total_lots = entry_lots + fill.lots
                         avg = (entry_price * entry_lots + fill.fill_price * fill.lots) / total_lots
                         open_entries[sym] = (avg, total_lots, entry_side)
@@ -119,9 +185,7 @@ class BacktestRunner:
         snapshot: MarketSnapshot,
     ) -> AccountState:
         state = engine.get_state()
-        margin_used = sum(
-            p.lots * snapshot.margin_per_unit for p in state.positions
-        )
+        margin_used = sum(p.lots * snapshot.margin_per_unit for p in state.positions)
         margin_avail = equity - margin_used
         margin_ratio = margin_used / equity if equity > 0 else 0.0
         dd_pct = max(0.0, min(1.0, 1.0 - equity / self._initial_equity))
@@ -151,7 +215,8 @@ class BacktestRunner:
             {
                 "timestamp": (
                     f.timestamp.isoformat()
-                    if hasattr(f.timestamp, "isoformat") else str(f.timestamp)
+                    if hasattr(f.timestamp, "isoformat")
+                    else str(f.timestamp)
                 ),
                 "side": f.side,
                 "lots": f.lots,
