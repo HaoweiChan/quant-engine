@@ -51,13 +51,17 @@ class BacktestRunner:
     ) -> None: ...
 ```
 
-#### Scenario: Same class, different data
+#### Scenario: Same class, same code path
 - **WHEN** a backtest runs
-- **THEN** historical bars SHALL be fed through the production `PositionEngine.on_snapshot()` — not a separate backtest-specific implementation
+- **THEN** bars SHALL be processed through `EventEngine` using the same handler chain as live trading
 
-#### Scenario: No backtest-specific logic in PositionEngine
+#### Scenario: No backtest-specific logic
 - **WHEN** `PositionEngine` is used in simulation
-- **THEN** it SHALL contain zero conditional branches for "is backtest" — behavior is identical to live
+- **THEN** it SHALL contain zero conditional branches for "is backtest"
+
+#### Scenario: API preserved
+- **WHEN** `BacktestRunner.run(bars, signals, timestamps)` is called
+- **THEN** the signature and return type SHALL remain identical; delegation to EventEngine is internal
 
 #### Scenario: Fresh engine per run
 - **WHEN** `BacktestRunner.run()` is called
@@ -137,27 +141,31 @@ Simulator SHALL test PositionEngine behavior under extreme market scenarios. Sce
 - **THEN** the result SHALL account for slippage impact on PnL
 
 ### Requirement: Backtesting engine
-Simulator SHALL run PositionEngine on real historical data and produce comprehensive performance metrics.
+Simulator SHALL run PositionEngine on real historical data and produce comprehensive performance metrics. BacktestRunner SHALL delegate internally to EventEngine.
 
 #### Scenario: Feed historical bars
 - **WHEN** `run_backtest()` is called with historical OHLCV data
-- **THEN** each bar SHALL be fed sequentially through `PositionEngine.on_snapshot()` with configurable fill model (close price with slippage)
+- **THEN** BacktestRunner SHALL convert bars to MarketEvents and delegate to EventEngine for processing, using the configured fill model
 
 #### Scenario: Precomputed signals
 - **WHEN** `precomputed_signals` is provided
-- **THEN** each signal SHALL be paired with its corresponding bar by timestamp for `on_snapshot()` input
+- **THEN** each signal SHALL be paired with its corresponding bar by timestamp and injected as SignalEvents
 
 #### Scenario: Performance metrics
 - **WHEN** a backtest completes
-- **THEN** the result SHALL include: Sharpe (annualized), Sortino, Calmar, max drawdown (absolute and %), win rate, profit factor, average win/loss, number of trades, average holding period, and monthly/yearly return breakdown
+- **THEN** the result SHALL include: Sharpe (annualized), Sortino, Calmar, max drawdown (absolute and %), win rate, profit factor, average win/loss, number of trades, average holding period, monthly/yearly return breakdown, AND new fields: total_market_impact, total_spread_cost, impact_as_pct_of_pnl
 
 #### Scenario: Trade log
 - **WHEN** a backtest completes
-- **THEN** it SHALL produce a complete trade log with every entry, add, stop, and exit with timestamps and prices
+- **THEN** it SHALL produce a complete trade log with every entry, add, stop, and exit with timestamps, prices, AND per-fill market_impact, spread_cost, and latency_ms
 
 #### Scenario: Equity curve
 - **WHEN** a backtest completes
 - **THEN** it SHALL produce a bar-by-bar equity curve and peak-to-trough drawdown series
+
+#### Scenario: Legacy API preserved
+- **WHEN** existing code calls `BacktestRunner.run(bars, signals, timestamps)`
+- **THEN** the method signature and return type SHALL remain identical; internal delegation to EventEngine is transparent
 
 ### Requirement: Parameter scanner
 Simulator SHALL sweep parameter combinations and identify robust regions in the parameter space. Scanner SHALL accept any engine factory callable and any parameter grid, not just `PyramidConfig` fields.
@@ -224,23 +232,27 @@ The backtester SHALL use a configurable `FillModel` to simulate order fills, dec
 ```python
 class FillModel(ABC):
     @abstractmethod
-    def simulate(self, order: Order, bar: pl.Series) -> Fill: ...
+    def simulate(self, order: Order, bar: dict[str, float], timestamp: datetime) -> Fill: ...
 ```
 
-#### Scenario: Close-price fill with slippage
-- **WHEN** a fill model is configured with slippage in points
-- **THEN** it SHALL fill market orders at `bar.close ± slippage` (adverse direction)
+#### Scenario: Default fill model changed
+- **WHEN** `BacktestRunner` is constructed with `fill_model=None`
+- **THEN** it SHALL default to `MarketImpactFillModel()` instead of `ClosePriceFillModel()`
 
-#### Scenario: Open-price fill
-- **WHEN** configured for open-price fills
-- **THEN** it SHALL fill at the next bar's open price
+#### Scenario: Close-price fill with slippage (legacy)
+- **WHEN** `ClosePriceFillModel` is explicitly passed
+- **THEN** it SHALL fill market orders at `bar["close"] ± slippage` (adverse direction) and emit a deprecation warning
+
+#### Scenario: Open-price fill (legacy)
+- **WHEN** `OpenPriceFillModel` is explicitly passed
+- **THEN** it SHALL fill at the open price and emit a deprecation warning
 
 ### Requirement: Backtest result types
 The backtester SHALL return structured result types for downstream consumption (dashboard, reports).
 
 #### Scenario: BacktestResult fields
 - **WHEN** a backtest completes
-- **THEN** `BacktestResult` SHALL contain: equity_curve (per-bar), drawdown_series, trade_log (list of fills), metrics dict (Sharpe, Sortino, Calmar, max drawdown, win rate, profit factor, avg win/loss, trade count, avg holding period), and monthly/yearly return tables
+- **THEN** `BacktestResult` SHALL contain: equity_curve (per-bar), drawdown_series, trade_log (list of fills), metrics dict (all existing metrics PLUS total_market_impact, total_spread_cost, avg_latency_ms, partial_fill_count), and monthly/yearly return tables
 
 #### Scenario: MonteCarloResult fields
 - **WHEN** a Monte Carlo run completes
@@ -329,3 +341,14 @@ def get_strategy_parameter_schema(strategy: str = "pyramid") -> dict: ...
 #### Scenario: Scenario presets included
 - **WHEN** `get_strategy_parameter_schema` is called
 - **THEN** the result SHALL include a `scenarios` key listing all PathConfig preset names with their descriptions (drift, volatility characteristics)
+
+### Requirement: Impact analysis report
+The simulator SHALL produce a fill quality report comparing impact-aware fills against naive fills.
+
+#### Scenario: Side-by-side comparison
+- **WHEN** a backtest completes with `MarketImpactFillModel`
+- **THEN** the result SHALL include an `impact_report` dict containing: `naive_pnl` (what PnL would have been with ClosePriceFillModel), `realistic_pnl` (actual PnL with impact), `pnl_ratio` (realistic/naive), and `per_trade_impact_breakdown`
+
+#### Scenario: Impact as percentage of PnL
+- **WHEN** an impact report is generated
+- **THEN** it SHALL compute `impact_as_pct_of_gross_pnl = total_impact_cost / abs(gross_pnl)` to quantify execution drag

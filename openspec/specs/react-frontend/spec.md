@@ -86,7 +86,7 @@ The frontend SHALL use Zustand stores for application state: `marketDataStore` (
 - **THEN** the `tradingStore` SHALL update its `connected` state to `false` and display a disconnection indicator
 
 ### Requirement: WebSocket hooks for real-time data
-The frontend SHALL provide React hooks (`useLiveFeed`, `useBacktestProgress`, `useRiskAlerts`) that manage WebSocket connections with automatic reconnection using exponential backoff.
+The frontend SHALL provide React hooks (`useLiveFeed`, `useBacktestProgress`, `useRiskAlerts`) that manage WebSocket connections with automatic reconnection using exponential backoff. The `useLiveFeed` hook SHALL process incoming tick messages by calling `processLiveTick()` on `marketDataStore` to drive live bar aggregation and chart updates.
 
 #### Scenario: Auto-reconnect on disconnect
 - **WHEN** the WebSocket connection to `/ws/live-feed` is lost
@@ -95,6 +95,18 @@ The frontend SHALL provide React hooks (`useLiveFeed`, `useBacktestProgress`, `u
 #### Scenario: Live feed updates trading store
 - **WHEN** a tick message arrives on the live feed WebSocket
 - **THEN** the `tradingStore` SHALL update the relevant position's latest price and unrealized PnL
+
+#### Scenario: Live feed processes tick messages
+- **WHEN** a message with `type: "tick"` arrives on the live feed WebSocket containing `{ price, volume, timestamp }`
+- **THEN** the `useLiveFeed` hook SHALL call `marketDataStore.processLiveTick({ price, volume, timestamp })`
+
+#### Scenario: Live feed ignores non-tick messages
+- **WHEN** a message with `type: "order"` or `type: "pong"` arrives on the live feed WebSocket
+- **THEN** the `useLiveFeed` hook SHALL NOT call `processLiveTick`
+
+#### Scenario: Malformed message handling
+- **WHEN** a malformed or unparseable message arrives on the live feed WebSocket
+- **THEN** the hook SHALL silently ignore the message without throwing or logging to the console
 
 ### Requirement: Data Hub page
 The Data Hub page SHALL display database coverage, contract/timeframe/date selectors in a sidebar, and render OHLCV charts (price, high/low, volume) with stat cards (First Bar, Last Bar, Latest Close, Period Return, Avg Volume). It SHALL support CSV export and crawl management.
