@@ -238,8 +238,8 @@ TOOLS: list[Tool] = [
                 },
                 "metric": {
                     "type": "string",
-                    "description": "Optimization metric: sharpe|calmar|win_rate|profit_factor",
-                    "default": "sharpe",
+                    "description": "Optimization metric: sortino|sharpe|calmar|win_rate|profit_factor",
+                    "default": "sortino",
                 },
                 "scenario": {
                     "type": "string",

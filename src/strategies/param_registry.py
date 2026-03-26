@@ -198,6 +198,7 @@ class ParamRegistry:
         initial_capital: float = 2_000_000.0,
         strategy_hash: str | None = None,
         strategy_code: str | None = None,
+        objective: str = "sortino",
     ) -> int:
         """Persist a single backtest result (not a full sweep). Returns run_id or -1 on error."""
         self._validate_strategy_slug(strategy)
@@ -220,7 +221,7 @@ class ParamRegistry:
                     end,
                     None,
                     None,
-                    "sharpe",
+                    objective,
                     None,
                     source,
                     run_tag,
@@ -250,13 +251,12 @@ class ParamRegistry:
                     metrics.get("total_pnl"),
                 ),
             )
-            # Auto-create a candidate so the run can be activated
-            sharpe_val = metrics.get("sharpe", 0) or 0
+            obj_val = metrics.get(objective, 0) or 0
             self._conn.execute(
                 """INSERT INTO param_candidates
                    (run_id, trial_id, strategy, params, label, regime, is_active, notes)
                    VALUES (?, NULL, ?, ?, ?, NULL, 0, NULL)""",
-                (run_id, strategy, json.dumps(params), f"single_sharpe{sharpe_val:.2f}"),
+                (run_id, strategy, json.dumps(params), f"single_{objective}{obj_val:.2f}"),
             )
             self._conn.commit()
             return run_id

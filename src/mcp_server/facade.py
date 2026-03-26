@@ -211,7 +211,8 @@ def _build_runner(
     factory = resolve_factory(strategy)
     adapter = _get_adapter()
     fm = fill_model or MarketImpactFillModel()
-    if strategy == "pyramid":
+    _pyramid_slugs = {"pyramid", "pyramid_wrapper", "daily/trend_following/pyramid_wrapper"}
+    if strategy in _pyramid_slugs:
         config = _build_pyramid_config(strategy_params)
         return BacktestRunner(
             config,
@@ -396,8 +397,20 @@ def run_backtest_realdata_for_mcp(
 
         clamped_params, param_warnings = validate_and_clamp(resolved_slug, strategy_params)
 
-    daily_atr = _mean(b.high - b.low for b in raw)
-    trading_days = len({b.timestamp.date() for b in raw})
+    # Compute true daily ATR from daily high-low ranges, not 1-min bar ranges
+    from collections import defaultdict as _ddict
+
+    _daily_hl: dict[str, tuple[float, float]] = {}
+    for b in raw:
+        d = b.timestamp.date() if hasattr(b.timestamp, "date") else str(b.timestamp)[:10]
+        if d not in _daily_hl:
+            _daily_hl[d] = (b.high, b.low)
+        else:
+            prev = _daily_hl[d]
+            _daily_hl[d] = (max(prev[0], b.high), min(prev[1], b.low))
+    daily_ranges = [hi - lo for hi, lo in _daily_hl.values() if hi > lo]
+    daily_atr = _mean(daily_ranges) if daily_ranges else _mean(b.high - b.low for b in raw)
+    trading_days = len(_daily_hl)
     bars_per_day = len(raw) / max(trading_days, 1)
     periods_per_year = bars_per_day * 252 if bars_per_day > 10 else 252.0
     runner = _build_runner(
@@ -415,6 +428,7 @@ def run_backtest_realdata_for_mcp(
             "high": b.high,
             "low": b.low,
             "close": b.close,
+            "volume": float(b.volume),
             "daily_atr": daily_atr,
             "timestamp": b.timestamp,
         }

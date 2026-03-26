@@ -289,34 +289,38 @@ def validate_schemas() -> list[str]:
     Returns a list of error strings (empty means all consistent).
     """
     errors: list[str] = []
-    skip_params = {"max_loss", "lots", "contract_type"}
+    skip_params = {"max_loss", "lots", "contract_type", "latest_entry_time"}
     for slug, info in _ensure_loaded().items():
         try:
             mod = importlib.import_module(info.module)
             fn = getattr(mod, info.factory)
             sig = inspect.signature(fn)
-            factory_params = {
-                k
-                for k, v in sig.parameters.items()
-                if k not in skip_params and v.default is not inspect.Parameter.empty
-            }
-            # If factory takes a single config dataclass (e.g. PyramidConfig),
-            # compare against the dataclass fields instead
-            if not factory_params:
-                params = list(sig.parameters.values())
-                non_skip = [p for p in params if p.name not in skip_params]
-                if len(non_skip) == 1 and non_skip[0].annotation is not inspect.Parameter.empty:
-                    import dataclasses
-
-                    ann = non_skip[0].annotation
-                    if isinstance(ann, str):
-                        continue
-                    if dataclasses.is_dataclass(ann):
-                        factory_params = {
-                            f.name
-                            for f in dataclasses.fields(ann)
-                            if f.name not in skip_params and f.default is not dataclasses.MISSING
-                        }
+            import dataclasses
+            params = list(sig.parameters.values())
+            positional = [
+                p for p in params
+                if p.name not in skip_params and p.default is inspect.Parameter.empty
+            ]
+            # Detect config-dataclass factories (e.g. PyramidConfig)
+            is_config_factory = False
+            if len(positional) == 1:
+                ann = positional[0].annotation
+                if isinstance(ann, str):
+                    # Resolve string annotation from the function's module globals
+                    fn_globals = getattr(fn, "__globals__", {})
+                    ann = fn_globals.get(ann, ann)
+                if not isinstance(ann, str) and dataclasses.is_dataclass(ann):
+                    is_config_factory = True
+                    factory_params = {
+                        f.name
+                        for f in dataclasses.fields(ann)
+                        if f.name not in skip_params and f.default is not dataclasses.MISSING
+                    }
+            if not is_config_factory:
+                factory_params = {
+                    k for k, v in sig.parameters.items()
+                    if k not in skip_params and v.default is not inspect.Parameter.empty
+                }
         except Exception as exc:
             errors.append(f"{slug}: failed to inspect factory — {exc}")
             continue
