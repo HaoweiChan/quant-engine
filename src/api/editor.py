@@ -17,9 +17,9 @@ ALLOWED_DIRS: list[Path] = [
 _EDITABLE_EXTENSIONS = {".py", ".toml"}
 
 _STRATEGY_RELOAD_ORDER = [
-    "src.strategies.example_entry",
-    "src.strategies.example_add",
-    "src.strategies.example_stop",
+    "src.strategies.examples.example_entry",
+    "src.strategies.examples.example_add",
+    "src.strategies.examples.example_stop",
 ]
 
 
@@ -123,9 +123,9 @@ def validate_engine() -> str | None:
                 importlib.import_module(mod_name)
         from src.core.position_engine import PositionEngine
         from src.core.types import EngineConfig, PyramidConfig
-        from src.strategies.example_add import MyAddPolicy
-        from src.strategies.example_entry import MyEntryPolicy
-        from src.strategies.example_stop import MyStopPolicy
+        from src.strategies.examples.example_add import MyAddPolicy
+        from src.strategies.examples.example_entry import MyEntryPolicy
+        from src.strategies.examples.example_stop import MyStopPolicy
         pcfg = PyramidConfig(max_loss=500_000)
         PositionEngine(
             entry_policy=MyEntryPolicy(pcfg),

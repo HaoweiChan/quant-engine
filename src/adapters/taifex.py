@@ -55,6 +55,7 @@ class TaifexAdapter(BaseAdapter):
             point_value=specs.point_value,
             min_lot=1.0,
             contract_specs=specs,
+            volume=float(data.get("volume", 0.0)),
         )
 
     def calc_margin(self, contract_type: str, lots: float) -> float:

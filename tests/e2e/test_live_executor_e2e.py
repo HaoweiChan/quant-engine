@@ -26,7 +26,8 @@ from typing import Any
 
 import pytest
 
-pytestmark = pytest.mark.integration
+_shioaji_available = pytest.importorskip("shioaji", reason="shioaji SDK not installed") is not None
+pytestmark = [pytest.mark.integration]
 
 
 @pytest.fixture(scope="module")

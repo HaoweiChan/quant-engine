@@ -245,7 +245,7 @@ class TestFacade:
     def test_parameter_schema_pyramid(self):
         from src.mcp_server.facade import get_strategy_parameter_schema
         schema = get_strategy_parameter_schema("pyramid")
-        assert schema["strategy"] == "pyramid"
+        assert schema["strategy"] == "daily/trend_following/pyramid_wrapper"
         assert "parameters" in schema
         assert "stop_atr_mult" in schema["parameters"]
         assert "scenarios" in schema
@@ -270,7 +270,7 @@ class TestFacade:
 class TestToolRegistration:
     def test_tools_list_has_correct_count(self):
         from src.mcp_server.tools import TOOLS
-        assert len(TOOLS) == 8
+        assert len(TOOLS) == 13
 
     def test_all_tools_have_names_and_schemas(self):
         from src.mcp_server.tools import TOOLS
@@ -278,6 +278,8 @@ class TestToolRegistration:
             "run_backtest", "run_monte_carlo", "run_parameter_sweep",
             "run_stress_test", "read_strategy_file", "write_strategy_file",
             "get_optimization_history", "get_parameter_schema",
+            "get_active_params", "run_backtest_realdata",
+            "scaffold_strategy", "get_run_history", "activate_candidate",
         }
         actual_names = {t.name for t in TOOLS}
         assert actual_names == expected_names

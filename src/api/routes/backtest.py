@@ -15,7 +15,7 @@ class BacktestRequest(BaseModel):
     start: str = "2025-08-01"
     end: str = "2026-03-14"
     params: dict | None = None
-    max_loss: float = 100_000.0
+    max_loss: float = 500_000.0
 
 
 @router.post("/backtest/run")

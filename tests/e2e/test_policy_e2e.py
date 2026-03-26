@@ -43,6 +43,7 @@ def _make_trending_bars(n: int = 80, base: float = 20000.0) -> list[dict[str, ob
                 "high": p + 25,
                 "low": p - 15,
                 "close": p,
+                "volume": 50_000.0,
             }
         )
     return bars

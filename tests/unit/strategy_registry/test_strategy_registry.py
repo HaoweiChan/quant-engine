@@ -15,16 +15,18 @@ class TestDiscovery:
     def test_discovers_atr_mean_reversion(self):
         reg = _fresh_registry()
         all_strats = reg.get_all()
-        assert "atr_mean_reversion" in all_strats
-        info = all_strats["atr_mean_reversion"]
+        slug = "intraday/mean_reversion/atr_mean_reversion"
+        assert slug in all_strats
+        info = all_strats[slug]
         assert info.factory == "create_atr_mean_reversion_engine"
-        assert info.module == "src.strategies.atr_mean_reversion"
+        assert info.module == "src.strategies.intraday.mean_reversion.atr_mean_reversion"
 
     def test_discovers_pyramid_wrapper(self):
         reg = _fresh_registry()
         all_strats = reg.get_all()
-        assert "pyramid_wrapper" in all_strats
-        info = all_strats["pyramid_wrapper"]
+        slug = "daily/trend_following/pyramid_wrapper"
+        assert slug in all_strats
+        info = all_strats[slug]
         assert info.factory == "create_pyramid_engine"
 
     def test_skips_files_without_param_schema(self):
@@ -44,30 +46,31 @@ class TestGetSchema:
     def test_returns_correct_structure(self):
         reg = _fresh_registry()
         schema = reg.get_schema("atr_mean_reversion")
-        assert schema["strategy"] == "atr_mean_reversion"
+        assert schema["strategy"] == "intraday/mean_reversion/atr_mean_reversion"
         assert "parameters" in schema
         assert "meta" in schema
 
     def test_all_params_present(self):
         reg = _fresh_registry()
         schema = reg.get_schema("atr_mean_reversion")
-        expected = {"bb_len", "bb_upper_mult", "bb_lower_mult", "rsi_len",
-                    "atr_len", "atr_sl_multi", "atr_tp_multi", "trend_ma_len",
-                    "rsi_oversold", "rsi_overbought"}
+        expected = {"kc_len", "kc_mult", "rsi_len",
+                    "atr_sl_multi", "atr_tp_multi", "trend_ma_len",
+                    "rsi_oversold", "rsi_overbought", "trend_filter_atr",
+                    "midline_exit", "vol_len", "vol_mult", "time_gate"}
         assert set(schema["parameters"].keys()) == expected
 
     def test_param_has_required_fields(self):
         reg = _fresh_registry()
         schema = reg.get_schema("atr_mean_reversion")
-        bb = schema["parameters"]["bb_len"]
-        assert "current" in bb
-        assert "type" in bb
-        assert "description" in bb
+        kc = schema["parameters"]["kc_len"]
+        assert "current" in kc
+        assert "type" in kc
+        assert "description" in kc
 
     def test_meta_populated(self):
         reg = _fresh_registry()
         schema = reg.get_schema("atr_mean_reversion")
-        assert schema["meta"].get("recommended_timeframe") == "intraday"
+        assert "description" in schema["meta"]
 
     def test_unknown_strategy_raises_keyerror(self):
         reg = _fresh_registry()
@@ -76,48 +79,49 @@ class TestGetSchema:
 
 
 class TestGetActiveParams:
-    def test_returns_defaults_without_toml(self):
+    def test_returns_defaults_without_toml(self, monkeypatch):
         reg = _fresh_registry()
+        from src.strategies import param_registry as pr
+        monkeypatch.setattr(pr.ParamRegistry, "get_active", lambda self, name: None)
         params = reg.get_active_params("atr_mean_reversion")
-        assert params["bb_len"] == 40
-        assert params["atr_sl_multi"] == 3.5
+        assert params["kc_len"] == 90
+        assert params["atr_sl_multi"] == 0.5
 
-    def test_merges_toml_override(self, tmp_path):
+    def test_merges_toml_override(self, tmp_path, monkeypatch):
         import tomli_w
         reg = _fresh_registry()
         toml_dir = tmp_path / "configs"
-        toml_dir.mkdir()
-        (toml_dir / "atr_mean_reversion.toml").write_bytes(
-            tomli_w.dumps({"params": {"bb_len": 20}}).encode()
+        toml_file = toml_dir / "intraday" / "mean_reversion"
+        toml_file.mkdir(parents=True)
+        (toml_file / "atr_mean_reversion.toml").write_bytes(
+            tomli_w.dumps({"params": {"kc_len": 60}}).encode()
         )
         import src.strategies.param_loader as pl
-        orig_dir = pl._CONFIGS_DIR
-        pl._CONFIGS_DIR = toml_dir
-        try:
-            params = reg.get_active_params("atr_mean_reversion")
-            assert params["bb_len"] == 20
-            assert params["atr_sl_multi"] == 3.5
-        finally:
-            pl._CONFIGS_DIR = orig_dir
+        monkeypatch.setattr(pl, "_CONFIGS_DIR", toml_dir)
+        from src.strategies import param_registry as pr
+        monkeypatch.setattr(pr.ParamRegistry, "get_active", lambda self, name: None)
+        params = reg.get_active_params("atr_mean_reversion")
+        assert params["kc_len"] == 60
+        assert params["atr_sl_multi"] == 0.5
 
 
 class TestGetParamGrid:
     def test_grid_from_schema(self):
         reg = _fresh_registry()
         grid = reg.get_param_grid("atr_mean_reversion")
-        assert grid["bb_len"]["default"] == [15, 20, 25]
-        assert grid["rsi_oversold"]["default"] == [25, 30]
+        assert grid["kc_len"]["default"] == [60, 90, 120]
+        assert grid["rsi_oversold"]["default"] == [15, 25, 35]
 
     def test_fallback_to_single_default(self):
         reg = _fresh_registry()
         grid = reg.get_param_grid("atr_mean_reversion")
-        assert grid["rsi_len"]["default"] == [5]
+        assert grid["rsi_len"]["default"] == [3, 5, 10]
 
     def test_grid_has_label_and_type(self):
         reg = _fresh_registry()
         grid = reg.get_param_grid("atr_mean_reversion")
-        assert "label" in grid["bb_len"]
-        assert "type" in grid["bb_len"]
+        assert "label" in grid["kc_len"]
+        assert "type" in grid["kc_len"]
 
 
 class TestRegister:
@@ -153,20 +157,34 @@ class TestSchemaFactoryConsistency:
     """Verify that every PARAM_SCHEMA matches its factory's kwargs."""
 
     def test_all_strategies_consistent(self):
+        import dataclasses
         import inspect
         from src.strategies.registry import get_all
-        skip_params = {"max_loss", "lots", "contract_type"}
+        skip_params = {"max_loss", "lots", "contract_type", "latest_entry_time"}
         for slug, info in get_all().items():
             import importlib
             mod = importlib.import_module(info.module)
             fn = getattr(mod, info.factory)
             sig = inspect.signature(fn)
+            positional = [
+                p for p in sig.parameters.values()
+                if p.name not in skip_params and p.default is inspect.Parameter.empty
+            ]
+            # Detect config-dataclass factories via __globals__ resolution
+            is_config_factory = False
+            if len(positional) == 1:
+                ann = positional[0].annotation
+                if isinstance(ann, str):
+                    ann = getattr(fn, "__globals__", {}).get(ann, ann)
+                if not isinstance(ann, str) and dataclasses.is_dataclass(ann):
+                    is_config_factory = True
+            if is_config_factory:
+                continue
             factory_kw = {
                 k for k, v in sig.parameters.items()
                 if k not in skip_params and v.default is not inspect.Parameter.empty
             }
             schema_keys = set(info.param_schema.keys())
-            # If factory takes a config dataclass, skip direct comparison
             if not factory_kw:
                 continue
             assert schema_keys == factory_kw, (

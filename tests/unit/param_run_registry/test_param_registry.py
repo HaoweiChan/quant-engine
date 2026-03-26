@@ -31,7 +31,7 @@ def _make_result(
     if trials is None:
         trials = [
             {
-                "bb_len": 15,
+                "kc_len": 15,
                 "rsi_oversold": 25,
                 "sharpe": 1.2,
                 "calmar": 0.8,
@@ -43,7 +43,7 @@ def _make_result(
                 "total_pnl": 100000,
             },
             {
-                "bb_len": 20,
+                "kc_len": 20,
                 "rsi_oversold": 30,
                 "sharpe": 1.5,
                 "calmar": 0.6,
@@ -55,7 +55,7 @@ def _make_result(
                 "total_pnl": 120000,
             },
             {
-                "bb_len": 25,
+                "kc_len": 25,
                 "rsi_oversold": 25,
                 "sharpe": 0.9,
                 "calmar": 1.1,
@@ -67,7 +67,7 @@ def _make_result(
                 "total_pnl": 80000,
             },
         ]
-    bp = best_params or {"bb_len": 20, "rsi_oversold": 30}
+    bp = best_params or {"kc_len": 20, "rsi_oversold": 30}
     is_result = BacktestResult(
         equity_curve=[2_000_000, 2_100_000],
         drawdown_series=[0.0, -0.01],
@@ -146,7 +146,7 @@ class TestSaveRun:
             (run_id,),
         ).fetchall()
         assert len(candidates) == 1
-        assert json.loads(candidates[0]["params"]) == {"bb_len": 20, "rsi_oversold": 30}
+        assert json.loads(candidates[0]["params"]) == {"kc_len": 20, "rsi_oversold": 30}
 
     def test_pareto_candidates_created(self, registry: ParamRegistry) -> None:
         result = _make_result()
@@ -221,7 +221,7 @@ class TestParetoFrontier:
     def test_all_equal(self, registry: ParamRegistry) -> None:
         trials = [
             {
-                "bb_len": i,
+                "kc_len": i,
                 "sharpe": 1.0,
                 "calmar": 1.0,
                 "sortino": 1.0,
@@ -233,7 +233,7 @@ class TestParetoFrontier:
             }
             for i in range(5)
         ]
-        result = _make_result(trials=trials, best_params={"bb_len": 0})
+        result = _make_result(trials=trials, best_params={"kc_len": 0})
         run_id = registry.save_run(
             result=result,
             strategy="test",
@@ -247,7 +247,7 @@ class TestParetoFrontier:
     def test_dominated_filtered(self, registry: ParamRegistry) -> None:
         trials = [
             {
-                "bb_len": 10,
+                "kc_len": 10,
                 "sharpe": 2.0,
                 "calmar": 2.0,
                 "sortino": 1.0,
@@ -258,7 +258,7 @@ class TestParetoFrontier:
                 "total_pnl": 100000,
             },
             {
-                "bb_len": 20,
+                "kc_len": 20,
                 "sharpe": 1.0,
                 "calmar": 1.0,
                 "sortino": 1.0,
@@ -269,7 +269,7 @@ class TestParetoFrontier:
                 "total_pnl": 100000,
             },
         ]
-        result = _make_result(trials=trials, best_params={"bb_len": 10})
+        result = _make_result(trials=trials, best_params={"kc_len": 10})
         run_id = registry.save_run(
             result=result,
             strategy="test",
@@ -279,7 +279,7 @@ class TestParetoFrontier:
         )
         pareto = registry.get_pareto_frontier(run_id, objectives=["sharpe", "calmar"])
         assert len(pareto) == 1
-        assert pareto[0]["params"]["bb_len"] == 10
+        assert pareto[0]["params"]["kc_len"] == 10
 
 
 class TestActivate:
@@ -357,7 +357,7 @@ class TestGetActive:
         registry.activate(cand["id"])
         active = registry.get_active("atr_mean_reversion")
         assert active is not None
-        assert active == {"bb_len": 20, "rsi_oversold": 30}
+        assert active == {"kc_len": 20, "rsi_oversold": 30}
 
     def test_returns_none_when_no_active(self, registry: ParamRegistry) -> None:
         assert registry.get_active("nonexistent") is None
@@ -378,7 +378,7 @@ class TestGetActive:
         registry.activate(cand["id"])
         detail = registry.get_active_detail("atr_mean_reversion")
         assert detail is not None
-        assert detail["params"] == {"bb_len": 20, "rsi_oversold": 30}
+        assert detail["params"] == {"kc_len": 20, "rsi_oversold": 30}
         assert detail["label"] == "best_sharpe"
         assert detail["objective"] == "sharpe"
 
@@ -463,7 +463,7 @@ class TestIntegration:
         # Activate best
         registry.activate(best["id"])
         active = registry.get_active("atr_mean_reversion")
-        assert active == {"bb_len": 20, "rsi_oversold": 30}
+        assert active == {"kc_len": 20, "rsi_oversold": 30}
         # History shows the run
         history = registry.get_run_history("atr_mean_reversion")
         assert len(history) == 1
@@ -486,7 +486,7 @@ class TestIntegration:
         ).fetchone()
         registry.activate(best["id"])
         active = registry.get_active("test_strat")
-        assert active == {"bb_len": 20, "rsi_oversold": 30}
+        assert active == {"kc_len": 20, "rsi_oversold": 30}
         registry.close()
 
 
@@ -740,7 +740,7 @@ class TestCodeHashStorage:
         run_id = registry.save_backtest_run(
             strategy="atr_mean_reversion",
             symbol="TX",
-            params={"bb_len": 20},
+            params={"kc_len": 20},
             metrics={"sharpe": 1.2, "trade_count": 50},
             source="test",
             strategy_hash="abc123",
@@ -773,7 +773,7 @@ class TestCodeHashStorage:
         run_id = registry.save_backtest_run(
             strategy="atr_mean_reversion",
             symbol="TX",
-            params={"bb_len": 20},
+            params={"kc_len": 20},
             metrics={"sharpe": 1.2, "trade_count": 50},
             source="test",
         )

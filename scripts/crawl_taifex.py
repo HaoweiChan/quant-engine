@@ -8,9 +8,9 @@ from datetime import date
 
 import shioaji as sj
 
+from src.data.connector import SinopacConnector
 from src.data.crawl import crawl_historical
 from src.data.db import Database
-from src.data.connector import SinopacConnector
 from src.secrets.manager import get_secret_manager
 
 logging.basicConfig(
@@ -43,7 +43,7 @@ def main() -> None:
     connector._api_key = creds["api_key"]
     connector._secret_key = creds["secret_key"]
 
-    db = Database(url="sqlite:///taifex_data.db")
+    db = Database(connection="sqlite:///taifex_data.db")
     logger.info("Database: taifex_data.db")
 
     for symbol in SYMBOLS:

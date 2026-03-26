@@ -22,11 +22,11 @@ from src.simulator.metrics import (
 from src.simulator.types import Fill
 
 
-def _fill(side: str, price: float, ts: datetime, lots: float = 1.0) -> Fill:
+def _fill(side: str, price: float, ts: datetime, lots: float = 1.0, reason: str = "test") -> Fill:
     return Fill(
         order_type="market", side=side, symbol="TX",
         lots=lots, fill_price=price, slippage=0.0,
-        timestamp=ts, reason="test",
+        timestamp=ts, reason=reason,
     )
 
 
@@ -79,8 +79,8 @@ class TestWinRateAndProfitFactor:
     def test_all_winners(self) -> None:
         ts = datetime(2024, 1, 2, 9, 0, tzinfo=UTC)
         log = [
-            _fill("buy", 100.0, ts),
-            _fill("sell", 110.0, ts + timedelta(hours=1)),
+            _fill("buy", 100.0, ts, reason="entry"),
+            _fill("sell", 110.0, ts + timedelta(hours=1), reason="exit"),
         ]
         assert win_rate(log) == 1.0
         assert profit_factor(log) == float("inf")
@@ -88,10 +88,10 @@ class TestWinRateAndProfitFactor:
     def test_mixed(self) -> None:
         ts = datetime(2024, 1, 2, 9, 0, tzinfo=UTC)
         log = [
-            _fill("buy", 100.0, ts),
-            _fill("sell", 110.0, ts + timedelta(hours=1)),
-            _fill("buy", 100.0, ts + timedelta(hours=2)),
-            _fill("sell", 90.0, ts + timedelta(hours=3)),
+            _fill("buy", 100.0, ts, reason="entry"),
+            _fill("sell", 110.0, ts + timedelta(hours=1), reason="exit"),
+            _fill("buy", 100.0, ts + timedelta(hours=2), reason="entry"),
+            _fill("sell", 90.0, ts + timedelta(hours=3), reason="exit"),
         ]
         assert win_rate(log) == 0.5
         avg_w, avg_l = avg_win_loss(log)
@@ -103,16 +103,16 @@ class TestTradeCountAndHolding:
     def test_count(self) -> None:
         ts = datetime(2024, 1, 2, tzinfo=UTC)
         log = [
-            _fill("buy", 100.0, ts),
-            _fill("sell", 110.0, ts + timedelta(hours=2)),
+            _fill("buy", 100.0, ts, reason="entry"),
+            _fill("sell", 110.0, ts + timedelta(hours=2), reason="exit"),
         ]
         assert trade_count(log) == 1
 
     def test_avg_holding(self) -> None:
         ts = datetime(2024, 1, 2, tzinfo=UTC)
         log = [
-            _fill("buy", 100.0, ts),
-            _fill("sell", 110.0, ts + timedelta(hours=4)),
+            _fill("buy", 100.0, ts, reason="entry"),
+            _fill("sell", 110.0, ts + timedelta(hours=4), reason="exit"),
         ]
         assert avg_holding_period(log) == pytest.approx(4.0)
 

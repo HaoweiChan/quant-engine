@@ -52,7 +52,7 @@ class TestTradingSession:
         assert len(s.session_id) > 0
         assert s.account_id == "acct-1"
         assert s.strategy_slug == "atr_mean_reversion"
-        assert s.status == "active"
+        assert s.status == "stopped"
 
     def test_create_sets_initial_equity(self) -> None:
         s = TradingSession.create("acct-1", "strat", "TX", initial_equity=500_000)
@@ -161,7 +161,7 @@ class TestSessionManager:
     def test_create_session(self, setup) -> None:
         mgr, _, _ = setup
         session = mgr.create_session("mock-acct", "new_strat", "TX")
-        assert session.status == "active"
+        assert session.status == "stopped"
         assert session.account_id == "mock-acct"
         assert mgr.get_session(session.session_id) is not None
 
@@ -176,6 +176,8 @@ class TestSessionManager:
     def test_poll_all_updates_snapshots(self, setup) -> None:
         mgr, _, _ = setup
         mgr.restore_from_config()
+        for session in mgr.get_all_sessions():
+            mgr.set_status(session.session_id, "active")
         mgr.poll_all()
         for session in mgr.get_all_sessions():
             assert session.current_snapshot is not None
@@ -184,6 +186,8 @@ class TestSessionManager:
     def test_poll_writes_to_store(self, setup) -> None:
         mgr, _, store = setup
         mgr.restore_from_config()
+        for session in mgr.get_all_sessions():
+            mgr.set_status(session.session_id, "active")
         mgr.poll_all()
         for session in mgr.get_all_sessions():
             curve = store.get_equity_curve(session.session_id, days=1)
