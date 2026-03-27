@@ -1,13 +1,17 @@
-"""Pyramid strategy wrapper — exposes PARAM_SCHEMA for the registry.
+"""Pyramid strategy wrapper — keyword-arg factory for the registry.
 
-The actual engine factory lives in src.core.position_engine; this module
-re-exports it alongside the parameter metadata so the strategy registry
-can discover it uniformly.
+Bridges the PyramidConfig-based core engine to the standard
+create_*_engine(keyword_args) interface used by the registry and facade.
 """
 from __future__ import annotations
 
-from src.core.position_engine import create_pyramid_engine  # noqa: F401
+from typing import TYPE_CHECKING
+
+from src.core.types import PyramidConfig
 from src.strategies import StrategyCategory, StrategyTimeframe
+
+if TYPE_CHECKING:
+    from src.core.position_engine import PositionEngine
 
 PARAM_SCHEMA: dict[str, dict] = {
     "max_levels":          {"type": "int",   "default": 4,    "min": 1,   "max": 8,
@@ -31,3 +35,29 @@ STRATEGY_META: dict = {
     "timeframe": StrategyTimeframe.DAILY,
     "description": "Pyramid trend-following with Kelly sizing and chandelier stops.",
 }
+
+
+def create_pyramid_wrapper_engine(
+    max_loss: float = 500_000.0,
+    max_levels: int = 4,
+    stop_atr_mult: float = 1.5,
+    trail_atr_mult: float = 3.0,
+    trail_lookback: int = 22,
+    margin_limit: float = 0.50,
+    kelly_fraction: float = 0.25,
+    entry_conf_threshold: float = 0.65,
+) -> "PositionEngine":
+    """Build a PositionEngine with pyramid strategy via keyword args."""
+    from src.core.position_engine import create_pyramid_engine
+
+    config = PyramidConfig(
+        max_loss=max_loss,
+        max_levels=max_levels,
+        stop_atr_mult=stop_atr_mult,
+        trail_atr_mult=trail_atr_mult,
+        trail_lookback=trail_lookback,
+        margin_limit=margin_limit,
+        kelly_fraction=kelly_fraction,
+        entry_conf_threshold=entry_conf_threshold,
+    )
+    return create_pyramid_engine(config)
