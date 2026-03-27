@@ -16,11 +16,7 @@ ALLOWED_DIRS: list[Path] = [
 
 _EDITABLE_EXTENSIONS = {".py", ".toml"}
 
-_STRATEGY_RELOAD_ORDER = [
-    "src.strategies.examples.example_entry",
-    "src.strategies.examples.example_add",
-    "src.strategies.examples.example_stop",
-]
+_STRATEGY_RELOAD_ORDER: list[str] = []
 
 
 def _validate_path(path: str) -> Path:
@@ -114,25 +110,16 @@ def run_ruff(code: str, filename: str) -> list[dict[str, object]]:
 
 
 def validate_engine() -> str | None:
-    """Reload user strategy modules and try to instantiate PositionEngine. Returns error or None."""
+    """Reload user strategy modules and verify the registry loads. Returns error or None."""
     try:
         for mod_name in _STRATEGY_RELOAD_ORDER:
             if mod_name in sys.modules:
                 importlib.reload(sys.modules[mod_name])
             else:
                 importlib.import_module(mod_name)
-        from src.core.position_engine import PositionEngine
-        from src.core.types import EngineConfig, PyramidConfig
-        from src.strategies.examples.example_add import MyAddPolicy
-        from src.strategies.examples.example_entry import MyEntryPolicy
-        from src.strategies.examples.example_stop import MyStopPolicy
-        pcfg = PyramidConfig(max_loss=500_000)
-        PositionEngine(
-            entry_policy=MyEntryPolicy(pcfg),
-            add_policy=MyAddPolicy(pcfg),
-            stop_policy=MyStopPolicy(pcfg),
-            config=EngineConfig(max_loss=500_000),
-        )
+        from src.strategies.registry import get_all
+        if not get_all():
+            return "Strategy registry is empty — no strategies discovered."
         return None
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"

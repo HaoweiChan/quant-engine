@@ -54,12 +54,6 @@ def _discover() -> dict[str, StrategyInfo]:
             continue
         if py.parent == _STRATEGIES_DIR and py.stem in _INFRA_MODULES:
             continue
-        # Skip examples directory
-        try:
-            py.relative_to(_STRATEGIES_DIR / "examples")
-            continue
-        except ValueError:
-            pass
         relative = py.relative_to(_STRATEGIES_DIR)
         slug = str(relative.with_suffix(""))
         mod_name = f"src.strategies.{slug.replace('/', '.')}"
