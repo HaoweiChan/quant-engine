@@ -403,11 +403,9 @@ class EMATrendPullbackEntry(EntryPolicy):
         atr = ind.atr
         if atr is None or atr <= 0:
             return None
-        # Volatility ceiling: skip entries in abnormally volatile chop
         if self._atr_ceil > 0 and ind.atr_avg is not None and ind.atr_avg > 0:
             if atr > self._atr_ceil * ind.atr_avg:
                 return None
-        # Long: trend up, price in pullback zone, StochRSI cross from oversold
         if ind.ema_trend_rising is True:
             if self._ema_align and ind.ema_fast <= ind.ema_slow:
                 pass  # EMAs not properly stacked for long
@@ -521,7 +519,7 @@ class EMATrendPullbackStop(StopPolicy):
 
 
 def create_ema_trend_pullback_engine(
-    max_loss: float = 150_000,
+    max_loss: float = 500_000,
     lots: float = 1.0,
     contract_type: str = "large",
     bar_agg: int = 5,

@@ -518,7 +518,7 @@ def run_strategy_backtest(
     end_str: str,
     initial_equity: float = 2_000_000.0,
     strategy_params: dict | None = None,
-    max_loss: float = 100_000.0,
+    max_loss: float = 500_000.0,
 ) -> dict:
     """Run a backtest on real DB data via the MCP facade.
 
