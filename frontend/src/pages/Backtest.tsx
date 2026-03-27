@@ -10,6 +10,8 @@ import { fetchStrategies, fetchActiveParams, runBacktest, fetchParamRuns, delete
 import type { StrategyInfo, BacktestResult, ActiveParams, ParamRun, OHLCVBar } from "@/lib/api";
 import { ChartErrorBoundary } from "@/components/ErrorBoundary";
 import { colors, pnlColor } from "@/lib/theme";
+import Prism from "prismjs";
+import "prismjs/components/prism-python";
 
 const inputStyle: React.CSSProperties = {
   background: "var(--color-qe-input)",
@@ -341,7 +343,7 @@ export function Backtest() {
               <div className="flex-1">
                 <ChartErrorBoundary fallbackLabel="Drawdown">
                   <ChartCard title="DRAWDOWN">
-                    <DrawdownChart equity={equity} />
+                    <DrawdownChart equity={equity} startDate={start} timeframeMinutes={result.timeframe_minutes ?? (params.bar_agg ?? 1)} />
                   </ChartCard>
                 </ChartErrorBoundary>
               </div>
@@ -522,13 +524,48 @@ export function Backtest() {
                 ✕
               </button>
             </div>
-            <pre style={{
-              margin: 0, padding: 16, overflow: "auto", flex: 1,
-              fontSize: 11, lineHeight: 1.5, color: "#c8d0e0",
-              fontFamily: "var(--font-mono)", whiteSpace: "pre",
-            }}>
-              {codeModal.code}
-            </pre>
+            <pre
+              style={{
+                margin: 0, padding: 16, overflow: "auto", flex: 1,
+                fontSize: 12, lineHeight: 1.6, fontFamily: "var(--font-mono)",
+                whiteSpace: "pre", background: "#1a1d23",
+              }}
+              dangerouslySetInnerHTML={{ __html: Prism.highlight(codeModal.code, Prism.languages.python, "python") }}
+              className="language-python"
+            />
+            <style>{`
+              .language-python .token.comment,
+              .language-python .token.prolog,
+              .language-python .token.doctype,
+              .language-python .token.cdata { color: #6B7280; }
+              .language-python .token.punctuation { color: #8B8FA3; }
+              .language-python .token.property,
+              .language-python .token.tag,
+              .language-python .token.boolean,
+              .language-python .token.number,
+              .language-python .token.constant,
+              .language-python .token.symbol { color: #ff8a65; }
+              .language-python .token.selector,
+              .language-python .token.attr-name,
+              .language-python .token.string,
+              .language-python .token.char,
+              .language-python .token.builtin { color: #69f0ae; }
+              .language-python .token.operator,
+              .language-python .token.entity,
+              .language-python .token.url,
+              .language-python .token.variable { color: #4fc3f7; }
+              .language-python .token.atrule,
+              .language-python .token.attr-value,
+              .language-python .token.function { color: #5a8af2; }
+              .language-python .token.keyword { color: #ce93d8; }
+              .language-python .token.regex,
+              .language-python .token.important { color: #ffd54f; }
+              .language-python .token.important,
+              .language-python .token.bold { font-weight: bold; }
+              .language-python .token.italic { font-style: italic; }
+              .language-python .token.deleted { color: #ff5252; }
+              .language-python .token.namespace { opacity: 0.7; }
+            `}</style>
           </div>
         </div>
       )}

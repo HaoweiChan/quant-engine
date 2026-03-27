@@ -3,6 +3,7 @@ import { Sidebar, SectionLabel } from "@/components/Sidebar";
 import { fetchEditorFiles, fetchEditorFile, writeEditorFile, validateEngine } from "@/lib/api";
 import type { EditorFile } from "@/lib/api";
 import { colors } from "@/lib/theme";
+import Editor from "@monaco-editor/react";
 
 export function CodeEditor() {
   const [files, setFiles] = useState<EditorFile[]>([]);
@@ -97,20 +98,32 @@ export function CodeEditor() {
             </span>
           )}
         </div>
-        {/* Code textarea */}
-        <textarea
-          value={content}
-          onChange={(e) => { setContent(e.target.value); setDirty(e.target.value !== original); }}
-          spellCheck={false}
-          className="flex-1 w-full rounded p-3 resize-none outline-none text-[13px] leading-relaxed"
-          style={{
-            fontFamily: "var(--font-mono)",
-            background: colors.card,
-            color: colors.text,
-            border: `1px solid ${colors.cardBorder}`,
-            tabSize: 4,
-          }}
-        />
+        {/* Code editor */}
+        <div className="flex-1 rounded overflow-hidden" style={{ border: `1px solid ${colors.cardBorder}` }}>
+          <Editor
+            height="100%"
+            defaultLanguage="python"
+            value={content}
+            onChange={(val) => {
+              setContent(val ?? "");
+              setDirty(val !== original);
+            }}
+            theme="vs-dark"
+            options={{
+              fontSize: 13,
+              fontFamily: "var(--font-mono)",
+              minimap: { enabled: false },
+              scrollBeyondLastLine: false,
+              lineNumbers: "on",
+              renderLineHighlight: "line",
+              tabSize: 4,
+              insertSpaces: true,
+              automaticLayout: true,
+              wordWrap: "on",
+              padding: { top: 8, bottom: 8 },
+            }}
+          />
+        </div>
         {/* Actions */}
         <div className="flex gap-2 mt-2">
           <button onClick={handleSave} disabled={!selected} className="px-4 py-1.5 rounded text-[11px] font-semibold border-none text-white cursor-pointer" style={{ background: "#2A7A4A", fontFamily: "var(--font-mono)" }}>
