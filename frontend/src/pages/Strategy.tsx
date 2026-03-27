@@ -1,3 +1,4 @@
+import React, { useRef } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useUiStore } from "@/stores/uiStore";
 import { CodeEditor } from "@/pages/strategy/CodeEditor";
@@ -13,9 +14,18 @@ const subTabs = [
   { value: "montecarlo", label: "Monte Carlo" },
 ] as const;
 
+const subTabComponents: Record<string, React.FC> = {
+  editor: CodeEditor,
+  optimizer: Optimizer,
+  gridsearch: GridSearch,
+  montecarlo: MonteCarlo,
+};
+
 export function Strategy() {
   const subTab = useUiStore((s) => s.strategySubTab);
   const setSubTab = useUiStore((s) => s.setStrategySubTab);
+  const visited = useRef(new Set<string>([subTab]));
+  visited.current.add(subTab);
 
   return (
     <div>
@@ -42,10 +52,15 @@ export function Strategy() {
         </TabsList>
       </Tabs>
       <div>
-        {subTab === "editor" && <CodeEditor />}
-        {subTab === "optimizer" && <Optimizer />}
-        {subTab === "gridsearch" && <GridSearch />}
-        {subTab === "montecarlo" && <MonteCarlo />}
+        {subTabs.map((t) => {
+          if (!visited.current.has(t.value)) return null;
+          const Comp = subTabComponents[t.value];
+          return (
+            <div key={t.value} style={{ display: subTab === t.value ? "block" : "none" }}>
+              <Comp />
+            </div>
+          );
+        })}
       </div>
     </div>
   );

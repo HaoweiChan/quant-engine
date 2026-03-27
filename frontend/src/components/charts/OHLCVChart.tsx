@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import React, { useEffect, useRef } from "react";
 import { createChart, createSeriesMarkers, type IChartApi, type ISeriesApi, type ISeriesMarkersPluginApi, type LineWidth, CandlestickSeries, HistogramSeries, LineSeries } from "lightweight-charts";
 import type { OHLCVBar, TradeSignal } from "@/lib/api";
 import { colors } from "@/lib/theme";
@@ -63,7 +63,7 @@ function signalsToMarkers(signals: TradeSignal[], barTimes: number[]) {
     .sort((a, b) => (a.time as number) - (b.time as number));
 }
 
-export function OHLCVChart({
+export const OHLCVChart = React.memo(function OHLCVChart({
   data,
   height = 340,
   overlays = [],
@@ -204,4 +204,4 @@ export function OHLCVChart({
   }, [lastLiveTick]);
 
   return <div ref={containerRef} />;
-}
+});

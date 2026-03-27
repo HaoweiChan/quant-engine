@@ -1,3 +1,4 @@
+import React, { useMemo } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
 import { colors } from "@/lib/theme";
 
@@ -27,8 +28,8 @@ function histogram(values: number[], bins: number) {
   }));
 }
 
-export function DistributionChart({ values, bins = 30, height = 200 }: DistributionChartProps) {
-  const data = histogram(values, bins);
+export const DistributionChart = React.memo(function DistributionChart({ values, bins = 30, height = 200 }: DistributionChartProps) {
+  const data = useMemo(() => histogram(values, bins), [values, bins]);
 
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -51,6 +52,7 @@ export function DistributionChart({ values, bins = 30, height = 200 }: Distribut
             fontSize: 10,
             color: colors.text,
           }}
+          itemStyle={{ color: "#e2e8f0" }}
           formatter={(_value: number, _name: string, props: { payload?: { mid: number; count: number } }) => {
             const p = props.payload;
             if (!p) return [_value, _name];
@@ -67,4 +69,4 @@ export function DistributionChart({ values, bins = 30, height = 200 }: Distribut
       </BarChart>
     </ResponsiveContainer>
   );
-}
+});

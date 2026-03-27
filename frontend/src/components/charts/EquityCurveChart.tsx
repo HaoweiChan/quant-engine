@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import React, { useEffect, useRef } from "react";
 import { createChart, type IChartApi, LineSeries } from "lightweight-charts";
 import { colors } from "@/lib/theme";
 
@@ -32,7 +32,7 @@ function toChartData(values: number[], baseDate: Date, tfMinutes: number) {
   });
 }
 
-export function EquityCurveChart({ equity, bnhEquity, height = 260, startDate, timeframeMinutes }: EquityCurveChartProps) {
+export const EquityCurveChart = React.memo(function EquityCurveChart({ equity, bnhEquity, height = 260, startDate, timeframeMinutes }: EquityCurveChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -107,4 +107,4 @@ export function EquityCurveChart({ equity, bnhEquity, height = 260, startDate, t
   }, [equity, bnhEquity, height, startDate, timeframeMinutes]);
 
   return <div ref={containerRef} />;
-}
+});

@@ -1,3 +1,4 @@
+import React, { useRef } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useUiStore } from "@/stores/uiStore";
 import { Backtest } from "@/pages/Backtest";
@@ -12,20 +13,30 @@ const primaryTabs = [
   { value: "trading", label: "Trading" },
 ] as const;
 
+const tabComponents: Record<string, React.FC> = {
+  datahub: DataHub,
+  strategy: Strategy,
+  backtest: Backtest,
+  trading: Trading,
+};
+
 function TabContent() {
   const tab = useUiStore((s) => s.primaryTab);
-  switch (tab) {
-    case "datahub":
-      return <DataHub />;
-    case "strategy":
-      return <Strategy />;
-    case "backtest":
-      return <Backtest />;
-    case "trading":
-      return <Trading />;
-    default:
-      return <DataHub />;
-  }
+  const visited = useRef(new Set<string>([tab]));
+  visited.current.add(tab);
+  return (
+    <>
+      {primaryTabs.map((t) => {
+        if (!visited.current.has(t.value)) return null;
+        const Comp = tabComponents[t.value];
+        return (
+          <div key={t.value} style={{ display: tab === t.value ? "block" : "none" }}>
+            <Comp />
+          </div>
+        );
+      })}
+    </>
+  );
 }
 
 export default function App() {

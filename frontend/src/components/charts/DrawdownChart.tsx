@@ -1,9 +1,13 @@
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
+import React, { useMemo } from "react";
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Line } from "recharts";
 import { colors } from "@/lib/theme";
 
 interface DrawdownChartProps {
   equity: number[];
+  bnhEquity?: number[];
   height?: number;
+  startDate?: string;
+  timeframeMinutes?: number;
 }
 
 const MAX_POINTS = 800;
@@ -21,19 +25,33 @@ function downsample<T>(data: T[], maxPoints: number): T[] {
   return result;
 }
 
-export function DrawdownChart({ equity, height = 200 }: DrawdownChartProps) {
-  if (equity.length === 0) return null;
-
-  let peak = equity[0];
-  const raw = equity.map((v, i) => {
+function computeDrawdown(eq: number[]): number[] {
+  let peak = eq[0];
+  return eq.map((v) => {
     if (v > peak) peak = v;
-    const dd = (v - peak) / peak;
-    return { idx: i, dd: dd * 100 };
+    return ((v - peak) / peak) * 100;
   });
-  const data = downsample(raw, MAX_POINTS);
+}
 
-  const minDD = Math.min(...data.map((d) => d.dd));
-  const yMin = Math.floor(minDD / 2) * 2 - 2;
+export const DrawdownChart = React.memo(function DrawdownChart({ equity, bnhEquity, height = 200, startDate, timeframeMinutes }: DrawdownChartProps) {
+  const { data, yMin, hasBnH } = useMemo(() => {
+    if (equity.length === 0) return { data: [], yMin: -2, hasBnH: false };
+    const baseDate = startDate ? new Date(startDate + "T09:00:00") : new Date();
+    const tfMin = timeframeMinutes ?? 1;
+    const stratDD = computeDrawdown(equity);
+    const bnhDD = bnhEquity && bnhEquity.length > 0 ? computeDrawdown(bnhEquity) : null;
+    const raw = stratDD.map((dd, i) => {
+      const d = new Date(baseDate.getTime() + i * tfMin * 60_000);
+      const label = d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+      return { idx: i, dd, bnhDd: bnhDD ? (bnhDD[i] ?? 0) : undefined, label };
+    });
+    const sampled = downsample(raw, MAX_POINTS);
+    const allDDs = sampled.flatMap((d) => [d.dd, d.bnhDd ?? 0]);
+    const minDD = Math.min(...allDDs);
+    return { data: sampled, yMin: Math.floor(minDD / 2) * 2 - 2, hasBnH: bnhDD !== null };
+  }, [equity, bnhEquity, startDate, timeframeMinutes]);
+
+  if (data.length === 0) return null;
 
   return (
     <ResponsiveContainer width="100%" height={height}>
@@ -61,18 +79,38 @@ export function DrawdownChart({ equity, height = 200 }: DrawdownChartProps) {
             fontSize: 10,
             color: colors.text,
           }}
-          formatter={(value: number) => [`${value.toFixed(2)}%`, "Drawdown"]}
-          labelFormatter={() => ""}
+          itemStyle={{ color: "#e2e8f0" }}
+          formatter={(value: number, name: string) => {
+            const label = name === "bnhDd" ? "Buy & Hold" : "Strategy";
+            return [`${value.toFixed(2)}%`, label];
+          }}
+          labelFormatter={(_label: string, payload: { payload?: { label?: string } }[]) => {
+            const p = payload?.[0]?.payload;
+            return p?.label ?? "";
+          }}
         />
         <Area
           type="stepAfter"
           dataKey="dd"
+          name="dd"
           stroke={colors.red}
           strokeWidth={1.5}
           fill="url(#ddGrad)"
           isAnimationActive={false}
         />
+        {hasBnH && (
+          <Line
+            type="stepAfter"
+            dataKey="bnhDd"
+            name="bnhDd"
+            stroke="#8888aa"
+            strokeWidth={1}
+            strokeDasharray="4 2"
+            dot={false}
+            isAnimationActive={false}
+          />
+        )}
       </AreaChart>
     </ResponsiveContainer>
   );
-}
+});
