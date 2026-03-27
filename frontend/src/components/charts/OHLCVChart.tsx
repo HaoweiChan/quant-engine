@@ -40,11 +40,9 @@ function downsampleBars(data: OHLCVBar[], max: number): OHLCVBar[] {
 
 function signalsToMarkers(signals: TradeSignal[], barTimes: number[]) {
   if (!signals.length || !barTimes.length) return [];
-  const timeSet = new Set(barTimes);
   return signals
     .map((s) => {
       const sigTime = toUnixTime(s.timestamp);
-      // Snap signal to nearest bar time
       let best = barTimes[0];
       let bestDiff = Math.abs(sigTime - best);
       for (const t of barTimes) {
@@ -56,9 +54,10 @@ function signalsToMarkers(signals: TradeSignal[], barTimes: number[]) {
       return {
         time: best as any,
         position: isBuy ? "belowBar" as const : "aboveBar" as const,
-        color: isBuy ? colors.green : colors.red,
+        color: isBuy ? "#26a69a" : "#ef5350",
         shape: isBuy ? "arrowUp" as const : "arrowDown" as const,
-        text: `${isBuy ? "BUY" : "SELL"} ${s.lots}@${s.price.toFixed(0)}`,
+        size: 0.5,
+        text: "",
       };
     })
     .sort((a, b) => (a.time as number) - (b.time as number));
