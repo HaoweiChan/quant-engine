@@ -6,6 +6,8 @@ interface EquityCurveChartProps {
   equity: number[];
   bnhEquity?: number[];
   height?: number;
+  startDate?: string;
+  timeframeMinutes?: number;
 }
 
 const MAX_CHART_POINTS = 2000;
@@ -23,15 +25,14 @@ function downsample(data: number[], maxPoints: number): number[] {
   return result;
 }
 
-function toChartData(values: number[], baseDate: Date) {
+function toChartData(values: number[], baseDate: Date, tfMinutes: number) {
   return values.map((v, i) => {
-    const d = new Date(baseDate);
-    d.setDate(d.getDate() + i);
-    return { time: d.toISOString().slice(0, 10) as string, value: v };
+    const d = new Date(baseDate.getTime() + i * tfMinutes * 60_000);
+    return { time: (d.getTime() / 1000) as unknown as string, value: v };
   });
 }
 
-export function EquityCurveChart({ equity, bnhEquity, height = 260 }: EquityCurveChartProps) {
+export function EquityCurveChart({ equity, bnhEquity, height = 260, startDate, timeframeMinutes }: EquityCurveChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -51,24 +52,43 @@ export function EquityCurveChart({ equity, bnhEquity, height = 260 }: EquityCurv
         vertLines: { color: colors.grid },
         horzLines: { color: colors.grid },
       },
+      crosshair: {
+        mode: 0,
+        horzLine: { labelVisible: true },
+        vertLine: { labelVisible: true },
+      },
       rightPriceScale: { borderColor: colors.cardBorder },
-      timeScale: { borderColor: colors.cardBorder, visible: false },
+      timeScale: {
+        borderColor: colors.cardBorder,
+        visible: true,
+        timeVisible: true,
+        secondsVisible: false,
+      },
+      localization: {
+        timeFormatter: (t: number) => {
+          const d = new Date(t * 1000);
+          return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+        },
+      },
     });
     chartRef.current = chart;
 
-    const baseDate = new Date("2025-01-01");
+    const tfMin = timeframeMinutes ?? 1;
+    const baseDate = startDate ? new Date(startDate) : new Date("2025-01-01");
     const ds = downsample(equity, MAX_CHART_POINTS);
-    const stratSeries = chart.addSeries(LineSeries, { color: colors.green, lineWidth: 2 });
-    stratSeries.setData(toChartData(ds, baseDate));
+    const stratSeries = chart.addSeries(LineSeries, { color: colors.green, lineWidth: 2, title: "Strategy" });
+    stratSeries.setData(toChartData(ds, baseDate, tfMin));
 
     if (bnhEquity && bnhEquity.length > 0) {
       const bnh = downsample(bnhEquity, MAX_CHART_POINTS);
       const bnhSeries = chart.addSeries(LineSeries, {
-        color: colors.dim,
+        color: "#8888aa",
         lineWidth: 1,
         lineStyle: 1,
+        title: "Buy & Hold",
+        crosshairMarkerVisible: true,
       });
-      bnhSeries.setData(toChartData(bnh, baseDate));
+      bnhSeries.setData(toChartData(bnh, baseDate, tfMin));
     }
 
     chart.timeScale().fitContent();
@@ -84,7 +104,7 @@ export function EquityCurveChart({ equity, bnhEquity, height = 260 }: EquityCurv
       window.removeEventListener("resize", handleResize);
       chart.remove();
     };
-  }, [equity, bnhEquity, height]);
+  }, [equity, bnhEquity, height, startDate, timeframeMinutes]);
 
   return <div ref={containerRef} />;
 }
