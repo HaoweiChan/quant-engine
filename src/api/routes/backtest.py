@@ -16,6 +16,7 @@ class BacktestRequest(BaseModel):
     end: str = "2026-03-14"
     params: dict | None = None
     max_loss: float = 500_000.0
+    initial_capital: float = 2_000_000.0
 
 
 @router.post("/backtest/run")
@@ -26,6 +27,7 @@ async def run_backtest(req: BacktestRequest) -> dict:
             symbol=req.symbol,
             start_str=req.start,
             end_str=req.end,
+            initial_equity=req.initial_capital,
             strategy_params=req.params,
             max_loss=req.max_loss,
         )

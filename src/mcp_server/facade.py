@@ -8,7 +8,6 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
-from src.core.types import PyramidConfig
 from src.simulator.types import PRESETS, PathConfig
 
 
@@ -71,39 +70,6 @@ def resolve_strategy_slug(strategy: str) -> str:
             return mod_part[len(prefix) :].replace(".", "/")
     return strategy
 
-
-def _build_pyramid_config(params: dict[str, Any] | None) -> PyramidConfig:
-    """Merge provided params over defaults to create a PyramidConfig."""
-    defaults = _load_default_pyramid_params()
-    if params:
-        defaults.update(params)
-    return PyramidConfig(**defaults)
-
-
-def _load_default_pyramid_params() -> dict[str, Any]:
-    """Load pyramid params from registry (PARAM_SCHEMA defaults + TOML overrides)."""
-    try:
-        from src.strategies.registry import get_active_params
-
-        params = get_active_params("pyramid_wrapper")
-        params.setdefault("max_loss", 500_000)
-        params.setdefault("add_trigger_atr", [4.0, 8.0, 12.0])
-        params.setdefault("lot_schedule", [[3, 4], [2, 0], [1, 4], [1, 4]])
-        return params
-    except Exception:
-        pass
-    return {
-        "max_loss": 500_000,
-        "max_levels": 4,
-        "stop_atr_mult": 1.5,
-        "trail_atr_mult": 3.0,
-        "trail_lookback": 22,
-        "margin_limit": 0.50,
-        "kelly_fraction": 0.25,
-        "entry_conf_threshold": 0.65,
-        "add_trigger_atr": [4.0, 8.0, 12.0],
-        "lot_schedule": [[3, 4], [2, 0], [1, 4], [1, 4]],
-    }
 
 
 def _get_adapter():  # type: ignore[no-untyped-def]
@@ -197,6 +163,33 @@ def _bars_from_path(
     return _path_to_bars(path, config)
 
 
+def _aggregate_bars(raw, bar_agg: int):
+    """Aggregate 1-min OHLCVBar objects into N-min bars."""
+    from src.data.db import OHLCVBar
+
+    if bar_agg <= 1 or not raw:
+        return raw
+    bucket_secs = bar_agg * 60
+    buckets: dict[int, list] = {}
+    for b in raw:
+        ts_epoch = int(b.timestamp.timestamp())
+        key = ts_epoch // bucket_secs
+        buckets.setdefault(key, []).append(b)
+    aggregated = []
+    for key in sorted(buckets):
+        group = buckets[key]
+        aggregated.append(OHLCVBar(
+            symbol=group[0].symbol,
+            timestamp=group[0].timestamp,
+            open=group[0].open,
+            high=max(b.high for b in group),
+            low=min(b.low for b in group),
+            close=group[-1].close,
+            volume=sum(b.volume for b in group),
+        ))
+    return aggregated
+
+
 def _build_runner(
     strategy: str,
     strategy_params: dict[str, Any] | None,
@@ -211,16 +204,6 @@ def _build_runner(
     factory = resolve_factory(strategy)
     adapter = _get_adapter()
     fm = fill_model or MarketImpactFillModel()
-    _pyramid_slugs = {"pyramid", "pyramid_wrapper", "daily/trend_following/pyramid_wrapper"}
-    if strategy in _pyramid_slugs:
-        config = _build_pyramid_config(strategy_params)
-        return BacktestRunner(
-            config,
-            adapter,
-            fill_model=fm,
-            initial_equity=initial_equity,
-            periods_per_year=periods_per_year,
-        )
     merged = dict(strategy_params or {})
     merged.pop("bar_agg", None)
     if "max_loss" not in merged:
@@ -398,9 +381,9 @@ def run_backtest_realdata_for_mcp(
 
         clamped_params, param_warnings = validate_and_clamp(resolved_slug, strategy_params)
 
-    # Compute true daily ATR from daily high-low ranges, not 1-min bar ranges
-    from collections import defaultdict as _ddict
+    bar_agg = int((strategy_params or {}).get("bar_agg", 1))
 
+    # Compute true daily ATR from daily high-low ranges, not 1-min bar ranges
     _daily_hl: dict[str, tuple[float, float]] = {}
     for b in raw:
         d = b.timestamp.date() if hasattr(b.timestamp, "date") else str(b.timestamp)[:10]
@@ -411,6 +394,11 @@ def run_backtest_realdata_for_mcp(
             _daily_hl[d] = (max(prev[0], b.high), min(prev[1], b.low))
     daily_ranges = [hi - lo for hi, lo in _daily_hl.values() if hi > lo]
     daily_atr = _mean(daily_ranges) if daily_ranges else _mean(b.high - b.low for b in raw)
+
+    # Aggregate 1-min bars into N-min bars when bar_agg > 1
+    if bar_agg > 1:
+        raw = _aggregate_bars(raw, bar_agg)
+
     trading_days = len(_daily_hl)
     bars_per_day = len(raw) / max(trading_days, 1)
     periods_per_year = bars_per_day * 252 if bars_per_day > 10 else 252.0
@@ -464,8 +452,7 @@ def run_backtest_realdata_for_mcp(
     base["bars_count"] = len(bars)
     base["trade_pnls"] = _extract_trade_pnls(result.trade_log)
     base["trade_signals"] = _serialize_trade_log(result.trade_log)
-    bar_agg = (strategy_params or {}).get("bar_agg", 1)
-    base["timeframe_minutes"] = int(bar_agg)
+    base["timeframe_minutes"] = bar_agg
     base["param_warnings"] = param_warnings
     strategy_hash, strategy_code = _compute_code_hash(resolved_slug)
     if strategy_hash is not None:
@@ -506,8 +493,6 @@ def run_monte_carlo_for_mcp(
     timeframe: str = "daily",
 ) -> dict[str, Any]:
     """Run Monte Carlo simulation with N paths."""
-    from src.simulator.monte_carlo import run_monte_carlo
-
     clamped = min(n_paths, 1000)
     warning = f"n_paths clamped from {n_paths} to 1000" if n_paths > 1000 else None
 
@@ -519,16 +504,11 @@ def run_monte_carlo_for_mcp(
         clamped_params, param_warnings = validate_and_clamp(resolved_slug, strategy_params)
 
     path_config = _make_path_config(scenario, n_bars, timeframe)
-    adapter = _get_adapter()
 
-    if resolved_slug == "pyramid" or strategy == "pyramid":
-        config = _build_pyramid_config(clamped_params if strategy_params else None)
-        mc_result = run_monte_carlo(clamped, config, adapter, path_config)
-    else:
-        merged = dict(clamped_params)
-        if "max_loss" not in merged:
-            merged["max_loss"] = 500_000
-        mc_result = _run_mc_with_runner(resolved_slug, merged, clamped, path_config, timeframe)
+    merged = dict(clamped_params)
+    if "max_loss" not in merged:
+        merged["max_loss"] = 500_000
+    mc_result = _run_mc_with_runner(resolved_slug, merged, clamped, path_config, timeframe)
 
     result: dict[str, Any] = {
         "scenario": scenario,
@@ -768,7 +748,7 @@ def run_stress_for_mcp(
         flash_crash_scenario,
         gap_down_scenario,
         liquidity_crisis_scenario,
-        run_stress_test,
+
         slow_bleed_scenario,
         vol_regime_shift_scenario,
     )
@@ -798,33 +778,29 @@ def run_stress_for_mcp(
 
     for name in names:
         scenario_obj = all_scenarios[name]()
-        if resolved_slug == "pyramid" or strategy == "pyramid":
-            config = _build_pyramid_config(clamped_params if strategy_params else None)
-            stress_result = run_stress_test(scenario_obj, config, adapter)
-        else:
-            from src.simulator.backtester import BacktestRunner
+        from src.simulator.backtester import BacktestRunner
 
-            factory = resolve_factory(resolved_slug)
-            merged = dict(clamped_params)
-            if "max_loss" not in merged:
-                merged["max_loss"] = 500_000
-            engine_factory = lambda: factory(**merged)  # noqa: E731
-            runner = BacktestRunner(engine_factory, adapter)
-            prices = _generate_scenario_prices(scenario_obj, 20000.0)
-            bars, timestamps = _prices_to_bars(prices)
-            result = runner.run(bars, timestamps=timestamps)
-            cb_triggered = any(f.reason == "circuit_breaker" for f in result.trade_log)
-            stops = [f.reason for f in result.trade_log if "stop" in f.reason.lower()]
-            from src.simulator.types import StressResult
+        factory = resolve_factory(resolved_slug)
+        merged = dict(clamped_params)
+        if "max_loss" not in merged:
+            merged["max_loss"] = 500_000
+        engine_factory = lambda: factory(**merged)  # noqa: E731
+        runner = BacktestRunner(engine_factory, adapter)
+        prices = _generate_scenario_prices(scenario_obj, 20000.0)
+        bars, timestamps = _prices_to_bars(prices)
+        result = runner.run(bars, timestamps=timestamps)
+        cb_triggered = any(f.reason == "circuit_breaker" for f in result.trade_log)
+        stops = [f.reason for f in result.trade_log if "stop" in f.reason.lower()]
+        from src.simulator.types import StressResult
 
-            stress_result = StressResult(
-                scenario_name=scenario_obj.name,
-                final_pnl=result.equity_curve[-1] - result.equity_curve[0],
-                max_drawdown=result.metrics.get("max_drawdown_pct", 0.0),
-                circuit_breaker_triggered=cb_triggered,
-                stops_triggered=stops,
-                equity_curve=result.equity_curve,
-            )
+        stress_result = StressResult(
+            scenario_name=scenario_obj.name,
+            final_pnl=result.equity_curve[-1] - result.equity_curve[0],
+            max_drawdown=result.metrics.get("max_drawdown_pct", 0.0),
+            circuit_breaker_triggered=cb_triggered,
+            stops_triggered=stops,
+            equity_curve=result.equity_curve,
+        )
         results.append(
             {
                 "scenario": stress_result.scenario_name,
