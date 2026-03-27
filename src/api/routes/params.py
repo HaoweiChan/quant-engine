@@ -36,6 +36,27 @@ async def get_active_params(strategy: str) -> dict:
         raise HTTPException(status_code=404, detail=f"Unknown strategy '{strategy}'")
 
 
+@router.get("/runs/{run_id:int}/code")
+async def get_run_code(run_id: int) -> dict:
+    """Return the stored strategy source code for a specific run."""
+    from src.strategies.param_registry import ParamRegistry
+
+    registry = ParamRegistry()
+    row = registry._conn.execute(
+        "SELECT strategy_hash, strategy_code, strategy FROM param_runs WHERE id = ?",
+        (run_id,),
+    ).fetchone()
+    registry.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return {
+        "run_id": run_id,
+        "strategy": row["strategy"],
+        "strategy_hash": row["strategy_hash"],
+        "strategy_code": row["strategy_code"],
+    }
+
+
 @router.get("/runs/{strategy:path}")
 async def get_run_history(strategy: str, limit: int = 20) -> dict:
     """Return optimization run history for a strategy."""

@@ -51,6 +51,13 @@ export function DistributionChart({ values, bins = 30, height = 200 }: Distribut
             fontSize: 10,
             color: colors.text,
           }}
+          formatter={(_value: number, _name: string, props: { payload?: { mid: number; count: number } }) => {
+            const p = props.payload;
+            if (!p) return [_value, _name];
+            const amt = p.mid >= 0 ? `+$${p.mid.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : `-$${Math.abs(p.mid).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+            return [`${p.count} trades @ ${amt}`, "PnL"];
+          }}
+          labelFormatter={() => ""}
         />
         <Bar dataKey="count" radius={[1, 1, 0, 0]}>
           {data.map((entry, i) => (

@@ -222,6 +222,7 @@ def _build_runner(
             periods_per_year=periods_per_year,
         )
     merged = dict(strategy_params or {})
+    merged.pop("bar_agg", None)
     if "max_loss" not in merged:
         merged["max_loss"] = 500_000
     engine_factory = lambda: factory(**merged)  # noqa: E731
@@ -451,6 +452,11 @@ def run_backtest_realdata_for_mcp(
         n_bars=len(bars),
         extra={"symbol": symbol, "start": start, "end": end},
     )
+    # Compute alpha: strategy total return minus buy-and-hold return
+    strat_total_ret = (eq[-1] - eq[0]) / eq[0] if len(eq) > 1 and eq[0] > 0 else 0.0
+    bnh_total_ret = (bnh_eq[-1] - bnh_eq[0]) / bnh_eq[0] if len(bnh_eq) > 1 and bnh_eq[0] > 0 else 0.0
+    alpha = float(strat_total_ret - bnh_total_ret)
+    base["metrics"]["alpha"] = alpha
     base["daily_returns"] = strat_returns
     base["equity_curve"] = result.equity_curve
     base["bnh_returns"] = bnh_returns
@@ -458,7 +464,6 @@ def run_backtest_realdata_for_mcp(
     base["bars_count"] = len(bars)
     base["trade_pnls"] = _extract_trade_pnls(result.trade_log)
     base["trade_signals"] = _serialize_trade_log(result.trade_log)
-    # Detect effective timeframe from bar_agg param
     bar_agg = (strategy_params or {}).get("bar_agg", 1)
     base["timeframe_minutes"] = int(bar_agg)
     base["param_warnings"] = param_warnings
@@ -469,7 +474,7 @@ def run_backtest_realdata_for_mcp(
         from src.strategies.param_registry import ParamRegistry
 
         registry = ParamRegistry()
-        save_metrics = {**base.get("metrics", {}), "total_pnl": base.get("total_pnl")}
+        save_metrics = {**base.get("metrics", {}), "total_pnl": base.get("total_pnl"), "alpha": alpha}
         run_id = registry.save_backtest_run(
             strategy=resolved_slug,
             symbol=symbol,

@@ -6,7 +6,7 @@ import { DistributionChart } from "@/components/charts/DistributionChart";
 import { OHLCVChart } from "@/components/charts/OHLCVChart";
 import { Sidebar, SectionLabel, ParamInput } from "@/components/Sidebar";
 import { StatCard, StatRow } from "@/components/StatCard";
-import { fetchStrategies, fetchActiveParams, runBacktest, fetchParamRuns, deleteParamRun, fetchOHLCV } from "@/lib/api";
+import { fetchStrategies, fetchActiveParams, runBacktest, fetchParamRuns, deleteParamRun, fetchOHLCV, fetchRunCode } from "@/lib/api";
 import type { StrategyInfo, BacktestResult, ActiveParams, ParamRun, OHLCVBar } from "@/lib/api";
 import { ChartErrorBoundary } from "@/components/ErrorBoundary";
 import { colors, pnlColor } from "@/lib/theme";
@@ -20,7 +20,7 @@ const inputStyle: React.CSSProperties = {
   outline: "none",
 };
 
-type SortKey = "run_at" | "sharpe" | "sortino" | "total_pnl" | "win_rate" | "max_drawdown_pct" | "profit_factor" | "n_trials" | "search_type" | "symbol";
+type SortKey = "run_at" | "sharpe" | "sortino" | "alpha" | "total_pnl" | "win_rate" | "max_drawdown_pct" | "profit_factor" | "n_trials" | "search_type" | "symbol";
 type SortDir = "asc" | "desc";
 
 function getMetric(run: ParamRun, key: string): number | null {
@@ -45,6 +45,8 @@ export function Backtest() {
   const [sortKey, setSortKey] = useState<SortKey>("run_at");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [ohlcvBars, setOhlcvBars] = useState<OHLCVBar[]>([]);
+  const [codeModal, setCodeModal] = useState<{ hash: string; code: string; strategy: string } | null>(null);
+  const [codeLoading, setCodeLoading] = useState(false);
 
   useEffect(() => {
     fetchStrategies().then((s) => {
@@ -54,6 +56,14 @@ export function Backtest() {
   }, []);
 
   const currentStrat = strategies.find((s) => s.slug === strategy);
+
+  // Fix 6: Clear backtest results when strategy changes
+  useEffect(() => {
+    setResult(null);
+    setOhlcvBars([]);
+    setError(null);
+    setSelectedRunId(null);
+  }, [strategy]);
 
   useEffect(() => {
     if (!currentStrat?.param_grid) return;
@@ -98,11 +108,17 @@ export function Backtest() {
       setParamRuns((prev) => prev.filter((r) => r.run_id !== runId));
       if (selectedRunId === runId) setSelectedRunId(null);
       refreshAll();
-    } catch { /* silently fail */ }
+    } catch (err) {
+      setError(`Delete failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
   const loadRunParams = (run: ParamRun) => {
     setSelectedRunId(run.run_id);
+    if (run.train_start) setStart(run.train_start);
+    if (run.train_end) setEnd(run.train_end);
+    if (run.symbol && !run.symbol.startsWith("synthetic")) setSymbol(run.symbol);
+    if (run.initial_capital) setMaxLoss(maxLoss);
     if (!run.best_params) return;
     const newParams = { ...params };
     for (const [k, v] of Object.entries(run.best_params)) {
@@ -117,6 +133,23 @@ export function Backtest() {
     } else {
       setSortKey(key);
       setSortDir("desc");
+    }
+  };
+
+  const handleViewCode = async (e: React.MouseEvent, runId: number) => {
+    e.stopPropagation();
+    setCodeLoading(true);
+    try {
+      const data = await fetchRunCode(runId);
+      if (data.strategy_code) {
+        setCodeModal({ hash: data.strategy_hash ?? "—", code: data.strategy_code, strategy: data.strategy });
+      } else {
+        setError("No strategy code stored for this run.");
+      }
+    } catch (err) {
+      setError(`Failed to load code: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setCodeLoading(false);
     }
   };
 
@@ -212,6 +245,21 @@ export function Backtest() {
         <ParamInput label="To">
           <input type="text" value={end} onChange={(e) => setEnd(e.target.value)} className="w-full rounded px-1.5 py-1 text-[11px]" style={inputStyle} />
         </ParamInput>
+        <ParamInput label="Timeframe">
+          <select
+            value={params.bar_agg ?? 1}
+            onChange={(e) => setParams({ ...params, bar_agg: Number(e.target.value) })}
+            className="w-full rounded px-1.5 py-1 text-[11px]"
+            style={inputStyle}
+          >
+            <option value={1}>1 min</option>
+            <option value={3}>3 min</option>
+            <option value={5}>5 min</option>
+            <option value={15}>15 min</option>
+            <option value={30}>30 min</option>
+            <option value={60}>60 min</option>
+          </select>
+        </ParamInput>
         <hr style={{ borderColor: "var(--color-qe-card-border)", margin: "10px 0" }} />
         <SectionLabel>STRATEGY PARAMETERS</SectionLabel>
         {currentStrat?.param_grid &&
@@ -279,7 +327,7 @@ export function Backtest() {
             </StatRow>
             <ChartErrorBoundary fallbackLabel="Equity Curve">
               <ChartCard title="EQUITY CURVE vs BUY & HOLD">
-                <EquityCurveChart equity={equity} bnhEquity={result.bnh_equity} />
+                <EquityCurveChart equity={equity} bnhEquity={result.bnh_equity} startDate={start} timeframeMinutes={result.timeframe_minutes ?? (params.bar_agg ?? 1)} />
               </ChartCard>
             </ChartErrorBoundary>
             {ohlcvBars.length > 0 && (
@@ -336,6 +384,7 @@ export function Backtest() {
                       <th className="text-right py-1 pr-2" style={{ color: colors.dim }}>Capital</th>
                       <SortHeader label="Sharpe" field="sharpe" />
                       <SortHeader label="Sortino" field="sortino" />
+                      <SortHeader label="Alpha" field="alpha" />
                       <SortHeader label="PnL" field="total_pnl" />
                       <SortHeader label="Win Rate" field="win_rate" />
                       <SortHeader label="Max DD" field="max_drawdown_pct" />
@@ -348,6 +397,7 @@ export function Backtest() {
                     {sortedRuns.map((run) => {
                       const sharpe = getMetric(run, "sharpe");
                       const sortino = getMetric(run, "sortino");
+                      const alpha = getMetric(run, "alpha");
                       const pnl = getMetric(run, "total_pnl");
                       const wr = getMetric(run, "win_rate");
                       const dd = getMetric(run, "max_drawdown_pct");
@@ -371,8 +421,9 @@ export function Backtest() {
                           onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
                           onMouseLeave={(e) => { e.currentTarget.style.background = isSelected ? "rgba(90,138,242,0.08)" : "transparent"; }}
                         >
-                          <td className="py-1 pr-1 text-center" style={{ width: 16 }}>
-                            {isActive && <span title="Active params" style={{ color: colors.green, fontSize: 8 }}>●</span>}
+                          <td className="py-1 pr-1 text-center" style={{ width: 24 }}>
+                            {isSelected && <span title="Loaded" style={{ color: "#4ade80", fontSize: 8, marginRight: 2 }}>●</span>}
+                            {isActive && <span title="Active params" style={{ color: colors.green, fontSize: 8 }}>★</span>}
                           </td>
                           <td className="py-1 pr-2" style={{ color: colors.text }}>{run.run_at?.slice(0, 10) ?? "—"}</td>
                           <td className="py-1 pr-2" style={{ color: colors.muted }}>{run.symbol ?? "—"}</td>
@@ -388,6 +439,9 @@ export function Backtest() {
                           <td className="text-right py-1 pr-2" style={{ color: sortino != null && sortino > 1.5 ? colors.green : sortino != null && sortino > 0 ? colors.gold : colors.red }}>
                             {sortino != null ? sortino.toFixed(2) : "—"}
                           </td>
+                          <td className="text-right py-1 pr-2" style={{ color: alpha != null && alpha > 0 ? colors.green : alpha != null && alpha < 0 ? colors.red : colors.dim }}>
+                            {alpha != null ? `${alpha >= 0 ? "+" : ""}${(alpha * 100).toFixed(1)}%` : "—"}
+                          </td>
                           <td className="text-right py-1 pr-2" style={{ color: pnl != null ? pnlColor(pnl) : colors.dim }}>
                             {pnl != null ? `$${pnl >= 0 ? "+" : ""}${Math.round(pnl).toLocaleString()}` : "—"}
                           </td>
@@ -401,7 +455,20 @@ export function Backtest() {
                             {pf != null ? pf.toFixed(2) : "—"}
                           </td>
                           <td className="py-1 pr-2" style={{ color: colors.dim }}>
-                            {run.strategy_hash != null ? run.strategy_hash.slice(0, 8) : "—"}
+                            {run.strategy_hash != null ? (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                                <code style={{ fontSize: 10 }}>{run.strategy_hash.slice(0, 8)}</code>
+                                <button
+                                  onClick={(e) => handleViewCode(e, run.run_id)}
+                                  className="cursor-pointer border-none opacity-40 hover:opacity-100"
+                                  style={{ background: "transparent", color: colors.cyan, fontSize: 9, padding: 0, lineHeight: 1 }}
+                                  title="View strategy code"
+                                  disabled={codeLoading}
+                                >
+                                  {"</>"}
+                                </button>
+                              </span>
+                            ) : "—"}
                           </td>
                           <td className="text-right py-1 whitespace-nowrap">
                             <button
@@ -423,6 +490,48 @@ export function Backtest() {
           )}
         </div>
       </div>
+      {codeModal && (
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 9999,
+            background: "rgba(0,0,0,0.7)", display: "flex",
+            alignItems: "center", justifyContent: "center",
+          }}
+          onClick={() => setCodeModal(null)}
+        >
+          <div
+            style={{
+              background: "#1a1d23", border: "1px solid #333",
+              borderRadius: 8, width: "70vw", maxHeight: "80vh",
+              display: "flex", flexDirection: "column", overflow: "hidden",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{
+              padding: "12px 16px", borderBottom: "1px solid #333",
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+            }}>
+              <span style={{ color: "#e0e0e0", fontSize: 13, fontWeight: 600 }}>
+                {codeModal.strategy} &mdash; <code style={{ color: colors.cyan, fontSize: 11 }}>{codeModal.hash.slice(0, 12)}</code>
+              </span>
+              <button
+                onClick={() => setCodeModal(null)}
+                className="cursor-pointer border-none"
+                style={{ background: "transparent", color: "#888", fontSize: 18 }}
+              >
+                ✕
+              </button>
+            </div>
+            <pre style={{
+              margin: 0, padding: 16, overflow: "auto", flex: 1,
+              fontSize: 11, lineHeight: 1.5, color: "#c8d0e0",
+              fontFamily: "var(--font-mono)", whiteSpace: "pre",
+            }}>
+              {codeModal.code}
+            </pre>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

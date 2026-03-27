@@ -30,6 +30,7 @@ _METRIC_COLS = [
     "max_drawdown_pct",
     "trade_count",
     "total_pnl",
+    "alpha",
 ]
 _LARGE_TRIAL_THRESHOLD = 5000
 
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS param_trials (
     max_drawdown_pct REAL,
     trade_count  INTEGER,
     total_pnl    REAL,
+    alpha        REAL,
     is_oos       INTEGER NOT NULL DEFAULT 0
 );
 
@@ -122,6 +124,7 @@ class ParamRegistry:
         self._conn.commit()
         self._migrate_add_initial_capital()
         self._migrate_add_code_hash()
+        self._migrate_add_alpha()
 
     def _migrate_add_code_hash(self) -> None:
         """Add strategy_hash and strategy_code columns if missing (idempotent)."""
@@ -131,6 +134,13 @@ class ParamRegistry:
         if "strategy_code" not in cols:
             self._conn.execute("ALTER TABLE param_runs ADD COLUMN strategy_code TEXT")
         self._conn.commit()
+
+    def _migrate_add_alpha(self) -> None:
+        """Add alpha column to param_trials if missing (idempotent)."""
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(param_trials)").fetchall()]
+        if "alpha" not in cols:
+            self._conn.execute("ALTER TABLE param_trials ADD COLUMN alpha REAL")
+            self._conn.commit()
 
     def _migrate_add_initial_capital(self) -> None:
         """Add initial_capital column to param_runs if missing (one-time migration)."""
@@ -200,9 +210,23 @@ class ParamRegistry:
         strategy_code: str | None = None,
         objective: str = "sortino",
     ) -> int:
-        """Persist a single backtest result (not a full sweep). Returns run_id or -1 on error."""
+        """Persist a single backtest result (not a full sweep). Returns run_id or -1 on error.
+
+        Deduplicates by (strategy_hash, symbol, train_start, train_end, timeframe).
+        Returns existing run_id if a matching run already exists.
+        """
         self._validate_strategy_slug(strategy)
         try:
+            if strategy_hash and start and end and timeframe:
+                existing = self._conn.execute(
+                    """SELECT r.id FROM param_runs r
+                       WHERE r.strategy_hash = ? AND r.symbol = ?
+                         AND r.train_start = ? AND r.train_end = ?
+                         AND r.notes LIKE ?""",
+                    (strategy_hash, symbol, start, end, f"%tf={timeframe}%"),
+                ).fetchone()
+                if existing:
+                    return existing[0]
             now = datetime.now(UTC).isoformat(timespec="seconds")
             run_tag = tag or f"tool:{tool}"
             tf_notes = f"tf={timeframe}" if timeframe else None
@@ -236,8 +260,8 @@ class ParamRegistry:
             self._conn.execute(
                 """INSERT INTO param_trials
                    (run_id, params, sharpe, calmar, sortino, profit_factor,
-                    win_rate, max_drawdown_pct, trade_count, total_pnl, is_oos)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                    win_rate, max_drawdown_pct, trade_count, total_pnl, alpha, is_oos)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                 (
                     run_id,
                     json.dumps(params),
@@ -249,6 +273,7 @@ class ParamRegistry:
                     metrics.get("max_drawdown_pct"),
                     int(metrics.get("trade_count", 0)),
                     metrics.get("total_pnl"),
+                    metrics.get("alpha"),
                 ),
             )
             obj_val = metrics.get(objective, 0) or 0
@@ -327,8 +352,8 @@ class ParamRegistry:
             self._conn.execute(
                 """INSERT INTO param_trials
                    (run_id, params, sharpe, calmar, sortino, profit_factor,
-                    win_rate, max_drawdown_pct, trade_count, total_pnl, is_oos)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                    win_rate, max_drawdown_pct, trade_count, total_pnl, alpha, is_oos)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
                 (
                     run_id,
                     params_json,
@@ -340,6 +365,7 @@ class ParamRegistry:
                     row.get("max_drawdown_pct"),
                     int(row.get("trade_count") or row.get("_trade_count") or 0),
                     row.get("total_pnl"),
+                    row.get("alpha"),
                 ),
             )
         # OOS best result
@@ -348,8 +374,8 @@ class ParamRegistry:
             self._conn.execute(
                 """INSERT INTO param_trials
                    (run_id, params, sharpe, calmar, sortino, profit_factor,
-                    win_rate, max_drawdown_pct, trade_count, total_pnl, is_oos)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                    win_rate, max_drawdown_pct, trade_count, total_pnl, alpha, is_oos)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
                 (
                     run_id,
                     json.dumps(result.best_params),
@@ -361,6 +387,7 @@ class ParamRegistry:
                     m.get("max_drawdown_pct"),
                     int(m.get("trade_count", 0)),
                     m.get("total_pnl"),
+                    m.get("alpha"),
                 ),
             )
         # Auto-create best candidate
@@ -576,7 +603,7 @@ class ParamRegistry:
         objs = objectives or _DEFAULT_PARETO_OBJECTIVES
         rows = self._conn.execute(
             "SELECT id, params, sharpe, calmar, sortino, profit_factor, "
-            "win_rate, max_drawdown_pct, trade_count, total_pnl "
+            "win_rate, max_drawdown_pct, trade_count, total_pnl, alpha "
             "FROM param_trials WHERE run_id = ? AND is_oos = 0",
             (run_id,),
         ).fetchall()
@@ -632,7 +659,7 @@ class ParamRegistry:
             run_id = r["id"]
             best = self._conn.execute(
                 """SELECT params, sharpe, calmar, sortino, profit_factor,
-                          win_rate, max_drawdown_pct, trade_count, total_pnl
+                          win_rate, max_drawdown_pct, trade_count, total_pnl, alpha
                    FROM param_trials
                    WHERE run_id = ? AND is_oos = 0
                    ORDER BY {} DESC LIMIT 1""".format(r["objective"]),
@@ -687,7 +714,7 @@ class ParamRegistry:
                 continue
             best = self._conn.execute(
                 """SELECT params, sharpe, calmar, sortino, profit_factor,
-                          win_rate, max_drawdown_pct, trade_count, total_pnl
+                          win_rate, max_drawdown_pct, trade_count, total_pnl, alpha
                    FROM param_trials
                    WHERE run_id = ? AND is_oos = 0
                    ORDER BY {} DESC LIMIT 1""".format(run["objective"]),

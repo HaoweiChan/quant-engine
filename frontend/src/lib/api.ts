@@ -282,6 +282,10 @@ export async function compareRuns(runIds: number[]): Promise<Record<string, unkn
   return fetchJSON(`/api/params/compare?run_ids=${runIds.join(",")}`);
 }
 
+export async function fetchRunCode(runId: number): Promise<{ run_id: number; strategy: string; strategy_hash: string | null; strategy_code: string | null }> {
+  return fetchJSON(`/api/params/runs/${runId}/code`);
+}
+
 // --- Deploy & Sessions ---
 
 export interface WarRoomSession {
