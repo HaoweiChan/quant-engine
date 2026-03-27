@@ -119,6 +119,7 @@ export async function runBacktest(params: {
   end: string;
   params?: Record<string, number>;
   max_loss?: number;
+  initial_capital?: number;
 }): Promise<BacktestResult> {
   return fetchJSON("/api/backtest/run", {
     method: "POST",

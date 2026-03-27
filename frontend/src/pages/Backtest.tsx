@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { ChartCard } from "@/components/ChartCard";
 import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
@@ -29,6 +29,21 @@ function getMetric(run: ParamRun, key: string): number | null {
   return run.best_metrics?.[key] ?? null;
 }
 
+function SortHeader({ label, field, align = "right", sortKey, sortDir, onSort }: {
+  label: string; field: SortKey; align?: "left" | "right";
+  sortKey: SortKey; sortDir: SortDir; onSort: (k: SortKey) => void;
+}) {
+  return (
+    <th
+      className={`${align === "right" ? "text-right" : "text-left"} py-1 pr-2 cursor-pointer select-none`}
+      onClick={() => onSort(field)}
+      style={{ color: sortKey === field ? colors.text : colors.dim }}
+    >
+      {label}{sortKey === field ? (sortDir === "desc" ? " ↓" : " ↑") : ""}
+    </th>
+  );
+}
+
 export function Backtest() {
   const [strategies, setStrategies] = useState<StrategyInfo[]>([]);
   const [strategy, setStrategy] = useState("");
@@ -36,6 +51,7 @@ export function Backtest() {
   const [start, setStart] = useState("2025-08-01");
   const [end, setEnd] = useState("2026-03-14");
   const [maxLoss, setMaxLoss] = useState(500000);
+  const [initialCapital, setInitialCapital] = useState(2000000);
   const [params, setParams] = useState<Record<string, number>>({});
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -103,17 +119,17 @@ export function Backtest() {
     fetchParamRuns(strategy).then((r) => setParamRuns(r.runs)).catch(() => setParamRuns([]));
   };
 
-  const handleDelete = async (e: React.MouseEvent, runId: number) => {
+  const handleDelete = useCallback(async (e: React.MouseEvent, runId: number) => {
     e.stopPropagation();
     try {
       await deleteParamRun(runId);
       setParamRuns((prev) => prev.filter((r) => r.run_id !== runId));
-      if (selectedRunId === runId) setSelectedRunId(null);
+      setSelectedRunId((prev) => (prev === runId ? null : prev));
       refreshAll();
     } catch (err) {
       setError(`Delete failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  };
+  }, []);
 
   const loadRunParams = (run: ParamRun) => {
     setSelectedRunId(run.run_id);
@@ -129,16 +145,18 @@ export function Backtest() {
     setParams(newParams);
   };
 
-  const handleSort = (key: SortKey) => {
-    if (sortKey === key) {
-      setSortDir(sortDir === "desc" ? "asc" : "desc");
-    } else {
-      setSortKey(key);
+  const handleSort = useCallback((key: SortKey) => {
+    setSortKey((prev) => {
+      if (prev === key) {
+        setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+        return prev;
+      }
       setSortDir("desc");
-    }
-  };
+      return key;
+    });
+  }, []);
 
-  const handleViewCode = async (e: React.MouseEvent, runId: number) => {
+  const handleViewCode = useCallback(async (e: React.MouseEvent, runId: number) => {
     e.stopPropagation();
     setCodeLoading(true);
     try {
@@ -153,7 +171,7 @@ export function Backtest() {
     } finally {
       setCodeLoading(false);
     }
-  };
+  }, []);
 
   const sortedRuns = useMemo(() => {
     const runs = [...paramRuns];
@@ -193,7 +211,7 @@ export function Backtest() {
     setError(null);
     setOhlcvBars([]);
     try {
-      const r = await runBacktest({ strategy, symbol, start, end, params, max_loss: maxLoss });
+      const r = await runBacktest({ strategy, symbol, start, end, params, max_loss: maxLoss, initial_capital: initialCapital });
       setResult(r);
       refreshAll();
       const tfMin = r.timeframe_minutes ?? params.bar_agg ?? 1;
@@ -209,22 +227,14 @@ export function Backtest() {
 
   const m = result?.metrics;
   const equity = result?.equity_curve ?? [];
-  const initial = equity[0] ?? 2_000_000;
-  const totalPnl = equity.length > 0 ? equity[equity.length - 1] - initial : 0;
-  const bnhPnl = result?.bnh_equity?.length ? result.bnh_equity[result.bnh_equity.length - 1] - initial : 0;
-  const alpha = totalPnl - bnhPnl;
+  const { totalPnl, bnhPnl, alpha } = useMemo(() => {
+    const init = equity[0] ?? 2_000_000;
+    const tp = equity.length > 0 ? equity[equity.length - 1] - init : 0;
+    const bp = result?.bnh_equity?.length ? result.bnh_equity[result.bnh_equity.length - 1] - init : 0;
+    return { totalPnl: tp, bnhPnl: bp, alpha: tp - bp };
+  }, [equity, result?.bnh_equity]);
   const fmtPct = (v: number) => `${(v * 100).toFixed(1)}%`;
   const fmtDollar = (v: number) => `$${v >= 0 ? "+" : ""}${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-
-  const SortHeader = ({ label, field, align = "right" }: { label: string; field: SortKey; align?: "left" | "right" }) => (
-    <th
-      className={`${align === "right" ? "text-right" : "text-left"} py-1 pr-2 cursor-pointer select-none`}
-      onClick={() => handleSort(field)}
-      style={{ color: sortKey === field ? colors.text : colors.dim }}
-    >
-      {label}{sortKey === field ? (sortDir === "desc" ? " ↓" : " ↑") : ""}
-    </th>
-  );
 
   return (
     <div className="flex">
@@ -261,6 +271,9 @@ export function Backtest() {
             <option value={30}>30 min</option>
             <option value={60}>60 min</option>
           </select>
+        </ParamInput>
+        <ParamInput label="Init Capital ($)">
+          <input type="number" value={initialCapital} step={100000} onChange={(e) => setInitialCapital(Number(e.target.value))} className="w-full rounded px-1.5 py-1 text-[11px]" style={inputStyle} />
         </ParamInput>
         <hr style={{ borderColor: "var(--color-qe-card-border)", margin: "10px 0" }} />
         <SectionLabel>STRATEGY PARAMETERS</SectionLabel>
@@ -343,7 +356,7 @@ export function Backtest() {
               <div className="flex-1">
                 <ChartErrorBoundary fallbackLabel="Drawdown">
                   <ChartCard title="DRAWDOWN">
-                    <DrawdownChart equity={equity} startDate={start} timeframeMinutes={result.timeframe_minutes ?? (params.bar_agg ?? 1)} />
+                    <DrawdownChart equity={equity} bnhEquity={result.bnh_equity} startDate={start} timeframeMinutes={result.timeframe_minutes ?? (params.bar_agg ?? 1)} />
                   </ChartCard>
                 </ChartErrorBoundary>
               </div>
@@ -378,19 +391,19 @@ export function Backtest() {
                   <thead>
                     <tr style={{ borderBottom: "1px solid var(--color-qe-card-border)" }}>
                       <th className="text-left py-1 pr-1" style={{ color: colors.dim, width: 16 }}></th>
-                      <SortHeader label="Date" field="run_at" align="left" />
-                      <SortHeader label="Symbol" field="symbol" align="left" />
+                      <SortHeader label="Date" field="run_at" align="left" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+                      <SortHeader label="Symbol" field="symbol" align="left" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
                       <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>Period</th>
                       <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>TF</th>
-                      <SortHeader label="Type" field="search_type" align="left" />
+                      <SortHeader label="Type" field="search_type" align="left" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
                       <th className="text-right py-1 pr-2" style={{ color: colors.dim }}>Capital</th>
-                      <SortHeader label="Sharpe" field="sharpe" />
-                      <SortHeader label="Sortino" field="sortino" />
-                      <SortHeader label="Alpha" field="alpha" />
-                      <SortHeader label="PnL" field="total_pnl" />
-                      <SortHeader label="Win Rate" field="win_rate" />
-                      <SortHeader label="Max DD" field="max_drawdown_pct" />
-                      <SortHeader label="PF" field="profit_factor" />
+                      <SortHeader label="Sharpe" field="sharpe" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+                      <SortHeader label="Sortino" field="sortino" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+                      <SortHeader label="Alpha" field="alpha" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+                      <SortHeader label="PnL" field="total_pnl" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+                      <SortHeader label="Win Rate" field="win_rate" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+                      <SortHeader label="Max DD" field="max_drawdown_pct" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+                      <SortHeader label="PF" field="profit_factor" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
                       <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>Hash</th>
                       <th className="text-right py-1" style={{ color: colors.dim }}></th>
                     </tr>
@@ -406,8 +419,9 @@ export function Backtest() {
                       const pf = getMetric(run, "profit_factor");
                       const isActive = activeRunId === run.run_id;
                       const isSelected = selectedRunId === run.run_id;
+                      const fmtPeriod = (d: string) => d.slice(2).replace(/-/g, "");
                       const period = run.train_start && run.train_end
-                        ? `${run.train_start.slice(5, 10)}→${run.train_end.slice(5, 10)}`
+                        ? `${fmtPeriod(run.train_start)}→${fmtPeriod(run.train_end)}`
                         : "—";
                       const tfMatch = run.notes?.match(/tf=(\d+)min/);
                       const tf = tfMatch ? `${tfMatch[1]}m` : "—";
@@ -427,7 +441,7 @@ export function Backtest() {
                             {isSelected && <span title="Loaded" style={{ color: "#4ade80", fontSize: 8, marginRight: 2 }}>●</span>}
                             {isActive && <span title="Active params" style={{ color: colors.green, fontSize: 8 }}>★</span>}
                           </td>
-                          <td className="py-1 pr-2" style={{ color: colors.text }}>{run.run_at?.slice(0, 10) ?? "—"}</td>
+                          <td className="py-1 pr-2" style={{ color: colors.text }}>{run.run_at ? run.run_at.slice(5, 16).replace("T", " ") : "—"}</td>
                           <td className="py-1 pr-2" style={{ color: colors.muted }}>{run.symbol ?? "—"}</td>
                           <td className="py-1 pr-2" style={{ color: colors.dim }}>{period}</td>
                           <td className="py-1 pr-2" style={{ color: colors.cyan }}>{tf}</td>
