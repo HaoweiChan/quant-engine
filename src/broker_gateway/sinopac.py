@@ -1,10 +1,11 @@
 """SinopacGateway — live account state + market data from shioaji (TAIFEX futures)."""
 from __future__ import annotations
 
+import time
 import asyncio
 import threading
-from datetime import datetime
 from typing import Any
+from datetime import datetime
 
 import structlog
 
@@ -55,8 +56,11 @@ class SinopacGateway(BrokerGateway):
     def __init__(self, cache_ttl: float = 10.0) -> None:
         super().__init__(cache_ttl=cache_ttl)
         self._api: Any = None
+        self._account_id: str | None = None
         self._connected = False
         self._connect_error: str | None = None
+        self._last_connect_attempt_ts = 0.0
+        self._reconnect_interval_secs = 20.0
         self._tick_loop: asyncio.AbstractEventLoop | None = None
 
     @property
@@ -80,44 +84,71 @@ class SinopacGateway(BrokerGateway):
         2. Account-ID-based GSM secrets  (ACCOUNT_ID_API_KEY, ACCOUNT_ID_API_SECRET)
         3. Legacy group-based GSM lookup via secrets.toml [sinopac] section
         """
+        self._account_id = account_id or self._account_id
+        self._last_connect_attempt_ts = time.monotonic()
         try:
             _sj = _ensure_shioaji()
         except ImportError as exc:
             self._connect_error = str(exc)
             logger.warning("sinopac_shioaji_missing", error=str(exc))
             return
+        self._connected = False
+        self._connect_error = None
+        candidates: list[tuple[str, str, str]] = []
+        if api_key and api_secret:
+            candidates.append(("explicit", api_key, api_secret))
         if api_key is None or api_secret is None:
             from src.broker_gateway.registry import load_credentials
             from src.secrets.manager import get_secret_manager
             sm = get_secret_manager()
             if account_id:
                 creds = load_credentials(account_id)
-                api_key = creds.get("api_key") or api_key
-                api_secret = creds.get("api_secret") or api_secret
-            if not api_key or not api_secret:
-                try:
-                    group = sm.get_group("sinopac")
-                    api_key = api_key or group.get("api_key")
-                    api_secret = api_secret or group.get("secret_key")
-                except Exception:
-                    pass
-        if not api_key or not api_secret:
+                acct_key = creds.get("api_key")
+                acct_secret = creds.get("api_secret")
+                if acct_key and acct_secret:
+                    candidates.append(("account_specific", acct_key, acct_secret))
+            try:
+                group = sm.get_group("sinopac")
+                group_key = group.get("api_key")
+                group_secret = group.get("secret_key")
+                if group_key and group_secret:
+                    candidates.append(("group_fallback", group_key, group_secret))
+            except Exception:
+                pass
+        unique_candidates: list[tuple[str, str, str]] = []
+        seen_pairs: set[tuple[str, str]] = set()
+        for source, key, secret in candidates:
+            pair = (key, secret)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            unique_candidates.append((source, key, secret))
+        if not unique_candidates:
             self._connect_error = (
                 f"No credentials found for account '{account_id}'. "
                 "Enter them in Trading → Accounts."
             )
             logger.warning("sinopac_no_credentials", account_id=account_id)
             return
-        try:
-            self._api = _sj.Shioaji()
-            self._api.login(api_key=api_key, secret_key=api_secret)
-            self._connected = True
-            self._connect_error = None
-            logger.info("sinopac_gateway_connected", account_id=account_id)
-            self._subscribe_market_data()
-        except Exception as exc:
-            self._connect_error = f"Login failed: {exc}"
-            logger.warning("sinopac_login_failed", account_id=account_id, error=str(exc))
+        last_error: Exception | None = None
+        for source, key, secret in unique_candidates:
+            try:
+                self._api = _sj.Shioaji()
+                self._api.login(api_key=key, secret_key=secret)
+                self._connected = True
+                self._connect_error = None
+                logger.info("sinopac_gateway_connected", account_id=account_id, credential_source=source)
+                self._subscribe_market_data()
+                return
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "sinopac_login_failed",
+                    account_id=account_id,
+                    credential_source=source,
+                    error=str(exc),
+                )
+        self._connect_error = f"Login failed: {last_error}" if last_error else "Login failed"
 
     def _subscribe_market_data(self) -> None:
         """Subscribe to near-month TX tick data and bridge to WebSocket broadcaster."""
@@ -205,6 +236,8 @@ class SinopacGateway(BrokerGateway):
         _SUBSCRIBED_CONTRACTS.clear()
 
     def _fetch_snapshot(self) -> AccountSnapshot:
+        if not self._connected or not self._api:
+            self._maybe_reconnect_disconnected()
         if not self._connected or not self._api:
             return AccountSnapshot.disconnected()
         try:
@@ -306,8 +339,21 @@ class SinopacGateway(BrokerGateway):
         logger.info("sinopac_attempting_reconnect")
         _sj = _ensure_shioaji()
         self._api = _sj.Shioaji()
-        self.connect()
+        self.connect(account_id=self._account_id)
         logger.info("sinopac_reconnected")
+
+    def _maybe_reconnect_disconnected(self) -> None:
+        if self._connected:
+            return
+        now = time.monotonic()
+        if now - self._last_connect_attempt_ts < self._reconnect_interval_secs:
+            return
+        logger.info("sinopac_disconnected_retry", account_id=self._account_id)
+        try:
+            self.connect(account_id=self._account_id)
+        except Exception as exc:
+            self._connect_error = f"Reconnect failed: {exc}"
+            logger.warning("sinopac_reconnect_failed", account_id=self._account_id, error=str(exc))
 
 
 def _point_value_for(code: str) -> float:
