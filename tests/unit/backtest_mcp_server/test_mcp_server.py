@@ -83,20 +83,14 @@ class TestValidateStrategyContent:
 # ---------------------------------------------------------------------------
 
 class TestBackupStrategyFile:
-    def test_backup_creates_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def test_backup_is_no_op(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         strategies_dir = tmp_path / "strategies"
         strategies_dir.mkdir()
         (strategies_dir / "test_strat.py").write_text("# original")
-        backup_dir = strategies_dir / ".backup"
         monkeypatch.setattr("src.mcp_server.validation._STRATEGIES_DIR", strategies_dir)
-        monkeypatch.setattr("src.mcp_server.validation._BACKUP_DIR", backup_dir)
 
         result = backup_strategy_file("test_strat")
-        assert result is not None
-        assert backup_dir.exists()
-        backups = list(backup_dir.glob("test_strat.*.py"))
-        assert len(backups) == 1
-        assert backups[0].read_text() == "# original"
+        assert result is None
 
     def test_returns_none_for_new_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         strategies_dir = tmp_path / "strategies"

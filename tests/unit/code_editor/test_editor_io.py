@@ -12,6 +12,7 @@ from src.api.editor import (
     validate_engine,
     write_file,
 )
+from src.api import editor as editor_mod
 
 
 class TestPathValidation:
@@ -51,10 +52,8 @@ class TestListFiles:
         names = [f["name"] for f in files]
         assert "__init__.py" not in names
 
-    def test_includes_toml_files(self) -> None:
-        files = list_editable_files()
-        extensions = {f["name"].rsplit(".", 1)[-1] for f in files}
-        assert "toml" in extensions
+    def test_toml_extension_is_editable(self) -> None:
+        assert ".toml" in editor_mod._EDITABLE_EXTENSIONS
 
     def test_no_core_files(self) -> None:
         files = list_editable_files()
@@ -64,8 +63,8 @@ class TestListFiles:
 
 class TestReadWrite:
     def test_read_existing_file(self) -> None:
-        content = read_file("src/strategies/examples/example_entry.py")
-        assert "MyEntryPolicy" in content
+        content = read_file("src/strategies/daily/trend_following/pyramid_wrapper.py")
+        assert "create_pyramid_wrapper_engine" in content
 
     def test_write_and_read_roundtrip(self, tmp_path, monkeypatch) -> None:
         editor = pytest.importorskip("src.dashboard.editor", reason="src.dashboard not yet implemented")

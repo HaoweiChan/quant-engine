@@ -27,7 +27,7 @@ class TestDiscovery:
         slug = "daily/trend_following/pyramid_wrapper"
         assert slug in all_strats
         info = all_strats[slug]
-        assert info.factory == "create_pyramid_engine"
+        assert info.factory == "create_pyramid_wrapper_engine"
 
     def test_skips_files_without_param_schema(self):
         reg = _fresh_registry()
