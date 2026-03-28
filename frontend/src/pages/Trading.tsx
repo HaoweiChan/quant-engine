@@ -13,6 +13,10 @@ import type { AccountInfo, StrategyInfo, WarRoomSession, WarRoomData, DeployLogE
 import { colors } from "@/lib/theme";
 import { useLiveFeed } from "@/hooks/useLiveFeed";
 import { useRiskAlerts } from "@/hooks/useRiskAlerts";
+import { WarRoomTopBar } from "@/components/WarRoomTopBar";
+import { RiskLimiterPanel } from "@/components/RiskLimiterPanel";
+import { OrderBlotterPane } from "@/components/OrderBlotterPane";
+import type { RiskGuard } from "@/components/RiskLimiterPanel";
 
 const tradingSubTabs = [
   { value: "accounts", label: "Accounts" },
@@ -522,8 +526,19 @@ function WarRoomTab() {
   }
   const activeAccountData = activeAccountId ? accounts[activeAccountId] : null;
 
+  const totalEquity = Object.values(accounts).reduce((sum, a) => sum + (a.equity ?? 0), 0);
+  const totalMarginUsed = Object.values(accounts).reduce((sum, a) => sum + (a.margin_used ?? 0), 0);
+  const totalMarginAvail = Object.values(accounts).reduce((sum, a) => sum + (a.margin_available ?? 0), 0);
+  const marginRatio = (totalMarginUsed + totalMarginAvail) > 0 ? totalMarginUsed / (totalMarginUsed + totalMarginAvail) : 0;
+  const riskGuards: RiskGuard[] = activeAccountData ? [
+    { label: "Max Daily Loss", current: Math.abs(activeAccountData.realized_pnl_today ?? 0), limit: 500_000 },
+    { label: "Margin Utilization", current: activeAccountData.margin_used ?? 0, limit: (activeAccountData.margin_used ?? 0) + (activeAccountData.margin_available ?? 0), unit: "" },
+  ] : [];
+
   return (
-    <div className="p-3 overflow-y-auto">
+    <div className="overflow-y-auto">
+      <WarRoomTopBar totalEquity={totalEquity} marginRatio={marginRatio} />
+      <div className="p-3">
       <SectionLabel>ACCOUNT OVERVIEW (Click a card to isolate risk book)</SectionLabel>
       <div className="flex flex-wrap gap-2.5 mb-5">
         {Object.entries(accounts).map(([id, info]) => {
@@ -684,6 +699,17 @@ function WarRoomTab() {
             )}
           </div>
         )}
+      </div>
+      {/* Risk limiters + live blotter */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+        <div className="rounded-md p-3" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
+          <SectionLabel>RISK GUARDS</SectionLabel>
+          <RiskLimiterPanel guards={riskGuards} />
+        </div>
+        <div className="rounded-md p-3" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
+          <OrderBlotterPane />
+        </div>
+      </div>
       </div>
     </div>
   );

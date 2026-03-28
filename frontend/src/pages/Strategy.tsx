@@ -1,24 +1,29 @@
 import React, { useRef } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { StrategyParamSidebar } from "@/components/StrategyParamSidebar";
 import { useUiStore } from "@/stores/uiStore";
 import { CodeEditor } from "@/pages/strategy/CodeEditor";
-import { GridSearch } from "@/pages/strategy/GridSearch";
-import { MonteCarlo } from "@/pages/strategy/MonteCarlo";
-import { Optimizer } from "@/pages/strategy/Optimizer";
+import { TearSheet } from "@/pages/strategy/TearSheet";
+import { ParamSweep } from "@/pages/strategy/ParamSweep";
+import { StressTest } from "@/pages/strategy/StressTest";
+import { Portfolio } from "@/pages/strategy/Portfolio";
 import { colors } from "@/lib/theme";
+
 
 const subTabs = [
   { value: "editor", label: "Code Editor" },
-  { value: "optimizer", label: "Optimizer" },
-  { value: "gridsearch", label: "Grid Search" },
-  { value: "montecarlo", label: "Monte Carlo" },
+  { value: "tearsheet", label: "Tear Sheet" },
+  { value: "paramsweep", label: "Param Sweep" },
+  { value: "stresstest", label: "Stress Test" },
+  { value: "portfolio", label: "Portfolio" },
 ] as const;
 
 const subTabComponents: Record<string, React.FC> = {
   editor: CodeEditor,
-  optimizer: Optimizer,
-  gridsearch: GridSearch,
-  montecarlo: MonteCarlo,
+  tearsheet: TearSheet,
+  paramsweep: ParamSweep,
+  stresstest: StressTest,
+  portfolio: Portfolio,
 };
 
 export function Strategy() {
@@ -28,39 +33,42 @@ export function Strategy() {
   visited.current.add(subTab);
 
   return (
-    <div>
-      <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)}>
-        <TabsList
-          className="h-auto w-full justify-start rounded-none border-b p-0"
-          style={{ background: colors.bg, borderColor: colors.cardBorder }}
-        >
-          {subTabs.map((t) => (
-            <TabsTrigger
-              key={t.value}
-              value={t.value}
-              className="rounded-none border-b px-3 py-1.5 text-[9px] font-normal data-[state=active]:shadow-none"
-              style={{
-                fontFamily: "var(--font-mono)",
-                color: subTab === t.value ? colors.muted : colors.dim,
-                background: "transparent",
-                borderBottomColor: subTab === t.value ? colors.blue : "transparent",
-              }}
-            >
-              {t.label}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-      </Tabs>
-      <div>
-        {subTabs.map((t) => {
-          if (!visited.current.has(t.value)) return null;
-          const Comp = subTabComponents[t.value];
-          return (
-            <div key={t.value} style={{ display: subTab === t.value ? "block" : "none" }}>
-              <Comp />
-            </div>
-          );
-        })}
+    <div className="flex">
+      <StrategyParamSidebar />
+      <div className="flex-1" style={{ minWidth: 0 }}>
+        <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)}>
+          <TabsList
+            className="h-auto w-full justify-start rounded-none border-b p-0"
+            style={{ background: colors.bg, borderColor: colors.cardBorder }}
+          >
+            {subTabs.map((t) => (
+              <TabsTrigger
+                key={t.value}
+                value={t.value}
+                className="rounded-none border-b px-4 py-2 text-xs font-normal data-[state=active]:shadow-none"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  color: subTab === t.value ? colors.muted : colors.dim,
+                  background: "transparent",
+                  borderBottomColor: subTab === t.value ? colors.blue : "transparent",
+                }}
+              >
+                {t.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+        <div>
+          {subTabs.map((t) => {
+            if (!visited.current.has(t.value)) return null;
+            const Comp = subTabComponents[t.value];
+            return (
+              <div key={t.value} style={{ display: subTab === t.value ? "block" : "none" }}>
+                <Comp />
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );

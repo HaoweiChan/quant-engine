@@ -58,6 +58,19 @@ export interface BacktestResult {
   end?: string;
 }
 
+export interface MCSimulationResult {
+  bands: { p5: number[]; p25: number[]; p50: number[]; p75: number[]; p95: number[] };
+  var_95: number;
+  var_99: number;
+  cvar_95: number;
+  cvar_99: number;
+  median_final: number;
+  prob_ruin: number;
+  method: string;
+  n_paths: number;
+  n_days: number;
+}
+
 export interface OptimizerStatus {
   running: boolean;
   finished: boolean;
@@ -120,12 +133,72 @@ export async function runBacktest(params: {
   params?: Record<string, number>;
   max_loss?: number;
   initial_capital?: number;
+  slippage_bps?: number;
+  commission_bps?: number;
+  provenance?: Record<string, unknown>;
 }): Promise<BacktestResult> {
   return fetchJSON("/api/backtest/run", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
   });
+}
+
+export async function runMonteCarloSim(params: {
+  strategy: string;
+  symbol: string;
+  start: string;
+  end: string;
+  params?: Record<string, number>;
+  initial_equity?: number;
+  slippage_bps?: number;
+  commission_bps?: number;
+  n_paths?: number;
+  n_days?: number;
+  method?: string;
+}): Promise<MCSimulationResult> {
+  return fetchJSON("/api/monte-carlo", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+}
+
+export async function fetchMeta(): Promise<{ git_commit: string; version: string }> {
+  return fetchJSON("/api/meta");
+}
+
+export async function killSwitchHalt(): Promise<{ status: string }> {
+  return fetchJSON("/api/kill-switch/halt", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "CONFIRM" }),
+  });
+}
+
+export async function killSwitchFlatten(): Promise<{ status: string }> {
+  return fetchJSON("/api/kill-switch/flatten", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "CONFIRM" }),
+  });
+}
+
+export async function killSwitchResume(): Promise<{ status: string }> {
+  return fetchJSON("/api/kill-switch/resume", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: "CONFIRM" }),
+  });
+}
+
+export interface HeartbeatResponse {
+  brokers: { broker: string; latency_ms: number | null; status: string }[];
+  timestamp: string;
+}
+
+export async function fetchHeartbeat(): Promise<HeartbeatResponse> {
+  return fetchJSON("/api/heartbeat");
 }
 
 export async function startOptimizer(params: {
@@ -137,6 +210,8 @@ export async function startOptimizer(params: {
   is_fraction?: number;
   objective?: string;
   n_jobs?: number;
+  slippage_bps?: number;
+  commission_bps?: number;
 }): Promise<{ status: string }> {
   return fetchJSON("/api/optimizer/run", {
     method: "POST",
@@ -394,4 +469,63 @@ export async function stopSession(sessionId: string): Promise<{ session_id: stri
 
 export async function pauseSession(sessionId: string): Promise<{ session_id: string; status: string }> {
   return fetchJSON(`/api/sessions/${sessionId}/pause`, { method: "POST" });
+}
+
+// --- Portfolio ---
+
+export interface PortfolioStrategyEntry {
+  slug: string;
+  params?: Record<string, number> | null;
+  weight: number;
+}
+
+export interface PortfolioIndividual {
+  slug: string;
+  weight: number;
+  metrics: Record<string, number>;
+  equity_curve: number[];
+}
+
+export interface PortfolioBacktestResult {
+  individual: PortfolioIndividual[];
+  merged_equity_curve: number[];
+  merged_daily_returns: number[];
+  merged_metrics: Record<string, number>;
+  correlation_matrix: number[][];
+  strategy_slugs: string[];
+}
+
+export async function runPortfolioBacktest(params: {
+  strategies: PortfolioStrategyEntry[];
+  symbol: string;
+  start: string;
+  end: string;
+  initial_capital?: number;
+  slippage_bps?: number;
+  commission_bps?: number;
+}): Promise<PortfolioBacktestResult> {
+  return fetchJSON("/api/portfolio/backtest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+}
+
+export async function runPortfolioStress(params: {
+  strategies: PortfolioStrategyEntry[];
+  symbol: string;
+  start: string;
+  end: string;
+  initial_capital?: number;
+  slippage_bps?: number;
+  commission_bps?: number;
+  n_paths?: number;
+  n_days?: number;
+  method?: string;
+}): Promise<MCSimulationResult> {
+  return fetchJSON("/api/portfolio/stress-test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
 }

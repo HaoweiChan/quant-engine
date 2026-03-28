@@ -1,22 +1,20 @@
-import React, { useRef } from "react";
+import React, { useEffect, useRef } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useUiStore } from "@/stores/uiStore";
-import { Backtest } from "@/pages/Backtest";
 import { DataHub } from "@/pages/DataHub";
 import { Strategy } from "@/pages/Strategy";
 import { Trading } from "@/pages/Trading";
 
+
 const primaryTabs = [
   { value: "datahub", label: "Data Hub" },
   { value: "strategy", label: "Strategy" },
-  { value: "backtest", label: "Backtest" },
   { value: "trading", label: "Trading" },
 ] as const;
 
 const tabComponents: Record<string, React.FC> = {
   datahub: DataHub,
   strategy: Strategy,
-  backtest: Backtest,
   trading: Trading,
 };
 
@@ -42,10 +40,18 @@ function TabContent() {
 export default function App() {
   const primaryTab = useUiStore((s) => s.primaryTab);
   const setPrimaryTab = useUiStore((s) => s.setPrimaryTab);
+  const setStrategySubTab = useUiStore((s) => s.setStrategySubTab);
+
+  // Redirect: if URL has /backtest, navigate to Strategy > Tear Sheet
+  useEffect(() => {
+    if (window.location.pathname === "/backtest" || window.location.hash.includes("backtest")) {
+      setPrimaryTab("strategy");
+      setStrategySubTab("tearsheet");
+    }
+  }, []);
 
   return (
     <div className="min-h-screen" style={{ background: "var(--color-qe-bg)" }}>
-      {/* Header */}
       <div
         className="px-5 py-3"
         style={{
@@ -62,12 +68,10 @@ export default function App() {
             className="text-[11px] font-normal"
             style={{ fontFamily: "var(--font-mono)", color: "var(--color-qe-muted)" }}
           >
-            v2 — FastAPI + React
+            v3 — FastAPI + React
           </span>
         </h1>
       </div>
-
-      {/* Primary tab navigation */}
       <Tabs value={primaryTab} onValueChange={(v) => setPrimaryTab(v as typeof primaryTab)}>
         <TabsList
           className="h-auto w-full justify-start rounded-none border-b p-0"
@@ -83,13 +87,9 @@ export default function App() {
               className="rounded-none border-b-2 border-transparent px-4 py-2.5 text-[12px] font-normal data-[state=active]:border-qe-blue data-[state=active]:font-semibold data-[state=active]:shadow-none"
               style={{
                 fontFamily: "var(--font-mono)",
-                color:
-                  primaryTab === t.value
-                    ? "var(--color-qe-text)"
-                    : "var(--color-qe-muted)",
+                color: primaryTab === t.value ? "var(--color-qe-text)" : "var(--color-qe-muted)",
                 background: "transparent",
-                borderBottomColor:
-                  primaryTab === t.value ? "var(--color-qe-blue)" : "transparent",
+                borderBottomColor: primaryTab === t.value ? "var(--color-qe-blue)" : "transparent",
               }}
             >
               {t.label}
@@ -97,8 +97,6 @@ export default function App() {
           ))}
         </TabsList>
       </Tabs>
-
-      {/* Page content */}
       <div style={{ minHeight: "calc(100vh - 90px)" }}>
         <TabContent />
       </div>
