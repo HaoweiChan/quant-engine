@@ -5,6 +5,7 @@ import logging
 import sys
 import time
 from datetime import date
+from pathlib import Path
 
 import shioaji as sj
 
@@ -20,10 +21,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = PROJECT_ROOT / "data" / "taifex_data.db"
+
 SYMBOLS = ["Futures.TXF.TXFR1", "Futures.MXF.MXFR1"]
 SYMBOL_SHORT = {"Futures.TXF.TXFR1": "TX", "Futures.MXF.MXFR1": "MTX"}
-START = date(2020, 3, 22)
-END = date(2026, 3, 14)
+START = date(2016, 3, 28)
+END = date.today()
 
 
 def main() -> None:
@@ -43,8 +47,9 @@ def main() -> None:
     connector._api_key = creds["api_key"]
     connector._secret_key = creds["secret_key"]
 
-    db = Database(connection="sqlite:///taifex_data.db")
-    logger.info("Database: taifex_data.db")
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    db = Database(connection=f"sqlite:///{DB_PATH}")
+    logger.info("Database: %s", DB_PATH)
 
     for symbol in SYMBOLS:
         short = SYMBOL_SHORT[symbol]
