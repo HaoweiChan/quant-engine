@@ -45,13 +45,17 @@ async def list_accounts() -> list[dict]:
         return []
     result = []
     for a in accounts:
+        try:
+            cred_status = _check_credentials(a.id)
+        except Exception:
+            cred_status = {}
         entry: dict = {
             "id": a.id,
             "broker": a.broker,
             "display_name": a.display_name,
             "guards": a.guards,
             "strategies": a.strategies,
-            "credential_status": _check_credentials(a.id),
+            "credential_status": cred_status,
         }
         result.append(entry)
     return result
@@ -141,6 +145,11 @@ async def update_strategies(account_id: str, req: UpdateStrategiesRequest) -> di
 
 
 def _check_credentials(account_id: str) -> dict[str, bool]:
+    import os
+    # Skip GSM lookups when no GCP credentials are configured to avoid
+    # blocking the endpoint with a hanging gRPC channel initialization.
+    if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") and not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        return {"api_key": False, "api_secret": False, "password": False}
     from src.broker_gateway.registry import _gsm_key
     from src.secrets.manager import get_secret_manager
     fields = {"api_key": "API_KEY", "api_secret": "API_SECRET", "password": "PASSWORD"}

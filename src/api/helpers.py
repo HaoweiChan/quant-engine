@@ -347,6 +347,8 @@ def start_optimizer_run(
     n_jobs: int = 1,
     factory_module: str = "src.strategies.atr_mean_reversion",
     factory_name: str = "create_atr_mean_reversion_engine",
+    slippage_bps: float = 0.0,
+    commission_bps: float = 0.0,
 ) -> bool:
     """Spawn the optimizer as a subprocess. Returns False if already running."""
     with _opt_lock:
@@ -363,6 +365,8 @@ def start_optimizer_run(
             "n_jobs": n_jobs,
             "factory_module": factory_module,
             "factory_name": factory_name,
+            "slippage_bps": slippage_bps,
+            "commission_bps": commission_bps,
         }
         tmpdir = tempfile.mkdtemp(prefix="qe_opt_")
         config_path = os.path.join(tmpdir, "config.json")
@@ -519,6 +523,9 @@ def run_strategy_backtest(
     initial_equity: float = 2_000_000.0,
     strategy_params: dict | None = None,
     max_loss: float = 500_000.0,
+    slippage_bps: float = 0.0,
+    commission_bps: float = 0.0,
+    provenance: dict | None = None,
 ) -> dict:
     """Run a backtest on real DB data via the MCP facade.
 
@@ -537,6 +544,10 @@ def run_strategy_backtest(
 
     merged_params = dict(strategy_params or {})
     merged_params["max_loss"] = max_loss
+    if slippage_bps:
+        merged_params["slippage_bps"] = slippage_bps
+    if commission_bps:
+        merged_params["commission_bps"] = commission_bps
 
     result = run_backtest_realdata_for_mcp(
         symbol=symbol,
@@ -548,6 +559,8 @@ def run_strategy_backtest(
     )
     if "error" in result:
         raise ValueError(result["error"])
+    if provenance:
+        result["provenance"] = provenance
     return result
 
 

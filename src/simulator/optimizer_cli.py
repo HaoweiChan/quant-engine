@@ -115,6 +115,8 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
     is_fraction: float = float(cfg.get("is_fraction", 0.8))
     objective: str = cfg.get("objective", "sharpe")
     n_jobs: int = int(cfg.get("n_jobs", 1))
+    slippage_bps: float = float(cfg.get("slippage_bps", 0.0))
+    commission_bps: float = float(cfg.get("commission_bps", 0.0))
 
     db_path = Path(__file__).resolve().parent.parent.parent / "data" / "taifex_data.db"
     db = Database(f"sqlite:///{db_path}")
@@ -130,6 +132,12 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
         for b in raw
     ]
     timestamps = [b.timestamp for b in raw]
+
+    # Inject cost model into each grid combo so the engine sees them
+    if slippage_bps:
+        param_grid["slippage_bps"] = [slippage_bps]
+    if commission_bps:
+        param_grid["commission_bps"] = [commission_bps]
 
     opt = StrategyOptimizer(
         adapter=TaifexAdapter(),

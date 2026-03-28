@@ -137,6 +137,20 @@ class RiskMonitor:
                     self._on_mode_change("rule_only")
                 return RiskAction.HALT_NEW_ENTRIES
 
+        # Priority 4.7: Combined position limit across all strategies
+        max_combined = self._config.max_combined_positions
+        if max_combined is not None and len(account.positions) >= max_combined:
+            self._emit_event(
+                now,
+                RiskAction.HALT_NEW_ENTRIES,
+                "combined_position_limit",
+                {
+                    "open_positions": len(account.positions),
+                    "limit": max_combined,
+                },
+            )
+            return RiskAction.HALT_NEW_ENTRIES
+
         # Priority 5: Margin ratio
         if account.margin_ratio < self._config.margin_ratio_threshold and account.positions:
             self._emit_event(

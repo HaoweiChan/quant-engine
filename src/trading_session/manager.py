@@ -27,6 +27,7 @@ class SessionManager:
         self._store = store or SnapshotStore()
         self._session_db = session_db
         self._sessions: dict[str, TradingSession] = {}
+        self.halt_active: bool = False
 
     def restore_from_db(self) -> None:
         """Load persisted sessions from DB, then supplement from account configs."""
@@ -161,3 +162,39 @@ class SessionManager:
 
     def get_equity_curve(self, session_id: str, days: int = 30) -> list[tuple]:
         return self._store.get_equity_curve(session_id, days)
+
+    def halt(self) -> None:
+        """Set global halt flag — reject all new orders."""
+        self.halt_active = True
+        for session in self._sessions.values():
+            if session.status == "active":
+                session.status = "halted"
+                if self._session_db:
+                    self._session_db.update_status(session.session_id, "halted")
+        logger.warning("global_halt_activated", sessions_halted=len(self._sessions))
+
+    def flatten(self) -> None:
+        """Send market-close orders for all positions and halt."""
+        self.halt_active = True
+        for session in self._sessions.values():
+            if session.status in ("active", "halted"):
+                gw = self._registry.get_gateway(session.account_id)
+                if gw:
+                    try:
+                        gw.close_all_positions(session.symbol)
+                    except Exception:
+                        logger.exception("flatten_failed", session_id=session.session_id)
+                session.status = "flattening"
+                if self._session_db:
+                    self._session_db.update_status(session.session_id, "flattening")
+        logger.warning("global_flatten_activated")
+
+    def resume(self) -> None:
+        """Lift the global halt flag."""
+        self.halt_active = False
+        for session in self._sessions.values():
+            if session.status in ("halted", "flattening"):
+                session.status = "stopped"
+                if self._session_db:
+                    self._session_db.update_status(session.session_id, "stopped")
+        logger.info("global_halt_lifted")

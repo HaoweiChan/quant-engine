@@ -7,8 +7,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routes import accounts, backtest, coverage, crawl, deploy, editor, ohlcv, optimizer, params, sessions, strategies, war_room
+from src.api.routes import accounts, backtest, coverage, crawl, deploy, editor, heartbeat, kill_switch, meta, monte_carlo, ohlcv, optimizer, params, portfolio, sessions, strategies, war_room
 from src.api.ws import backtest as ws_backtest
+from src.api.ws import blotter as ws_blotter
 from src.api.ws import live_feed, risk
 
 _main_loop: asyncio.AbstractEventLoop | None = None
@@ -58,12 +59,18 @@ app.include_router(editor.router)
 app.include_router(params.router)
 app.include_router(deploy.router)
 app.include_router(sessions.router)
+app.include_router(meta.router)
+app.include_router(kill_switch.router)
+app.include_router(heartbeat.router)
+app.include_router(monte_carlo.router)
+app.include_router(portfolio.router)
 
 
 # WebSocket routes
 app.include_router(live_feed.router)
 app.include_router(ws_backtest.router)
 app.include_router(risk.router)
+app.include_router(ws_blotter.router)
 
 
 @app.get("/api/health")

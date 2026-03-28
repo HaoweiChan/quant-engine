@@ -23,6 +23,8 @@ class OptimizerRequest(BaseModel):
     is_fraction: float = 0.8
     objective: str = "sharpe"
     n_jobs: int = 1
+    slippage_bps: float = 0.0
+    commission_bps: float = 0.0
 
 
 @router.post("/optimizer/run", status_code=202)
@@ -40,6 +42,8 @@ async def run_optimizer(req: OptimizerRequest) -> dict:
         n_jobs=req.n_jobs,
         factory_module=info.module,
         factory_name=info.factory,
+        slippage_bps=req.slippage_bps,
+        commission_bps=req.commission_bps,
     )
     if not started:
         raise HTTPException(status_code=409, detail="Optimizer already running")

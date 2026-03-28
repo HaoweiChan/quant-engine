@@ -24,6 +24,7 @@ class RiskConfig:
     max_beta_absolute: float = 2.0
     max_concentration_pct: float = 0.50
     portfolio_risk_enabled: bool = False
+    max_combined_positions: int | None = None
 
 
 @dataclass

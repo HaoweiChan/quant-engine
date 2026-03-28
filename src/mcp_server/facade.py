@@ -433,6 +433,19 @@ def run_backtest_realdata_for_mcp(
     bnh_returns = np.diff(closes) / closes[:-1] if len(closes) > 1 else np.array([0.0])
     bnh_eq = initial_equity * np.cumprod(np.concatenate([[1.0], 1 + bnh_returns]))
 
+    # Aggregate per-bar equity to true daily returns (last equity per date)
+    daily_eq: dict[str, float] = {}
+    for ts_str, e in zip(timestamps, eq):
+        day = ts_str[:10] if isinstance(ts_str, str) else str(ts_str)[:10]
+        daily_eq[day] = e
+    daily_eq_arr = np.array(list(daily_eq.values()))
+    true_daily_returns = (
+        np.diff(daily_eq_arr) / daily_eq_arr[:-1]
+        if len(daily_eq_arr) > 1
+        else np.array([0.0])
+    )
+    true_daily_returns = true_daily_returns[np.isfinite(true_daily_returns)]
+
     base = _format_backtest_result(
         result,
         label=f"real:{symbol}:{start}:{end}",
@@ -440,12 +453,11 @@ def run_backtest_realdata_for_mcp(
         n_bars=len(bars),
         extra={"symbol": symbol, "start": start, "end": end},
     )
-    # Compute alpha: strategy total return minus buy-and-hold return
     strat_total_ret = (eq[-1] - eq[0]) / eq[0] if len(eq) > 1 and eq[0] > 0 else 0.0
     bnh_total_ret = (bnh_eq[-1] - bnh_eq[0]) / bnh_eq[0] if len(bnh_eq) > 1 and bnh_eq[0] > 0 else 0.0
     alpha = float(strat_total_ret - bnh_total_ret)
     base["metrics"]["alpha"] = alpha
-    base["daily_returns"] = strat_returns
+    base["daily_returns"] = true_daily_returns
     base["equity_curve"] = result.equity_curve
     base["bnh_returns"] = bnh_returns
     base["bnh_equity"] = bnh_eq.tolist()

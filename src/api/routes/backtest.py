@@ -17,6 +17,9 @@ class BacktestRequest(BaseModel):
     params: dict | None = None
     max_loss: float = 500_000.0
     initial_capital: float = 2_000_000.0
+    slippage_bps: float = 0.0
+    commission_bps: float = 0.0
+    provenance: dict | None = None
 
 
 @router.post("/backtest/run")
@@ -30,6 +33,9 @@ async def run_backtest(req: BacktestRequest) -> dict:
             initial_equity=req.initial_capital,
             strategy_params=req.params,
             max_loss=req.max_loss,
+            slippage_bps=req.slippage_bps,
+            commission_bps=req.commission_bps,
+            provenance=req.provenance,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
