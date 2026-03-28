@@ -23,7 +23,7 @@ class ExecutionEngine(ABC):
 
 #### Scenario: Paper executor compatibility
 - **WHEN** the paper executor's `execute()` is awaited
-- **THEN** it SHALL return results immediately (trivial async wrapper) with no behavioral change from the synchronous version
+- **THEN** it SHALL return results immediately with no behavioral change from the synchronous version
 
 ### Requirement: Broker-specific translation
 Execution Engine SHALL translate abstract `Order` objects into broker-specific API calls via the appropriate market adapter.

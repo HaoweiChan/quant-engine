@@ -5,7 +5,7 @@ Volume-aware fill simulation that models real market microstructure: spread cros
 ## Requirements
 
 ### Requirement: Square-root market impact model
-The fill model SHALL compute market impact using the square-root impact formula: `impact = k * sigma * sqrt(Q / V)` where `k` is a calibration constant, `sigma` is daily volatility, `Q` is order size in contracts, and `V` is average daily volume.
+The fill model SHALL compute market impact using the square-root impact formula: `impact = k × σ × √(Q / V)` where `k` is a calibration constant, `σ` is daily volatility, `Q` is order size in contracts, and `V` is average daily volume.
 
 ```python
 @dataclass
@@ -24,11 +24,11 @@ class MarketImpactFillModel(FillModel):
 ```
 
 #### Scenario: Impact scales with order size
-- **WHEN** an order for 10 contracts is simulated against a bar with ADV=50,000 and sigma=0.015
-- **THEN** the impact SHALL be `k * 0.015 * sqrt(10/50000)` applied adversely (added for buys, subtracted for sells)
+- **WHEN** an order for 10 contracts is simulated against a bar with ADV=50,000 and σ=0.015
+- **THEN** the impact SHALL be `k × 0.015 × √(10/50000)` applied adversely (added for buys, subtracted for sells)
 
 #### Scenario: Impact scales with volatility
-- **WHEN** volatility doubles from sigma=0.01 to sigma=0.02 with the same order size and ADV
+- **WHEN** volatility doubles from σ=0.01 to σ=0.02 with the same order size and ADV
 - **THEN** the computed impact SHALL approximately double
 
 #### Scenario: Zero-size order has zero impact
@@ -44,7 +44,7 @@ The fill model SHALL add half-spread crossing cost to every fill. The spread SHA
 
 #### Scenario: Spread from config fallback
 - **WHEN** the bar dict does not contain a `spread` key
-- **THEN** the fill model SHALL use `params.spread_bps * bar["close"] / 10000` as the half-spread cost
+- **THEN** the fill model SHALL use `params.spread_bps × bar["close"] / 10000` as the half-spread cost
 
 #### Scenario: Adverse spread direction
 - **WHEN** a buy order is filled
@@ -71,12 +71,12 @@ The fill model SHALL simulate a configurable latency delay between signal genera
 The fill model SHALL support partial fills when order size exceeds a configurable fraction of bar volume.
 
 #### Scenario: Full fill within volume
-- **WHEN** order size is less than `max_adv_participation * bar["volume"]`
+- **WHEN** order size is less than `max_adv_participation × bar["volume"]`
 - **THEN** the fill SHALL be complete (fill_qty == order.lots)
 
 #### Scenario: Partial fill exceeds volume threshold
-- **WHEN** order size exceeds `max_adv_participation * bar["volume"]`
-- **THEN** the fill SHALL be partial, with `fill_qty = max_adv_participation * bar["volume"]` and `remaining_qty = order.lots - fill_qty`
+- **WHEN** order size exceeds `max_adv_participation × bar["volume"]`
+- **THEN** the fill SHALL be partial, with `fill_qty = max_adv_participation × bar["volume"]` and `remaining_qty = order.lots - fill_qty`
 
 #### Scenario: Zero-volume bar
 - **WHEN** `bar["volume"]` is 0 or missing

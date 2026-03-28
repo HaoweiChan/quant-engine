@@ -5,7 +5,7 @@ Independent watchdog process that reads broker account state and enforces system
 ## Requirements
 
 ### Requirement: Risk Monitor interface
-Risk Monitor SHALL expose `check()`, `set_position_engine_mode()`, `force_close_all()`, and `get_portfolio_risk()` methods. Extended with portfolio risk engine access.
+Extended with portfolio risk engine access.
 
 ```python
 class RiskMonitor:
@@ -19,13 +19,7 @@ class RiskMonitor:
 
     def check(self, account: AccountState) -> RiskAction: ...
     def get_portfolio_risk(self) -> VaRResult | None: ...
-    def set_position_engine_mode(self, mode: str) -> None: ...
-    def force_close_all(self) -> None: ...
 ```
-
-#### Scenario: Periodic check
-- **WHEN** `check()` is called with current `AccountState`
-- **THEN** it SHALL return a `RiskAction` indicating the appropriate response
 
 #### Scenario: Check with portfolio risk
 - **WHEN** `check()` is called and `portfolio_risk` is available
@@ -34,10 +28,6 @@ class RiskMonitor:
 #### Scenario: Portfolio risk optional (backward compatible)
 - **WHEN** `portfolio_risk` is `None`
 - **THEN** only operational checks SHALL run
-
-#### Scenario: Direct mode control
-- **WHEN** `set_position_engine_mode()` is called
-- **THEN** Position Engine's mode SHALL be updated immediately
 
 ### Requirement: Independent process
 Risk Monitor SHALL run as a separate, independent process. It SHALL NOT import `PositionEngine` or any Prediction Engine code.

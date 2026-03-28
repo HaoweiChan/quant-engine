@@ -34,7 +34,7 @@ The frontend SHALL load IBM Plex Serif (headings), IBM Plex Sans (body), and Jet
 - **THEN** the value SHALL use JetBrains Mono and the label SHALL be uppercase with letter-spacing
 
 ### Requirement: Tab navigation with four primary tabs
-The frontend SHALL provide a horizontal tab bar with four primary tabs in lifecycle order: Data Hub, Strategy, Backtest, Trading. The active tab SHALL show a `#5a8af2` bottom border. The Strategy tab SHALL contain sub-tabs: Code Editor, Optimizer, Grid Search, Monte Carlo. The Trading tab SHALL contain sub-tabs: Accounts, War Room, Blotter, Risk.
+The frontend SHALL provide a horizontal tab bar with three primary tabs in lifecycle order: Data Hub, Strategy, Trading. The active tab SHALL show a `#5a8af2` bottom border. The Strategy tab SHALL contain sub-tabs: Code Editor, Tear Sheet, Param Sweep, Stress Test. The Trading tab SHALL contain sub-tabs: Accounts, War Room, Blotter, Risk. A route redirect SHALL map `/backtest` to `/strategy?tab=tearsheet` for backward compatibility.
 
 #### Scenario: Tab switches page content
 - **WHEN** the user clicks a primary tab
@@ -45,8 +45,12 @@ The frontend SHALL provide a horizontal tab bar with four primary tabs in lifecy
 - **THEN** the Data Hub tab SHALL be active
 
 #### Scenario: Sub-tab state preserved across primary tab switches
-- **WHEN** the user selects Monte Carlo under Strategy, switches to Backtest, then returns to Strategy
-- **THEN** the Monte Carlo sub-tab SHALL still be selected
+- **WHEN** the user selects Stress Test under Strategy, switches to Trading, then returns to Strategy
+- **THEN** the Stress Test sub-tab SHALL still be selected
+
+#### Scenario: Backtest URL redirects to Tear Sheet
+- **WHEN** the user navigates to `/backtest`
+- **THEN** the router SHALL redirect to `/strategy?tab=tearsheet` with no 404
 
 ### Requirement: TradingView Lightweight Charts for financial data
 All OHLCV price charts, equity curves, and drawdown charts SHALL use TradingView Lightweight Charts with canvas rendering. Chart zoom, pan, crosshair, and time range selection SHALL execute entirely client-side with zero server requests.
@@ -75,15 +79,19 @@ The frontend SHALL calculate technical indicators (MA, EMA, ATR, Bollinger Bands
 - **THEN** the MA line SHALL update instantly from cached data
 
 ### Requirement: Zustand state stores
-The frontend SHALL use Zustand stores for application state: `marketDataStore` (cached OHLCV, indicators), `backtestStore` (results, progress), `tradingStore` (accounts, sessions, WS connection), and `uiStore` (active tabs, sidebar state, filters).
+The frontend SHALL use Zustand stores for application state: `marketDataStore` (cached OHLCV, indicators), `backtestStore` (results, progress), `tradingStore` (accounts, sessions, WS connection), `uiStore` (active tabs, sidebar state, filters), and `strategyStore` (global parameter context: strategy, symbol, dates, cost assumptions, full param vector θ).
 
 #### Scenario: OHLCV data cached across tab switches
-- **WHEN** the user loads OHLCV data on Data Hub, switches to Backtest, then returns to Data Hub
+- **WHEN** the user loads OHLCV data on Data Hub, switches to Strategy, then returns to Data Hub
 - **THEN** the previously loaded OHLCV data SHALL still be available without re-fetching
 
 #### Scenario: WebSocket connection state tracked
 - **WHEN** the WebSocket connection to `/ws/live-feed` drops
 - **THEN** the `tradingStore` SHALL update its `connected` state to `false` and display a disconnection indicator
+
+#### Scenario: Strategy store shared across sub-tabs
+- **WHEN** the user changes `symbol` in the global sidebar
+- **THEN** all Strategy sub-tabs (Tear Sheet, Param Sweep, Stress Test) SHALL reflect the updated symbol
 
 ### Requirement: WebSocket hooks for real-time data
 The frontend SHALL provide React hooks (`useLiveFeed`, `useBacktestProgress`, `useRiskAlerts`) that manage WebSocket connections with automatic reconnection using exponential backoff. The `useLiveFeed` hook SHALL process incoming tick messages by calling `processLiveTick()` on `marketDataStore` to drive live bar aggregation and chart updates.
@@ -91,10 +99,6 @@ The frontend SHALL provide React hooks (`useLiveFeed`, `useBacktestProgress`, `u
 #### Scenario: Auto-reconnect on disconnect
 - **WHEN** the WebSocket connection to `/ws/live-feed` is lost
 - **THEN** the hook SHALL attempt reconnection with exponential backoff (1s, 2s, 4s, 8s, max 30s)
-
-#### Scenario: Live feed updates trading store
-- **WHEN** a tick message arrives on the live feed WebSocket
-- **THEN** the `tradingStore` SHALL update the relevant position's latest price and unrealized PnL
 
 #### Scenario: Live feed processes tick messages
 - **WHEN** a message with `type: "tick"` arrives on the live feed WebSocket containing `{ price, volume, timestamp }`
@@ -119,48 +123,24 @@ The Data Hub page SHALL display database coverage, contract/timeframe/date selec
 - **WHEN** the user loads OHLCV data
 - **THEN** the full dataset SHALL be fetched in one API call and cached in `marketDataStore`; subsequent timeframe changes SHALL recompute locally when possible
 
-### Requirement: Backtest page
-The Backtest page SHALL expose strategy selection, contract/date range, strategy parameters, and a Run Backtest button. Results SHALL display equity curve (vs buy-and-hold), drawdown chart, return distribution histogram, stat cards (Sharpe, Max DD, Win Rate, Total Trades, Total PnL, B&H PnL, Alpha), and a trade log. The page SHALL also display a collapsible "Run History" panel showing past optimization and backtest runs for the selected strategy.
-
-#### Scenario: Run backtest and display results
-- **WHEN** the user configures parameters and clicks Run Backtest
-- **THEN** the frontend SHALL POST to `/api/backtest/run` and render all result charts and metrics upon response
-
-#### Scenario: Backtest progress feedback
-- **WHEN** a backtest is running
-- **THEN** the frontend SHALL display a loading indicator with progress updates if connected to `/ws/backtest-progress`
-
-#### Scenario: Run history loads on strategy selection
-- **WHEN** the user selects a strategy in the Backtest page
-- **THEN** the frontend SHALL call `fetchParamRuns(strategy)` via `GET /api/params/runs/{strategy}` and display the results in the Run History panel
-
-#### Scenario: Run history panel content
-- **WHEN** run history data is loaded for a strategy with past runs
-- **THEN** each run entry SHALL display: run date, source (mcp/dashboard), search type (grid/random/single), number of trials, best Sharpe, best PnL, and an "Activate" button for sweep runs that have candidates
-
-#### Scenario: Run history empty state
-- **WHEN** run history data is loaded for a strategy with no past runs
-- **THEN** the panel SHALL display a message: "No optimization history for this strategy"
-
-#### Scenario: Run history panel is collapsible
-- **WHEN** the user clicks the Run History panel header
-- **THEN** the panel body SHALL toggle between expanded and collapsed states
-- **AND** the default state SHALL be collapsed to keep the page clean
-
-#### Scenario: Activate candidate from history
-- **WHEN** the user clicks "Activate" on a run history entry that has candidates
-- **THEN** the frontend SHALL POST to `/api/params/activate/{candidate_id}` and update the active params in the sidebar
-
 ### Requirement: Strategy sub-tabs
-The Strategy tab SHALL contain sub-tabs for Code Editor (file browser + code editor), Optimizer (param grid + IS/OOS results + heatmap), Grid Search (2D parameter sweep + heatmap), and Monte Carlo (simulated equity paths + PnL distribution + percentile table).
+The Strategy tab SHALL contain sub-tabs for Code Editor (file browser + code editor), Tear Sheet (single backtest with full metrics, equity curve, drawdown, trade log — formerly the standalone Backtest page), Param Sweep (unified Grid Search + Optimizer with method selector), and Stress Test (block-bootstrap Monte Carlo with VaR/CVaR). All sub-tabs except Code Editor SHALL read parameters from `useStrategyStore`.
 
 #### Scenario: Code editor loads and saves files
 - **WHEN** the user selects a file in the Code Editor
 - **THEN** the editor SHALL load the file content and support save/revert operations via API calls
 
-#### Scenario: Optimizer streams progress
-- **WHEN** the user starts an optimizer run
-- **THEN** the frontend SHALL poll `/api/optimizer/status` and display progress until completion
+#### Scenario: Tear Sheet runs backtest with global params
+- **WHEN** the user clicks "Run" on the Tear Sheet tab
+- **THEN** the request SHALL use strategy, symbol, dates, params, and cost assumptions from `useStrategyStore`
+
+#### Scenario: Param Sweep selects sweep parameters from global context
+- **WHEN** the user opens the Param Sweep tab
+- **THEN** the parameter list SHALL show all parameters from `useStrategyStore.params`, allowing the user to mark 1-2 as sweep variables while the rest remain locked at their global values
+
+#### Scenario: Stress Test uses global params for baseline backtest
+- **WHEN** the user runs a stress test
+- **THEN** the system SHALL first run a baseline backtest using the global param vector, then bootstrap the resulting daily returns
 
 ### Requirement: Trading sub-tabs
 The Trading tab SHALL contain sub-tabs for Accounts (table + add/edit modal with credential management), War Room (account overview cards + equity sparklines + session monitors with WebSocket updates), Blotter (unified fill feed), and Risk (aggregated margin/drawdown/alerts).
@@ -190,3 +170,106 @@ Each page SHALL have a left sidebar (234px width, `#09091e` background) containi
 #### Scenario: Sidebar controls update page content
 - **WHEN** the user changes a sidebar control
 - **THEN** the page content SHALL update reactively via local state or API call as appropriate
+
+### Requirement: Monte Carlo mode selector
+The Stress Test sub-tab SHALL provide a mode selector allowing the user to choose the simulation type before running.
+
+#### Scenario: Available modes
+- **WHEN** the Stress Test page loads
+- **THEN** the mode selector SHALL display options: "Block Bootstrap" (default, existing), "Trade Resampling", "GBM Price Simulation", "Parameter Sensitivity"
+
+#### Scenario: Default mode
+- **WHEN** no mode has been selected
+- **THEN** "Block Bootstrap" SHALL be pre-selected with the existing method sub-selector (Stationary/Circular/GARCH)
+
+#### Scenario: Mode-specific controls
+- **WHEN** the user selects "GBM Price Simulation"
+- **THEN** additional controls SHALL appear: "Fat Tails" toggle, "Degrees of Freedom" input (default 5)
+- **WHEN** the user selects "Trade Resampling"
+- **THEN** an additional "Block Size" input SHALL appear (default 1)
+- **WHEN** the user selects "Parameter Sensitivity"
+- **THEN** "Perturbation Offsets" multi-select SHALL appear (±5%, ±10%, ±20%)
+- **WHEN** the user selects "Block Bootstrap"
+- **THEN** the existing method sub-selector (Stationary/Circular/GARCH) SHALL appear
+
+### Requirement: Backward-compatible API call
+The Stress Test sub-tab SHALL call `POST /api/monte-carlo` with a `mode` parameter, extending the existing request.
+
+#### Scenario: Run button triggers API call
+- **WHEN** the user clicks "Run Stress Test"
+- **THEN** the frontend SHALL POST to `/api/monte-carlo` with `{ strategy, symbol, start, end, params, initial_capital, mode, n_paths, n_days, ...mode_specific_fields }` and display a loading spinner
+
+#### Scenario: Backend error displayed
+- **WHEN** the API returns an error response
+- **THEN** the frontend SHALL display the error message in a toast notification
+
+### Requirement: MDD distribution chart
+The Stress Test page SHALL display a histogram of maximum drawdown values across all simulated paths.
+
+#### Scenario: MDD histogram renders
+- **WHEN** MC results contain `mdd_values`
+- **THEN** a histogram SHALL render showing the distribution of MDD values (x-axis: drawdown %, y-axis: frequency)
+
+#### Scenario: P95 MDD line
+- **WHEN** the MDD histogram renders
+- **THEN** a vertical dashed line SHALL mark the 95th percentile MDD with a label showing the value
+
+#### Scenario: Median MDD line
+- **WHEN** the MDD histogram renders
+- **THEN** a vertical solid line SHALL mark the median MDD
+
+#### Scenario: Dark theme consistency
+- **WHEN** the MDD chart renders
+- **THEN** it SHALL use the same dark theme palette as other charts (background `#0a0a22`, text `#ccc`, accent `#ff5252` for the P95 line)
+
+### Requirement: Multi-threshold ruin probability display
+The Stress Test page SHALL display ruin probability for each configured threshold.
+
+#### Scenario: Ruin gauge cards
+- **WHEN** MC results contain `ruin_thresholds`
+- **THEN** for each threshold (e.g., -30%, -50%, -100%) the page SHALL display a stat card showing the probability as a percentage with color coding: green (<5%), gold (5-20%), red (>20%)
+
+#### Scenario: Empty ruin thresholds
+- **WHEN** `ruin_thresholds` is empty or all values are 0
+- **THEN** the display SHALL show "No ruin risk detected" in green
+
+### Requirement: Parameter sensitivity heatmap
+The Stress Test page SHALL display a heatmap showing Sortino ratio change across parameter perturbations when `mode="sensitivity"`.
+
+#### Scenario: Heatmap renders
+- **WHEN** MC results contain `param_sensitivity`
+- **THEN** a heatmap SHALL render with parameters on the Y-axis, perturbation offsets on the X-axis, and Sortino ratio as cell color
+
+#### Scenario: Color scale
+- **WHEN** the heatmap renders
+- **THEN** cells SHALL use a diverging color scale: green for Sortino above baseline, red for below baseline, neutral for near-baseline
+
+#### Scenario: Cell hover tooltip
+- **WHEN** the user hovers over a heatmap cell
+- **THEN** a tooltip SHALL show: parameter name, offset percentage, perturbed value, and Sortino ratio
+
+#### Scenario: Sensitivity hidden for non-sensitivity modes
+- **WHEN** `mode` is not `"sensitivity"`
+- **THEN** the heatmap panel SHALL not be displayed
+
+### Requirement: Fan chart retains existing functionality
+The existing fan chart SVG panel SHALL continue to render for all modes that produce equity path bands.
+
+#### Scenario: Bands from backend
+- **WHEN** `MonteCarloReport.bands` is received from the API
+- **THEN** the fan chart SHALL render those percentile bands directly
+
+#### Scenario: Percentile stat cards
+- **WHEN** results contain VaR/CVaR/prob_ruin
+- **THEN** the page SHALL display risk metric stat cards (existing behavior preserved)
+
+### Requirement: Sharpe/Sortino distribution panel
+The Stress Test page SHALL display distributions of Sharpe and Sortino ratios when available.
+
+#### Scenario: Distributions render
+- **WHEN** MC results contain `sharpe_values` and `sortino_values`
+- **THEN** the page SHALL display two histograms: Sharpe ratio distribution and Sortino ratio distribution
+
+#### Scenario: Median lines
+- **WHEN** Sharpe/Sortino histograms render
+- **THEN** each histogram SHALL show a vertical median line with a label

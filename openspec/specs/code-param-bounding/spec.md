@@ -5,7 +5,7 @@ Bind optimization runs to the exact strategy code version via SHA-256 hashing, e
 ## Requirements
 
 ### Requirement: Strategy code hash utility
-The system SHALL provide a `src/strategies/code_hash.py` module with two public functions: `strategy_file_path(slug: str) -> Path` and `compute_strategy_hash(slug: str) -> tuple[str, str]`. The module SHALL resolve slug aliases before locating the file.
+The system SHALL provide a `src/strategies/code_hash.py` module with two public functions: `strategy_file_path(slug: str) -> Path` and `compute_strategy_hash(slug: str) -> tuple[str, str]`. The module SHALL resolve slug aliases via the strategy registry before locating the file.
 
 ```python
 def strategy_file_path(slug: str) -> Path:

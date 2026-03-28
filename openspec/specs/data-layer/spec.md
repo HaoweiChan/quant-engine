@@ -103,15 +103,11 @@ The data layer SHALL serve both Prediction Engine (features) and Position Engine
 - **THEN** data layer SHALL provide a `MarketSnapshot` via the market adapter's `to_snapshot()`
 
 ### Requirement: Database layer
-The data layer SHALL provide a database layer for persisting trades, signals, positions, and account snapshots. Extended with PIT-aware query support for mutable data.
+Extended with PIT-aware query support for mutable data.
 
 #### Scenario: SQLite in development
 - **WHEN** running in development mode
-- **THEN** the database SHALL use SQLite (zero-config, single-file)
-
-#### Scenario: PostgreSQL in production
-- **WHEN** running in production with multiple processes
-- **THEN** the database SHALL support PostgreSQL for concurrent write access (e.g., Risk Monitor + main engine)
+- **THEN** the database SHALL use SQLite
 
 #### Scenario: PIT-aware mutable data queries
 - **WHEN** querying margin rates during backtesting
@@ -141,23 +137,19 @@ The Database class SHALL expose methods for querying and inserting 1-minute OHLC
 - **THEN** the caller SHALL query 1-minute bars and aggregate via bar_builder — the Database SHALL NOT store pre-aggregated timeframes
 
 ### Requirement: Margin query methods on Database
-The Database class SHALL expose methods for querying and inserting margin snapshots. Extended with PIT semantics.
+Extended with PIT semantics.
 
 #### Scenario: Insert margin snapshot
 - **WHEN** `add_margin_snapshot(snapshot)` is called
-- **THEN** the snapshot SHALL be persisted with `knowledge_time` set to current time
+- **THEN** it SHALL be persisted with `knowledge_time` set to current time
 
-#### Scenario: Get latest margin
+#### Scenario: Get latest margin (unchanged behavior)
 - **WHEN** `get_latest_margin(symbol)` is called without `as_of`
-- **THEN** it SHALL return the most recent MarginSnapshot or None
+- **THEN** it SHALL return the most recent MarginSnapshot
 
 #### Scenario: Get margin AS_OF
 - **WHEN** `get_latest_margin(symbol, as_of=T)` is called
 - **THEN** it SHALL return the most recent MarginSnapshot with `knowledge_time <= T`
-
-#### Scenario: Get margin history
-- **WHEN** `get_margin_history(symbol, start, end)` is called with optional date filters
-- **THEN** it SHALL return margin snapshots ordered by scraped_at ascending
 
 ### Requirement: Feature plugin interface
 The data layer SHALL define a `FeaturePlugin` ABC that market adapters can implement to provide market-specific features.

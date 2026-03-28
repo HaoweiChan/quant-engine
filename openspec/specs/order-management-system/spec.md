@@ -80,7 +80,7 @@ The OMS SHALL automatically select the optimal algorithm based on order characte
 
 #### Scenario: Default algorithm selection
 - **WHEN** no algorithm is explicitly specified
-- **THEN** the OMS SHALL select based on: urgency (market orders -> TWAP), size (> 5% ADV -> VWAP), and market regime (high volatility -> POV)
+- **THEN** the OMS SHALL select based on: urgency (market orders → TWAP), size (> 5% ADV → VWAP), and market regime (high volatility → POV)
 
 #### Scenario: Explicit override
 - **WHEN** an order's metadata contains `oms_algorithm`

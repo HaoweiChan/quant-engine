@@ -59,9 +59,9 @@
 ## 9. Frontend: Warning Banners and Hash Display
 
 - [x] 9.1 Add `strategy_hash?: string` and `code_changed?: boolean | null` to `ActiveParams` type in `frontend/src/lib/api.ts`
-- [x] 9.2 In `frontend/src/pages/Backtest.tsx`: add amber warning banner when `activeParams.code_changed === true` — "Active parameters were optimized against a different version of this strategy. Re-run optimization."
-- [x] 9.3 In `Backtest.tsx` run history table: show truncated hash (first 8 chars) alongside each run entry if `strategy_hash` is present
-- [x] 9.4 In `frontend/src/pages/strategy/Optimizer.tsx`: add same amber warning banner when loading active params with `code_changed === true`
+- [x] 9.2 In `frontend/src/pages/strategy/TearSheet.tsx`: add amber warning banner when `paramSource.code_changed === true` — "Active parameters were optimized against a different version of this strategy. Re-run optimization." (supersedes former `Backtest.tsx` / `Optimizer.tsx` targets after Strategy hub refactor)
+- [x] 9.3 In `TearSheet.tsx` run history table: show truncated hash (first 8 chars) alongside each run entry if `strategy_hash` is present
+- [x] 9.4 Same warning and param context as 9.2–9.3 live on Tear Sheet; no separate Optimizer page
 - [x] 9.5 In `frontend/src/pages/Trading.tsx` (War Room): show stale indicator on strategy card when deployed candidate has mismatched hash
 
 ## 10. Tests: Integration and Regression

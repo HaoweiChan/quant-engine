@@ -22,16 +22,6 @@ app = Server("backtest-engine")
 ### Requirement: Strategy slug normalization in facade
 The facade module SHALL provide a `resolve_strategy_slug(strategy: str) -> str` function that converts any strategy identifier to its canonical registry slug. All facade functions that persist results to `param_registry.db` SHALL call this function before writing.
 
-```python
-def resolve_strategy_slug(strategy: str) -> str:
-    """Resolve any strategy identifier to its canonical registry slug.
-
-    Handles: slug, legacy alias, module:factory format.
-    Falls back to the raw string if resolution fails.
-    """
-    ...
-```
-
 #### Scenario: Slug passes through unchanged
 - **WHEN** `resolve_strategy_slug("intraday/trend_following/ema_trend_pullback")` is called
 - **THEN** it SHALL return `"intraday/trend_following/ema_trend_pullback"`
@@ -50,16 +40,6 @@ def resolve_strategy_slug(strategy: str) -> str:
 
 ### Requirement: run_backtest tool
 The server SHALL expose a `run_backtest` tool that runs a single backtest on synthetic price data and returns performance metrics. The result SHALL be persisted to `param_registry.db` via `ParamRegistry.save_backtest_run()` with `source="mcp"` and the strategy identifier normalized to a slug. The response SHALL include `param_warnings` from parameter clamping and the `strategy_hash` of the code used.
-
-```python
-@app.tool()
-async def run_backtest(
-    scenario: str,
-    strategy_params: dict | None = None,
-    strategy: str = "pyramid",
-    date_range: dict | None = None,
-) -> dict: ...
-```
 
 #### Scenario: Backtest with preset scenario
 - **WHEN** `run_backtest` is called with `scenario="strong_bull"`
@@ -113,16 +93,6 @@ The server SHALL expose a `run_backtest_realdata` tool that runs a backtest on r
 ### Requirement: run_monte_carlo tool
 The server SHALL expose a `run_monte_carlo` tool that runs N synthetic price paths and returns distribution metrics. The response SHALL include `param_warnings` from parameter clamping.
 
-```python
-@app.tool()
-async def run_monte_carlo(
-    scenario: str,
-    strategy_params: dict | None = None,
-    strategy: str = "pyramid",
-    n_paths: int = 200,
-) -> dict: ...
-```
-
 #### Scenario: Monte Carlo with default paths
 - **WHEN** `run_monte_carlo` is called with `scenario="bear"` and default `n_paths=200`
 - **THEN** it SHALL generate 200 synthetic paths, run each through BacktestRunner, and return p10, p25, p50, p75, p90 of terminal PnL, mean PnL, win_rate, max_drawdown distribution, sharpe distribution, and ruin_probability
@@ -145,18 +115,6 @@ async def run_monte_carlo(
 
 ### Requirement: run_parameter_sweep tool
 The server SHALL expose a `run_parameter_sweep` tool that searches over a parameter space and returns ranked results. The response SHALL include `param_warnings` from base parameter clamping.
-
-```python
-@app.tool()
-async def run_parameter_sweep(
-    base_params: dict,
-    sweep_params: dict,
-    strategy: str = "pyramid",
-    n_samples: int | None = None,
-    metric: str = "sharpe",
-    scenario: str = "strong_bull",
-) -> dict: ...
-```
 
 #### Scenario: Grid search over 1-2 parameters
 - **WHEN** `run_parameter_sweep` is called with `sweep_params={"stop_atr_mult": [1.0, 1.5, 2.0, 2.5]}`
@@ -197,15 +155,6 @@ The `run_parameter_sweep` tool SHALL automatically persist its results to the pa
 ### Requirement: run_stress_test tool
 The server SHALL expose a `run_stress_test` tool that tests strategy behavior under extreme scenarios. The response SHALL include `param_warnings` from parameter clamping.
 
-```python
-@app.tool()
-async def run_stress_test(
-    scenarios: list[str] | None = None,
-    strategy_params: dict | None = None,
-    strategy: str = "pyramid",
-) -> dict: ...
-```
-
 #### Scenario: Run all stress scenarios
 - **WHEN** `run_stress_test` is called without `scenarios`
 - **THEN** it SHALL run all built-in stress scenarios (gap_down, slow_bleed, flash_crash, vol_shift, liquidity_crisis) and return results per scenario
@@ -225,11 +174,6 @@ async def run_stress_test(
 ### Requirement: read_strategy_file tool
 The server SHALL expose a `read_strategy_file` tool that returns the content of a strategy policy file. The tool SHALL support path-like filenames for nested directory structures (e.g., `"intraday/breakout/ta_orb"`).
 
-```python
-@app.tool()
-async def read_strategy_file(filename: str) -> dict: ...
-```
-
 #### Scenario: Read nested strategy file
 - **WHEN** `read_strategy_file` is called with `filename="intraday/breakout/ta_orb"`
 - **THEN** it SHALL return the full content of `src/strategies/intraday/breakout/ta_orb.py` along with the filename and last-modified timestamp
@@ -248,11 +192,6 @@ async def read_strategy_file(filename: str) -> dict: ...
 
 ### Requirement: write_strategy_file tool
 The server SHALL expose a `write_strategy_file` tool that validates and writes a strategy policy file. After a successful write, it SHALL compute the new strategy hash, call `deactivate_stale_candidates()` on the param registry, and report any deactivated candidates in the response.
-
-```python
-@app.tool()
-async def write_strategy_file(filename: str, content: str) -> dict: ...
-```
 
 #### Scenario: Write to nested path
 - **WHEN** `write_strategy_file` is called with `filename="intraday/trend_following/ema_pullback"` and valid content
@@ -293,12 +232,7 @@ async def write_strategy_file(filename: str, content: str) -> dict: ...
 - **THEN** it SHALL create the new file after validation passes (no backup needed)
 
 ### Requirement: get_optimization_history tool
-The server SHALL expose a `get_optimization_history` tool that returns optimization history from the persistent param registry (with optional filter to the current MCP session when supported).
-
-```python
-@app.tool()
-async def get_optimization_history() -> dict: ...
-```
+The server SHALL expose a `get_optimization_history` tool that returns optimization history from the persistent param registry.
 
 #### Scenario: Empty history
 - **WHEN** `get_optimization_history` is called before any runs exist in storage
@@ -315,11 +249,6 @@ async def get_optimization_history() -> dict: ...
 ### Requirement: get_parameter_schema tool
 The server SHALL expose a `get_parameter_schema` tool that returns the full parameter schema with current values, ranges, and descriptions.
 
-```python
-@app.tool()
-async def get_parameter_schema(strategy: str = "pyramid") -> dict: ...
-```
-
 #### Scenario: Pyramid strategy schema
 - **WHEN** `get_parameter_schema` is called with `strategy="pyramid"`
 - **THEN** it SHALL return all PyramidConfig fields with their current value, type, allowed range (min/max), and description
@@ -335,17 +264,6 @@ async def get_parameter_schema(strategy: str = "pyramid") -> dict: ...
 ### Requirement: save_optimization_run MCP tool
 The server SHALL expose a `save_optimization_run` tool that persists parameter sweep results to the registry database.
 
-```python
-@app.tool()
-async def save_optimization_run(
-    strategy: str,
-    symbol: str,
-    objective: str,
-    tag: str | None = None,
-    notes: str | None = None,
-) -> dict: ...
-```
-
 #### Scenario: Save after sweep
 - **WHEN** `save_optimization_run` is called after a `run_parameter_sweep` has completed in the same session
 - **THEN** the most recent sweep result SHALL be persisted to `param_registry.db` with full trial data
@@ -358,14 +276,6 @@ async def save_optimization_run(
 ### Requirement: get_run_history MCP tool
 The server SHALL expose a `get_run_history` tool that queries persisted optimization runs from the registry database. Each run entry SHALL include `strategy_hash` if available.
 
-```python
-@app.tool()
-async def get_run_history(
-    strategy: str | None = None,
-    limit: int = 10,
-) -> dict: ...
-```
-
 #### Scenario: Query all runs for a strategy
 - **WHEN** `get_run_history` is called with `strategy="atr_mean_reversion"`
 - **THEN** it SHALL return the most recent runs for that strategy, each with `run_id`, `run_at`, `objective`, `best_params`, best metrics, `n_trials`, `tag`, candidate count, and `strategy_hash`
@@ -376,13 +286,6 @@ async def get_run_history(
 
 ### Requirement: activate_candidate MCP tool
 The server SHALL expose an `activate_candidate` tool that marks a parameter candidate as active for production use.
-
-```python
-@app.tool()
-async def activate_candidate(
-    candidate_id: int,
-) -> dict: ...
-```
 
 #### Scenario: Activate candidate
 - **WHEN** `activate_candidate` is called with a valid candidate ID
@@ -395,13 +298,6 @@ async def activate_candidate(
 
 ### Requirement: get_active_params MCP tool
 The server SHALL expose a `get_active_params` tool that returns the currently active optimized parameters for a strategy. The response SHALL include `strategy_hash` and `code_changed` if the API can compute the current file hash.
-
-```python
-@app.tool()
-async def get_active_params(
-    strategy: str = "pyramid",
-) -> dict: ...
-```
 
 #### Scenario: Active params exist
 - **WHEN** `get_active_params` is called with `strategy="atr_mean_reversion"` and an active candidate exists
@@ -461,17 +357,6 @@ Each MCP tool description SHALL include guidance on when to use the tool, precon
 ### Requirement: Strategy factory resolution
 The facade module SHALL resolve strategy factories exclusively through the strategy registry, eliminating the hardcoded `_BUILTIN_FACTORIES` dict.
 
-```python
-def resolve_factory(strategy: str) -> Any:
-    """Return a callable engine factory.
-
-    Resolution order:
-    1. Registry lookup (slug or alias)
-    2. "module:factory" format (external strategies)
-    3. Raise ValueError
-    """
-```
-
 #### Scenario: Resolve by new path-like slug
 - **WHEN** `resolve_factory("intraday/breakout/ta_orb")` is called
 - **THEN** it SHALL import `src.strategies.intraday.breakout.ta_orb` and return `create_ta_orb_engine`
@@ -494,51 +379,6 @@ def resolve_factory(strategy: str) -> Any:
 
 ### Requirement: scaffold_strategy MCP tool
 The server SHALL expose a `scaffold_strategy` tool that generates strategy boilerplate for the agent to review before writing.
-
-```python
-Tool(
-    name="scaffold_strategy",
-    description=(
-        "Generate a complete strategy boilerplate file with correct conventions. "
-        "Returns the generated Python content — does NOT write the file. "
-        "After reviewing, use write_strategy_file to save it. "
-        "The scaffolded strategy will be immediately discoverable by the registry."
-    ),
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Strategy name in snake_case (e.g., 'vwap_rubber_band')",
-            },
-            "category": {
-                "type": "string",
-                "enum": ["breakout", "mean_reversion", "trend_following"],
-                "description": "Strategy category",
-            },
-            "timeframe": {
-                "type": "string",
-                "enum": ["intraday", "daily", "multi_day"],
-                "description": "Strategy timeframe",
-            },
-            "description": {
-                "type": "string",
-                "description": "One-line description of the strategy",
-            },
-            "policies": {
-                "type": "array",
-                "items": {"type": "string", "enum": ["entry", "add", "stop"]},
-                "description": "Which policies to scaffold (default: ['entry', 'stop'])",
-            },
-            "params": {
-                "type": "object",
-                "description": "Initial parameter definitions: {name: {type, default, min, max}}",
-            },
-        },
-        "required": ["name", "category", "timeframe"],
-    },
-)
-```
 
 #### Scenario: Scaffold tool returns content without writing
 - **WHEN** the agent calls `scaffold_strategy` with `name="ema_pullback"`

@@ -5,21 +5,9 @@ Persist optimized strategy parameters as TOML files under `src/strategies/config
 ## Requirements
 
 ### Requirement: Save optimized params as TOML config
-The dashboard SHALL provide a "Save as Default Params" button in the Optimizer results view that writes the best parameter set to the parameter registry database via `ParamRegistry.save_run()` and activates the best candidate. The existing `save_strategy_params()` function SHALL delegate to `ParamRegistry` for the primary write and additionally write a TOML file at `src/strategies/configs/<strategy_slug>.toml` for backward compatibility. The `save_backtest_run()` and `save_run()` methods on `ParamRegistry` SHALL accept two additional optional keyword arguments: `strategy_hash: str | None = None` and `strategy_code: str | None = None`. Both values SHALL be persisted to the corresponding columns in `param_runs`. If not provided, they default to `NULL`.
+The `save_backtest_run()` and `save_run()` methods on `ParamRegistry` SHALL accept two additional optional keyword arguments: `strategy_hash: str | None = None` and `strategy_code: str | None = None`. Both values SHALL be persisted to the corresponding columns in `param_runs`. If not provided, they default to `NULL`.
 
 ```python
-def save_strategy_params(
-    name: str,
-    params: dict[str, Any],
-    metadata: dict[str, Any] | None = None,
-) -> Path:
-    """Write params to both the registry DB and a TOML file (backward compat)."""
-    ...
-
-def load_strategy_params(name: str) -> dict[str, Any] | None:
-    """Load active params from registry DB, falling back to TOML if no DB entry."""
-    ...
-
 def save_backtest_run(
     self,
     strategy: str,

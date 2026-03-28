@@ -5,7 +5,7 @@ Programmatic optimization of strategy parameters via `StrategyOptimizer`: grid s
 ## Requirements
 
 ### Requirement: Generic strategy optimizer
-`StrategyOptimizer` SHALL accept any `engine_factory` callable whose keyword arguments correspond to the keys in `param_grid`, run real OHLCV backtests for every parameter combination, and return a ranked result with full per-trial metrics.
+`StrategyOptimizer` SHALL accept any `engine_factory` callable whose keyword arguments correspond to the keys in `param_grid`, run real OHLCV backtests for every parameter combination, and return a ranked result with full per-trial metrics. The optimizer SHALL accept optional `slippage_bps: float = 0` and `commission_bps: float = 0` parameters that are applied to every trial's backtest via the fill model.
 
 ```python
 @dataclass
@@ -14,6 +14,7 @@ class OptimizerResult:
     best_params: dict[str, Any]
     best_is_result: BacktestResult
     best_oos_result: BacktestResult | None  # None if is_fraction == 1.0
+    cost_model: dict[str, float]  # { "slippage_bps": ..., "commission_bps": ... }
 
 @dataclass
 class WindowResult:
@@ -37,6 +38,8 @@ class StrategyOptimizer:
         fill_model: FillModel | None = None,
         initial_equity: float = 2_000_000.0,
         n_jobs: int = 1,
+        slippage_bps: float = 0,
+        commission_bps: float = 0,
     ) -> None: ...
 
     def grid_search(
@@ -97,6 +100,10 @@ class StrategyOptimizer:
 - **WHEN** `objective` is not a key present in the metrics dict returned by `BacktestRunner`
 - **THEN** `grid_search()` SHALL raise `ValueError` with a descriptive message listing valid objective names
 
+#### Scenario: Cost model stored in result
+- **WHEN** `grid_search()` completes
+- **THEN** `OptimizerResult.cost_model` SHALL contain `{ "slippage_bps": <value>, "commission_bps": <value> }` reflecting the costs applied during optimization
+
 ### Requirement: Walk-forward rolling windows
 `walk_forward()` SHALL divide bars into sequential IS+OOS window pairs, run `grid_search` on each IS window to find optimal params, evaluate those params on the OOS window, and report per-window results and an overall efficiency score.
 
@@ -149,3 +156,37 @@ The optimizer SHALL warn when the IS window produces too few trades for statisti
 #### Scenario: Walk-forward window warns independently
 - **WHEN** a walk-forward IS window produces fewer than 30 round-trip trades for the best-params run
 - **THEN** `WindowResult` SHALL include a `low_trade_count: bool` flag set to `True`
+
+### Requirement: Unified Param Sweep frontend tab
+The Strategy "Param Sweep" sub-tab SHALL combine Grid Search and Optimizer into a single interface. A method selector dropdown SHALL allow choosing: "Grid Search", "Random Search", or "Walk-Forward". The sweep SHALL use parameters from `useStrategyStore`, allowing the user to mark 1-2 parameters as sweep variables while all others remain locked at their global context values.
+
+#### Scenario: Grid search with locked params
+- **WHEN** the user selects "Grid Search" method, marks `fast_period` and `slow_period` as sweep variables, and a strategy has 5 total params
+- **THEN** the request to `/api/optimizer/run` SHALL sweep `fast_period` and `slow_period` while `atr_multiplier`, `lots`, and `bar_agg` remain fixed at their `useStrategyStore.params` values
+
+#### Scenario: Random search configuration
+- **WHEN** the user selects "Random Search" method
+- **THEN** the UI SHALL show `n_trials` input (default 50) and use the sweep variable ranges for random sampling
+
+#### Scenario: Walk-forward configuration
+- **WHEN** the user selects "Walk-Forward" method
+- **THEN** the UI SHALL show `train_bars` and `test_bars` inputs in addition to the sweep parameters
+
+#### Scenario: Results display as heatmap for 2 sweep variables
+- **WHEN** a grid search completes with 2 sweep variables
+- **THEN** the results SHALL display as a 2D heatmap with the selected metric (Sharpe, PnL, Win Rate) as the color dimension
+
+#### Scenario: Results display as ranked table for 1 sweep variable
+- **WHEN** a grid/random search completes with 1 sweep variable
+- **THEN** the results SHALL display as a sorted table of trials with the sweep variable and all metrics
+
+### Requirement: Cost model in optimizer requests
+All optimizer/sweep API requests SHALL include `slippage_bps` and `commission_bps` from the global parameter context. The backend optimizer SHALL apply these costs to each trial's backtest.
+
+#### Scenario: Costs applied to each trial
+- **WHEN** a grid search runs 36 trials with `slippage_bps=5, commission_bps=2`
+- **THEN** every trial's backtest SHALL apply 5 bps slippage and 2 bps commission per trade, and the resulting Sharpe/PnL metrics SHALL reflect these costs
+
+#### Scenario: Cost model logged in param runs
+- **WHEN** an optimizer run completes
+- **THEN** the `param_runs` record SHALL include the cost model used: `{ slippage_bps, commission_bps }`
