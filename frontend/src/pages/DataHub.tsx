@@ -49,6 +49,10 @@ export function DataHub() {
       .catch((e) => setError(e.message));
   };
 
+  useEffect(() => {
+    loadData();
+  }, [symbol, tfMinutes]);
+
   const addIndicator = (registryId: string) => {
     const count = indicators.filter((ai) => ai.registryId === registryId).length;
     setIndicators((prev) => [...prev, createActiveIndicator(registryId, count)]);
@@ -319,7 +323,7 @@ export function DataHub() {
             </StatRow>
             <ChartCard title="OHLC">
               <ChartErrorBoundary fallbackLabel="Chart">
-                <ChartStack bars={bars} activeIndicators={indicators} />
+                <ChartStack bars={bars} activeIndicators={indicators} timeframeMinutes={tfMinutes} />
               </ChartErrorBoundary>
             </ChartCard>
             <ChartCard title={`RAW DATA — LAST ${Math.min(100, bars.length)} BARS`}>
