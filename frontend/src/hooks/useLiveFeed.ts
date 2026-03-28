@@ -5,6 +5,7 @@ import { useMarketDataStore } from "@/stores/marketDataStore";
 export function useLiveFeed() {
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef(0);
+  const shouldReconnectRef = useRef(true);
   const setWsConnected = useTradingStore((s) => s.setWsConnected);
   const processLiveTick = useMarketDataStore((s) => s.processLiveTick);
   const connectRef = useRef<() => void>(() => {});
@@ -20,6 +21,7 @@ export function useLiveFeed() {
     };
     ws.onclose = () => {
       setWsConnected(false);
+      if (!shouldReconnectRef.current) return;
       const delay = Math.min(1000 * 2 ** retryRef.current, 30000);
       retryRef.current++;
       setTimeout(connectRef.current, delay);
@@ -41,8 +43,10 @@ export function useLiveFeed() {
   }, [connect]);
 
   useEffect(() => {
+    shouldReconnectRef.current = true;
     connect();
     return () => {
+      shouldReconnectRef.current = false;
       wsRef.current?.close();
     };
   }, [connect]);
