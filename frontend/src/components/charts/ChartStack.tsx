@@ -3,6 +3,7 @@ import type { IChartApi } from "lightweight-charts";
 import type { OHLCVBar } from "@/lib/api";
 import type { ActiveIndicator, SeriesOutput, IndicatorDef } from "@/lib/indicatorRegistry";
 import { INDICATOR_REGISTRY, getIndicatorDef } from "@/lib/indicatorRegistry";
+import { toProfessionalSessionBars } from "@/lib/sessionChart";
 import { ChartPane, type ChartPaneHandle, type CandleData } from "./ChartPane";
 import { colors } from "@/lib/theme";
 
@@ -15,7 +16,9 @@ export const MAX_SECONDARY_PANES = 5;
 const PANE_INDICATORS = INDICATOR_REGISTRY.filter((d) => d.type === "pane");
 
 function toUnixTime(ts: string): number {
-  return Math.floor(new Date(ts.replace(" ", "T") + "Z").getTime() / 1000);
+  const normalized = ts.includes("T") ? ts : ts.replace(" ", "T");
+  const zoned = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`;
+  return Math.floor(new Date(zoned).getTime() / 1000);
 }
 
 function downsampleBars(data: OHLCVBar[], max: number): OHLCVBar[] {
@@ -38,9 +41,10 @@ const inputStyle: React.CSSProperties = {
 interface ChartStackProps {
   bars: OHLCVBar[];
   activeIndicators: ActiveIndicator[];
+  timeframeMinutes?: number;
 }
 
-export function ChartStack({ bars, activeIndicators }: ChartStackProps) {
+export function ChartStack({ bars, activeIndicators, timeframeMinutes = 1 }: ChartStackProps) {
   const primaryRef = useRef<ChartPaneHandle>(null);
   const secondaryRef = useRef<ChartPaneHandle>(null);
   const syncing = useRef(false);
@@ -58,7 +62,11 @@ export function ChartStack({ bars, activeIndicators }: ChartStackProps) {
     setSecondaryParams(defaults);
   }, [secondaryDef]);
 
-  const ds = useMemo(() => downsampleBars(bars, MAX_CHART_POINTS), [bars]);
+  const sessionBars = useMemo(
+    () => toProfessionalSessionBars(bars, timeframeMinutes),
+    [bars, timeframeMinutes],
+  );
+  const ds = useMemo(() => downsampleBars(sessionBars, MAX_CHART_POINTS), [sessionBars]);
   const times = useMemo(() => ds.map((b) => toUnixTime(b.timestamp)), [ds]);
 
   const candles: CandleData[] = useMemo(
@@ -166,6 +174,7 @@ export function ChartStack({ bars, activeIndicators }: ChartStackProps) {
         candles={candles}
         series={overlaySeries}
         showTimeScale={false}
+        timeframeMinutes={timeframeMinutes}
       />
       {/* Secondary chart header: indicator selector + params */}
       <div
@@ -210,6 +219,7 @@ export function ChartStack({ bars, activeIndicators }: ChartStackProps) {
         height={SECONDARY_HEIGHT}
         series={secondarySeries}
         showTimeScale={true}
+        timeframeMinutes={timeframeMinutes}
       />
     </div>
   );

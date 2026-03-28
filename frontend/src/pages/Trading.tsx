@@ -4,12 +4,17 @@ import { Sidebar, SectionLabel, ParamInput } from "@/components/Sidebar";
 import { StatCard, StatRow } from "@/components/StatCard";
 import { ChartCard } from "@/components/ChartCard";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
+import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
+import { OHLCVChart, type IndicatorOverlay } from "@/components/charts/OHLCVChart";
 import { useUiStore } from "@/stores/uiStore";
 import { useTradingStore } from "@/stores/tradingStore";
 import { useMarketDataStore } from "@/stores/marketDataStore";
 import { useShallow } from "zustand/react/shallow";
 import { createAccount, fetchAccounts, fetchStrategies, fetchWarRoomTyped, fetchOHLCV, deployToAccount, fetchDeployHistory, startSession, stopSession, fetchParamRuns, updateAccountStrategies } from "@/lib/api";
 import type { AccountInfo, StrategyInfo, WarRoomSession, WarRoomData, DeployLogEntry, ParamRun } from "@/lib/api";
+import { INDICATOR_REGISTRY, createActiveIndicator, getIndicatorDef } from "@/lib/indicatorRegistry";
+import type { ActiveIndicator } from "@/lib/indicatorRegistry";
+import { toProfessionalSessionBars } from "@/lib/sessionChart";
 import { colors } from "@/lib/theme";
 import { useLiveFeed } from "@/hooks/useLiveFeed";
 import { useRiskAlerts } from "@/hooks/useRiskAlerts";
@@ -330,10 +335,6 @@ function DeployTile({ session, onAction }: { session: WarRoomSession; onAction: 
   );
 }
 
-
-import { OHLCVChart } from "@/components/charts/OHLCVChart";
-import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
-
 const TF_OPTIONS = [
   { label: "1m", value: 1 },
   { label: "5m", value: 5 },
@@ -341,6 +342,15 @@ const TF_OPTIONS = [
   { label: "1h", value: 60 },
   { label: "D", value: 1440 },
 ];
+
+const OVERLAY_INDICATORS = INDICATOR_REGISTRY.filter((d) => d.type === "overlay");
+
+
+function toUnixTime(ts: string): number {
+  const normalized = ts.includes("T") ? ts : ts.replace(" ", "T");
+  const zoned = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`;
+  return Math.floor(new Date(zoned).getTime() / 1000);
+}
 
 function CommandChartPane({
   activeAccountId,
@@ -355,13 +365,90 @@ function CommandChartPane({
   tfMinutes: number;
   onTfChange: (tf: number) => void;
 }) {
+  const chartCardRef = useRef<HTMLDivElement | null>(null);
   const equityValues = equityCurve.map((p) => p.equity);
+  const [indicators, setIndicators] = useState<ActiveIndicator[]>([]);
+  const [addingIndicator, setAddingIndicator] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const sessionBars = useMemo(
+    () => toProfessionalSessionBars(bars ?? [], tfMinutes),
+    [bars, tfMinutes],
+  );
+
+  const addIndicator = (registryId: string) => {
+    const count = indicators.filter((ai) => ai.registryId === registryId).length;
+    setIndicators((prev) => [...prev, createActiveIndicator(registryId, count)]);
+    setAddingIndicator(false);
+  };
+
+  const removeIndicator = (instanceId: string) => {
+    setIndicators((prev) => prev.filter((ai) => ai.instanceId !== instanceId));
+    if (editingId === instanceId) setEditingId(null);
+  };
+
+  const updateParam = (instanceId: string, paramName: string, value: number) => {
+    setIndicators((prev) =>
+      prev.map((ai) =>
+        ai.instanceId === instanceId
+          ? { ...ai, params: { ...ai.params, [paramName]: value } }
+          : ai,
+      ),
+    );
+  };
+
+  const overlaySeries = useMemo<IndicatorOverlay[]>(() => {
+    if (sessionBars.length === 0) return [];
+    const times = sessionBars.map((b) => toUnixTime(b.timestamp));
+    const timeToIndex = new Map<number, number>(times.map((t, i) => [t, i]));
+    const overlays: IndicatorOverlay[] = [];
+    for (const ai of indicators) {
+      const def = getIndicatorDef(ai.registryId);
+      if (!def) continue;
+      const computed = def.compute(sessionBars as any, ai.params, times);
+      for (const s of computed) {
+        const values = Array(times.length).fill(null) as (number | null)[];
+        for (const point of s.data) {
+          const idx = timeToIndex.get(point.time);
+          if (idx != null) values[idx] = point.value;
+        }
+        overlays.push({
+          label: `${def.label}${s.label ? ` (${s.label})` : ""}`,
+          values,
+          color: ai.color,
+        });
+      }
+    }
+    return overlays;
+  }, [sessionBars, indicators]);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setExpanded(document.fullscreenElement === chartCardRef.current);
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
+
+  const toggleExpand = async () => {
+    if (!chartCardRef.current) return;
+    if (document.fullscreenElement === chartCardRef.current) {
+      await document.exitFullscreen();
+      return;
+    }
+    await chartCardRef.current.requestFullscreen();
+  };
+
   return (
     <div className="flex flex-col gap-2 h-full">
-      <div className="flex-1 min-h-[220px]" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}>
+      <div
+        ref={chartCardRef}
+        className="flex-1 min-h-[220px]"
+        style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}
+      >
         <div className="flex items-center justify-between p-2 border-b" style={{ borderColor: colors.cardBorder }}>
           <span className="text-[10px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>LIVE CHART</span>
-          <div className="flex gap-0.5">
+          <div className="flex gap-1">
             {TF_OPTIONS.map((o) => (
               <button key={o.value} onClick={() => onTfChange(o.value)}
                 className="px-1.5 py-0.5 rounded text-[8px] cursor-pointer border-none"
@@ -369,10 +456,119 @@ function CommandChartPane({
                 {o.label}
               </button>
             ))}
+            <button
+              onClick={toggleExpand}
+              className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none"
+              style={{ fontFamily: "var(--font-mono)", background: "rgba(90,138,242,0.12)", color: colors.text }}
+            >
+              {expanded ? "Collapse" : "Expand"}
+            </button>
           </div>
         </div>
-        <div className="p-2 h-[calc(100%-30px)]">
-           <OHLCVChart data={bars ?? []} height={180} />
+        <div className="px-2 py-1 border-b" style={{ borderColor: colors.cardBorder }}>
+          <div className="flex items-center gap-1.5 mb-1">
+            {addingIndicator ? (
+              <select
+                autoFocus
+                value=""
+                onChange={(e) => {
+                  if (e.target.value) addIndicator(e.target.value);
+                }}
+                onBlur={() => setAddingIndicator(false)}
+                className="rounded px-1.5 py-0.5 text-[9px]"
+                style={inputStyle}
+              >
+                <option value="">Select overlay…</option>
+                {OVERLAY_INDICATORS.map((def) => (
+                  <option key={def.id} value={def.id}>
+                    {def.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <button
+                onClick={() => setAddingIndicator(true)}
+                className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none text-white"
+                style={{ background: "#353849", fontFamily: "var(--font-mono)" }}
+              >
+                + Add Overlay
+              </button>
+            )}
+            {indicators.length === 0 && (
+              <span className="text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+                No overlays selected
+              </span>
+            )}
+          </div>
+          {indicators.map((ai) => {
+            const def = getIndicatorDef(ai.registryId);
+            if (!def) return null;
+            const isEditing = editingId === ai.instanceId;
+            const paramStr =
+              def.params.length > 0
+                ? ` (${def.params.map((p) => `${p.label}:${ai.params[p.name]}`).join(", ")})`
+                : "";
+            return (
+              <div key={ai.instanceId} className="mb-1">
+                <div className="flex items-center gap-1.5 text-[8px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+                  <span className="inline-block w-2 h-2 rounded-full" style={{ background: ai.color }} />
+                  <span className="flex-1 truncate" style={{ color: colors.text }}>
+                    {def.label}
+                    {paramStr}
+                  </span>
+                  {def.params.length > 0 && (
+                    <button
+                      onClick={() => setEditingId(isEditing ? null : ai.instanceId)}
+                      className="cursor-pointer border-none bg-transparent text-[8px]"
+                      style={{ color: isEditing ? colors.cyan : colors.dim }}
+                      title="Edit parameters"
+                    >
+                      ⚙
+                    </button>
+                  )}
+                  <button
+                    onClick={() => removeIndicator(ai.instanceId)}
+                    className="cursor-pointer border-none bg-transparent text-[10px]"
+                    style={{ color: colors.red }}
+                    title="Remove indicator"
+                  >
+                    ×
+                  </button>
+                </div>
+                {isEditing && (
+                  <div className="ml-3 mt-0.5 flex flex-wrap gap-1.5">
+                    {def.params.map((p) => (
+                      <label key={p.name} className="flex items-center gap-1 text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+                        <span>{p.label}</span>
+                        <input
+                          key={`${ai.instanceId}-${p.name}-${ai.params[p.name]}`}
+                          type="number"
+                          defaultValue={ai.params[p.name]}
+                          min={p.min}
+                          max={p.max}
+                          step={p.step ?? 1}
+                          onBlur={(e) => updateParam(ai.instanceId, p.name, Number(e.target.value))}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                          }}
+                          className="w-14 rounded px-1 py-0.5 text-[8px]"
+                          style={inputStyle}
+                        />
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div className="p-2" style={{ height: "calc(100% - 100px)" }}>
+          <OHLCVChart
+            data={sessionBars}
+            overlays={overlaySeries}
+            height={expanded ? 520 : 180}
+            timeframeMinutes={tfMinutes}
+          />
         </div>
       </div>
       <div className="flex-1 min-h-[160px]" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}>
@@ -497,7 +693,7 @@ function WarRoomTab() {
     const lookback = tf >= 1440 ? 180 : tf >= 60 ? 14 : 3;
     const start = new Date(Date.now() - lookback * 86400000).toISOString().slice(0, 10);
     fetchOHLCV("TX", start, today, tf).then((r) => {
-      if (r.bars.length > 0) setBars(r.bars);
+      setBars(r.bars);
     }).catch(() => {});
   };
   const handleTfChange = (tf: number) => {
@@ -909,7 +1105,7 @@ export function Trading() {
             <TabsTrigger
               key={t.value}
               value={t.value}
-              className="rounded-none border-b px-3 py-1.5 text-[9px] font-normal data-[state=active]:shadow-none"
+              className="rounded-none border-b px-3 py-1.5 text-[11px] font-normal data-[state=active]:shadow-none"
               style={{
                 fontFamily: "var(--font-mono)",
                 color: subTab === t.value ? colors.muted : colors.dim,

@@ -37,10 +37,11 @@ interface ChartPaneProps {
   volume?: VolumeData[];
   series?: SeriesOutput[];
   showTimeScale?: boolean;
+  timeframeMinutes?: number;
 }
 
 export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function ChartPane(
-  { height, candles, volume, series = [], showTimeScale = true },
+  { height, candles, volume, series = [], showTimeScale = true, timeframeMinutes = 1 },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -72,7 +73,12 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
       },
       crosshair: { mode: 0 },
       rightPriceScale: { borderColor: colors.cardBorder },
-      timeScale: { borderColor: colors.cardBorder, visible: showTimeScale },
+      timeScale: {
+        borderColor: colors.cardBorder,
+        visible: showTimeScale,
+        timeVisible: timeframeMinutes < 1440,
+        secondsVisible: false,
+      },
     });
 
     if (candles) {
@@ -111,7 +117,7 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
       volSeriesRef.current = null;
       extraSeriesRef.current = [];
     };
-  }, [height, !!candles, !!volume, showTimeScale]);
+  }, [height, !!candles, !!volume, showTimeScale, timeframeMinutes]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -138,6 +144,9 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
           const s = chart.addSeries(LineSeries, {
             color: so.color,
             lineWidth: 1 as LineWidth,
+            priceLineVisible: false,
+            lastValueVisible: false,
+            crosshairMarkerVisible: false,
           });
           s.setData(clean as any);
           extraSeriesRef.current.push(s);

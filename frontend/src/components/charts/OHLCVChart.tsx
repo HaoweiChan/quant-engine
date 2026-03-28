@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from "react";
 import { createChart, createSeriesMarkers, type IChartApi, type ISeriesApi, type ISeriesMarkersPluginApi, type LineWidth, CandlestickSeries, HistogramSeries, LineSeries } from "lightweight-charts";
 import type { OHLCVBar, TradeSignal } from "@/lib/api";
+import { toProfessionalSessionBars } from "@/lib/sessionChart";
 import { colors } from "@/lib/theme";
 import { useMarketDataStore } from "@/stores/marketDataStore";
 
@@ -17,10 +18,13 @@ interface OHLCVChartProps {
   height?: number;
   overlays?: IndicatorOverlay[];
   signals?: TradeSignal[];
+  timeframeMinutes?: number;
 }
 
 function toUnixTime(ts: string): number {
-  return Math.floor(new Date(ts.replace(" ", "T") + "Z").getTime() / 1000);
+  const normalized = ts.includes("T") ? ts : ts.replace(" ", "T");
+  const zoned = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`;
+  return Math.floor(new Date(zoned).getTime() / 1000);
 }
 
 const MAX_CHART_POINTS = 4000;
@@ -68,6 +72,7 @@ export const OHLCVChart = React.memo(function OHLCVChart({
   height = 340,
   overlays = [],
   signals = [],
+  timeframeMinutes = 1,
 }: OHLCVChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -75,6 +80,7 @@ export const OHLCVChart = React.memo(function OHLCVChart({
   const volSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const overlaySeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<any> | null>(null);
+  const lastRenderedTimeRef = useRef<number | null>(null);
 
   const lastLiveTick = useMarketDataStore((s) => s.lastLiveTick);
 
@@ -96,7 +102,11 @@ export const OHLCVChart = React.memo(function OHLCVChart({
       },
       crosshair: { mode: 0 },
       rightPriceScale: { borderColor: colors.cardBorder },
-      timeScale: { borderColor: colors.cardBorder },
+      timeScale: {
+        borderColor: colors.cardBorder,
+        timeVisible: timeframeMinutes < 1440,
+        secondsVisible: false,
+      },
     });
     const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: colors.green,
@@ -129,18 +139,22 @@ export const OHLCVChart = React.memo(function OHLCVChart({
       chart.remove();
       overlaySeriesRef.current = [];
     };
-  }, [height]);
+  }, [height, timeframeMinutes]);
 
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart || !candleSeriesRef.current || !volSeriesRef.current || data.length === 0) return;
 
     const ds = downsampleBars(data, MAX_CHART_POINTS);
-    const times = ds.map((bar) => toUnixTime(bar.timestamp));
+    const points = ds
+      .map((bar) => ({ bar, time: toUnixTime(bar.timestamp) }))
+      .filter((p) => Number.isFinite(p.time));
+    if (points.length === 0) return;
+    const times = points.map((p) => p.time);
 
     candleSeriesRef.current.setData(
-      ds.map((bar, i) => ({
-        time: times[i] as any,
+      points.map(({ bar, time }) => ({
+        time: time as any,
         open: bar.open,
         high: bar.high,
         low: bar.low,
@@ -149,8 +163,8 @@ export const OHLCVChart = React.memo(function OHLCVChart({
     );
 
     volSeriesRef.current.setData(
-      ds.map((bar, i) => ({
-        time: times[i] as any,
+      points.map(({ bar, time }) => ({
+        time: time as any,
         value: bar.volume,
         color: bar.close >= bar.open ? "rgba(38,166,154,0.3)" : "rgba(255,82,82,0.3)",
       })),
@@ -176,6 +190,9 @@ export const OHLCVChart = React.memo(function OHLCVChart({
         color: ov.color,
         lineWidth: (ov.lineWidth ?? 1) as LineWidth,
         lineStyle: ov.lineStyle,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
       });
       const pts = ov.values
         .map((v, i) => (v !== null && i < times.length ? { time: times[i] as any, value: v } : null))
@@ -183,25 +200,33 @@ export const OHLCVChart = React.memo(function OHLCVChart({
       s.setData(pts);
       overlaySeriesRef.current.push(s);
     }
+    lastRenderedTimeRef.current = times[times.length - 1];
     chart.timeScale().fitContent();
   }, [data, overlays, signals]);
 
   useEffect(() => {
     if (!lastLiveTick || !candleSeriesRef.current || !volSeriesRef.current) return;
-    const tickTime = toUnixTime(lastLiveTick.timestamp);
+    const converted = toProfessionalSessionBars([lastLiveTick], timeframeMinutes);
+    if (converted.length === 0) return;
+    const live = converted[0];
+    const tickTime = toUnixTime(live.timestamp);
+    if (!Number.isFinite(tickTime)) return;
+    const lastRendered = lastRenderedTimeRef.current;
+    if (lastRendered != null && tickTime < lastRendered) return;
     candleSeriesRef.current.update({
       time: tickTime as any,
-      open: lastLiveTick.open,
-      high: lastLiveTick.high,
-      low: lastLiveTick.low,
-      close: lastLiveTick.close,
+      open: live.open,
+      high: live.high,
+      low: live.low,
+      close: live.close,
     });
     volSeriesRef.current.update({
       time: tickTime as any,
-      value: lastLiveTick.volume,
-      color: lastLiveTick.close >= lastLiveTick.open ? "rgba(38,166,154,0.3)" : "rgba(255,82,82,0.3)",
+      value: live.volume,
+      color: live.close >= live.open ? "rgba(38,166,154,0.3)" : "rgba(255,82,82,0.3)",
     });
-  }, [lastLiveTick]);
+    lastRenderedTimeRef.current = tickTime;
+  }, [lastLiveTick, timeframeMinutes]);
 
   return <div ref={containerRef} />;
 });
