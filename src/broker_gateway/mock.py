@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import numpy as np
 
 from src.broker_gateway.abc import BrokerGateway
-from src.broker_gateway.types import AccountSnapshot, Fill, LivePosition
+from src.broker_gateway.types import AccountSnapshot, Fill, LivePosition, OpenOrder, OrderEvent
 
 
 class MockGateway(BrokerGateway):
@@ -23,6 +23,8 @@ class MockGateway(BrokerGateway):
         self._rng = np.random.default_rng(seed)
         self._equity_path: list[float] = [initial_equity]
         self._step = 0
+        self._cursor = 0
+        self._events: list[OrderEvent] = []
 
     @property
     def broker_name(self) -> str:
@@ -57,6 +59,29 @@ class MockGateway(BrokerGateway):
             Fill(datetime.now() - timedelta(minutes=int(self._rng.integers(5, 120))),
                  "TX", "buy", 20100.0 + self._rng.normal(0, 50), 1.0, f"mock-{self._step}", 25.0),
         ]
+        open_orders = [
+            OpenOrder(
+                order_id=f"open-{self._step}",
+                symbol="TX",
+                side="buy",
+                quantity=1.0,
+                remaining_quantity=1.0,
+                limit_price=20000.0,
+                status="submitted",
+                updated_at=datetime.now(),
+            ),
+        ]
+        self._cursor += 1
+        self._events.append(
+            OrderEvent(
+                broker_event_id=f"evt-{self._cursor}",
+                order_id=f"open-{self._step}",
+                event_type="ack",
+                price=None,
+                quantity=1.0,
+                timestamp=datetime.now(),
+            )
+        )
         return AccountSnapshot(
             connected=True,
             timestamp=datetime.now(),
@@ -68,6 +93,8 @@ class MockGateway(BrokerGateway):
             margin_available=new_eq - margin_used,
             positions=positions,
             recent_fills=fills,
+            open_orders=open_orders,
+            continuity_cursor=str(self._cursor),
         )
 
     def get_equity_history(self, days: int = 30) -> list[tuple[datetime, float]]:
@@ -79,3 +106,16 @@ class MockGateway(BrokerGateway):
             eq *= 1 + rng.normal(0.0003, 0.012)
             result.append((now - timedelta(days=days - i), eq))
         return result
+
+    def get_order_events_since(self, cursor: str | None) -> tuple[list[OrderEvent], str | None]:
+        if cursor is None:
+            return list(self._events), str(self._cursor)
+        try:
+            cursor_id = int(cursor)
+        except ValueError:
+            return [], str(self._cursor)
+        events = [
+            event for event in self._events
+            if int(event.broker_event_id.split("-")[-1]) > cursor_id
+        ]
+        return events, str(self._cursor)

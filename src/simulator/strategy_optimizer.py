@@ -14,20 +14,20 @@ picklable function (not a lambda or closure).
 """
 from __future__ import annotations
 
-import importlib
 import inspect
+import importlib
 import itertools
-from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from datetime import datetime
-from typing import Any, Callable
 
 import numpy as np
 import polars as pl
 
+from datetime import datetime
+from typing import Any, Callable
+from collections import defaultdict
 from src.core.adapter import BaseAdapter
 from src.core.position_engine import PositionEngine
 from src.simulator.backtester import BacktestRunner
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from src.simulator.fill_model import FillModel, MarketImpactFillModel
 from src.simulator.types import (
     BacktestResult,
@@ -37,6 +37,10 @@ from src.simulator.types import (
 )
 
 _LOW_TRADE_THRESHOLD = 30
+_OBJECTIVE_DIRECTIONS: dict[str, str] = {
+    "max_drawdown_abs": "minimize",
+    "max_drawdown_pct": "minimize",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +78,7 @@ def _run_single_trial(
     result = runner.run(bars, timestamps=timestamps)
     row: dict[str, Any] = dict(params)
     row.update(result.metrics)
-    row["_trade_count"] = len([f for f in result.trade_log if f.side == "buy"])
+    row["_trade_count"] = int(result.metrics.get("trade_count", 0.0))
     return row
 
 
@@ -91,12 +95,22 @@ class StrategyOptimizer:
         fill_model: FillModel | None = None,
         initial_equity: float = 2_000_000.0,
         n_jobs: int = 1,
+        mode: str = "research",
+        min_trade_count: int = _LOW_TRADE_THRESHOLD,
+        min_expectancy: float = 0.0,
+        min_oos_objective: float = 0.0,
     ) -> None:
+        if mode not in {"research", "production_intent"}:
+            raise ValueError("mode must be 'research' or 'production_intent'")
         self._adapter = adapter
         self._fill_model = fill_model or MarketImpactFillModel()
         self._initial_equity = initial_equity
         self._n_jobs = n_jobs
         self._slippage = getattr(self._fill_model, "_slippage", 1.0)
+        self._mode = mode
+        self._min_trade_count = min_trade_count
+        self._min_expectancy = min_expectancy
+        self._min_oos_objective = min_oos_objective
 
     # -- Public API --
 
@@ -138,14 +152,20 @@ class StrategyOptimizer:
         if rows:
             _validate_objective(objective, rows)
 
-        # Filter out error rows before building DataFrame
-        valid_rows = [r for r in rows if "_error" not in r]
-        if not valid_rows:
-            raise ValueError("All optimizer trials failed — check engine factory and params")
-        df = pl.DataFrame(valid_rows).sort(objective, descending=True)
+        objective_direction = _objective_direction(objective)
+        descending = objective_direction == "maximize"
+        (
+            df,
+            disqualified_trials,
+            gate_details,
+            warnings,
+        ) = self._rank_trials(
+            rows=rows,
+            param_keys=keys,
+            objective=objective,
+            descending=descending,
+        )
         best_params = {k: df[k][0] for k in keys}
-
-        warnings = _low_trade_count_warnings(rows, keys)
 
         best_is = self._run_backtest(engine_factory, best_params, is_bars, is_ts)
         best_oos = (
@@ -153,12 +173,27 @@ class StrategyOptimizer:
             if oos_bars else None
         )
 
+        gate_results = self._build_gate_results(
+            best_is_result=best_is,
+            best_oos_result=best_oos,
+            objective=objective,
+            objective_direction=objective_direction,
+        )
+        promotable = self._mode == "production_intent" and all(gate_results.values())
+
         return OptimizerResult(
             trials=df,
             best_params=best_params,
             best_is_result=best_is,
             best_oos_result=best_oos,
             warnings=warnings,
+            objective_name=objective,
+            objective_direction=objective_direction,
+            disqualified_trials=disqualified_trials,
+            gate_results=gate_results,
+            gate_details=gate_details,
+            promotable=promotable,
+            mode=self._mode,
         )
 
     def walk_forward(
@@ -202,7 +237,7 @@ class StrategyOptimizer:
                 objective=objective, is_fraction=1.0,
             )
             best = is_opt.best_params
-            is_trades = len([f for f in is_opt.best_is_result.trade_log if f.side == "buy"])
+            is_trades = int(is_opt.best_is_result.metrics.get("trade_count", 0.0))
             oos_result = self._run_backtest(engine_factory, best, w_oos_bars, w_oos_ts)
 
             windows.append(WindowResult(
@@ -267,12 +302,20 @@ class StrategyOptimizer:
         if rows:
             _validate_objective(objective, rows)
 
-        valid_rows = [r for r in rows if "_error" not in r]
-        if not valid_rows:
-            raise ValueError("All optimizer trials failed — check engine factory and params")
-        df = pl.DataFrame(valid_rows).sort(objective, descending=True)
+        objective_direction = _objective_direction(objective)
+        descending = objective_direction == "maximize"
+        (
+            df,
+            disqualified_trials,
+            gate_details,
+            warnings,
+        ) = self._rank_trials(
+            rows=rows,
+            param_keys=keys,
+            objective=objective,
+            descending=descending,
+        )
         best_params = {k: df[k][0] for k in keys}
-        warnings = _low_trade_count_warnings(rows, keys)
 
         best_is = self._run_backtest(engine_factory, best_params, is_bars, is_ts)
         best_oos = (
@@ -280,12 +323,27 @@ class StrategyOptimizer:
             if oos_bars else None
         )
 
+        gate_results = self._build_gate_results(
+            best_is_result=best_is,
+            best_oos_result=best_oos,
+            objective=objective,
+            objective_direction=objective_direction,
+        )
+        promotable = self._mode == "production_intent" and all(gate_results.values())
+
         return OptimizerResult(
             trials=df,
             best_params=best_params,
             best_is_result=best_is,
             best_oos_result=best_oos,
             warnings=warnings,
+            objective_name=objective,
+            objective_direction=objective_direction,
+            disqualified_trials=disqualified_trials,
+            gate_results=gate_results,
+            gate_details=gate_details,
+            promotable=promotable,
+            mode=self._mode,
         )
 
     # -- Private helpers --
@@ -353,20 +411,98 @@ class StrategyOptimizer:
         result = self._run_backtest(factory, params, bars, timestamps)
         row: dict[str, Any] = dict(params)
         row.update(result.metrics)
-        row["_trade_count"] = len([f for f in result.trade_log if f.side == "buy"])
+        row["_trade_count"] = int(result.metrics.get("trade_count", 0.0))
         return row
+
+    def _rank_trials(
+        self,
+        rows: list[dict[str, Any]],
+        param_keys: list[str],
+        objective: str,
+        descending: bool,
+    ) -> tuple[pl.DataFrame, int, dict[str, float | str], list[str]]:
+        valid_rows = [r for r in rows if "_error" not in r]
+        if not valid_rows:
+            raise ValueError("All optimizer trials failed — check engine factory and params")
+        disqualified_trials = 0
+        eligible_rows = valid_rows
+        gate_details: dict[str, float | str] = {
+            "min_trade_count": float(self._min_trade_count),
+            "min_expectancy": self._min_expectancy,
+        }
+        if self._mode == "production_intent":
+            eligible_rows = []
+            for row in valid_rows:
+                trade_count = _extract_trade_count(row)
+                expectancy = _extract_expectancy(row)
+                trade_ok = trade_count >= self._min_trade_count
+                expectancy_ok = expectancy is None or expectancy >= self._min_expectancy
+                if trade_ok and expectancy_ok:
+                    eligible_rows.append(row)
+                    continue
+                disqualified_trials += 1
+            gate_details["eligible_trials"] = float(len(eligible_rows))
+            gate_details["total_trials"] = float(len(valid_rows))
+            if not eligible_rows:
+                raise ValueError(
+                    "No promotable candidate after production-intent gates "
+                    f"(min_trade_count={self._min_trade_count}, min_expectancy={self._min_expectancy})"
+                )
+        warnings = _low_trade_count_warnings(rows, param_keys)
+        df = pl.DataFrame(eligible_rows).sort(objective, descending=descending)
+        return df, disqualified_trials, gate_details, warnings
+
+    def _build_gate_results(
+        self,
+        best_is_result: BacktestResult,
+        best_oos_result: BacktestResult | None,
+        objective: str,
+        objective_direction: str,
+    ) -> dict[str, bool]:
+        if self._mode != "production_intent":
+            return {}
+        is_trade_count = int(best_is_result.metrics.get("trade_count", 0.0))
+        is_expectancy = _extract_expectancy(best_is_result.metrics)
+        min_trade_count_pass = is_trade_count >= self._min_trade_count
+        min_expectancy_pass = is_expectancy is None or is_expectancy >= self._min_expectancy
+        oos_floor_pass = True
+        if best_oos_result is not None:
+            oos_value = float(best_oos_result.metrics.get(objective, 0.0))
+            if objective_direction == "maximize":
+                oos_floor_pass = oos_value >= self._min_oos_objective
+        return {
+            "min_trade_count_pass": min_trade_count_pass,
+            "min_expectancy_pass": min_expectancy_pass,
+            "oos_floor_pass": oos_floor_pass,
+        }
 
 
 # ---------------------------------------------------------------------------
 # Free helper functions
 # ---------------------------------------------------------------------------
 
+def _objective_direction(objective: str) -> str:
+    return _OBJECTIVE_DIRECTIONS.get(objective, "maximize")
+
+
+def _extract_trade_count(row: dict[str, Any]) -> int:
+    value = row.get("trade_count", row.get("_trade_count", 0))
+    return int(value)
+
+
+def _extract_expectancy(row: dict[str, Any]) -> float | None:
+    if "expectancy" in row and row["expectancy"] is not None:
+        return float(row["expectancy"])
+    required = ("win_rate", "avg_win", "avg_loss")
+    if not all(k in row and row[k] is not None for k in required):
+        return None
+    win_rate = float(row["win_rate"])
+    avg_win = float(row["avg_win"])
+    avg_loss = float(row["avg_loss"])
+    return (win_rate * avg_win) + ((1.0 - win_rate) * avg_loss)
+
+
 def _validate_objective(objective: str, rows: list[dict[str, Any]]) -> None:
-    valid = {
-        "sharpe", "sortino", "calmar", "max_drawdown_abs", "max_drawdown_pct",
-        "win_rate", "profit_factor", "avg_win", "avg_loss", "trade_count",
-        "avg_holding_period",
-    }
     # Skip error rows (from failed parallel workers) when checking
     sample = next((r for r in rows if "_error" not in r), None)
     if sample is None:

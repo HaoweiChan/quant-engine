@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 from src.core.policies import EntryPolicy, NoAddPolicy, StopPolicy
 from src.core.types import (
+    AccountState,
     EngineConfig,
     EngineState,
     EntryDecision,
@@ -224,6 +225,7 @@ class TAORBEntryPolicy(EntryPolicy):
         snapshot: MarketSnapshot,
         signal: MarketSignal | None,
         engine_state: EngineState,
+        account: AccountState | None = None,
     ) -> EntryDecision | None:
         if engine_state.mode == "halted":
             return None

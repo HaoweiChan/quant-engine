@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
 from datetime import datetime
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -29,6 +29,28 @@ class Fill:
 
 
 @dataclass
+class OpenOrder:
+    order_id: str
+    symbol: str
+    side: str
+    quantity: float
+    remaining_quantity: float
+    limit_price: float | None
+    status: str
+    updated_at: datetime
+
+
+@dataclass
+class OrderEvent:
+    broker_event_id: str
+    order_id: str
+    event_type: str
+    price: float | None
+    quantity: float | None
+    timestamp: datetime
+
+
+@dataclass
 class AccountSnapshot:
     connected: bool
     timestamp: datetime
@@ -40,6 +62,8 @@ class AccountSnapshot:
     margin_available: float
     positions: list[LivePosition] = field(default_factory=list)
     recent_fills: list[Fill] = field(default_factory=list)
+    open_orders: list[OpenOrder] = field(default_factory=list)
+    continuity_cursor: str | None = None
 
     @classmethod
     def disconnected(cls) -> AccountSnapshot:

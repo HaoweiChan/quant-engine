@@ -199,12 +199,24 @@ def _build_runner(
 ):
     """Build a BacktestRunner for any strategy. Single source of truth."""
     from src.simulator.backtester import BacktestRunner
+    from src.core.types import ImpactParams
     from src.simulator.fill_model import MarketImpactFillModel
 
     factory = resolve_factory(strategy)
     adapter = _get_adapter()
-    fm = fill_model or MarketImpactFillModel()
     merged = dict(strategy_params or {})
+    slippage_bps = float(merged.pop("slippage_bps", 0.0))
+    commission_bps = float(merged.pop("commission_bps", 0.0))
+    commission_fixed = float(merged.pop("commission_fixed_per_contract", 0.0))
+    if fill_model is None:
+        impact_params = ImpactParams(
+            spread_bps=slippage_bps,
+            commission_bps=commission_bps,
+            commission_fixed_per_contract=commission_fixed,
+        )
+        fm = MarketImpactFillModel(params=impact_params)
+    else:
+        fm = fill_model
     merged.pop("bar_agg", None)
     if "max_loss" not in merged:
         merged["max_loss"] = 500_000
@@ -239,6 +251,7 @@ def _format_backtest_result(
             "pnl_ratio": result.impact_report.pnl_ratio,
             "total_market_impact": result.impact_report.total_market_impact,
             "total_spread_cost": result.impact_report.total_spread_cost,
+            "total_commission_cost": result.impact_report.total_commission_cost,
             "avg_latency_ms": result.impact_report.avg_latency_ms,
             "partial_fill_count": result.impact_report.partial_fill_count,
         }
@@ -638,12 +651,24 @@ def run_sweep_for_mcp(
     sweep_params: dict[str, Any],
     strategy: str = "pyramid",
     n_samples: int | None = None,
-    metric: str = "sharpe",
+    metric: str = "composite_fitness",
+    mode: str = "production_intent",
     scenario: str = "strong_bull",
+    symbol: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    is_fraction: float = 0.8,
+    min_trade_count: int = 100,
+    min_expectancy: float = 0.0,
+    min_oos_metric: float = 0.0,
+    train_bars: int | None = None,
+    test_bars: int | None = None,
     n_bars: int | None = None,
     timeframe: str = "daily",
 ) -> dict[str, Any]:
     """Run parameter sweep (grid or random search)."""
+    if mode not in {"research", "production_intent"}:
+        return {"error": "mode must be 'research' or 'production_intent'"}
     if len(sweep_params) > 3:
         return {
             "error": (
@@ -653,6 +678,11 @@ def run_sweep_for_mcp(
             )
         }
 
+    from datetime import datetime
+    from pathlib import Path
+    from statistics import mean as _mean
+
+    from src.data.db import Database
     from src.simulator.price_gen import generate_paths
     from src.simulator.strategy_optimizer import StrategyOptimizer
 
@@ -662,12 +692,54 @@ def run_sweep_for_mcp(
 
     clamped_base, param_warnings = validate_and_clamp(resolved_slug, base_params)
 
-    path_config = _make_path_config(scenario, n_bars, timeframe)
-    paths = generate_paths(1, path_config)
-    bars, timestamps = _bars_from_path(paths[0], path_config, timeframe)
+    if mode == "production_intent":
+        if not (symbol and start and end):
+            return {
+                "error": (
+                    "production_intent mode requires symbol, start, and end "
+                    "for real-data evaluation"
+                )
+            }
+        db_path = Path(__file__).resolve().parent.parent.parent / "data" / "taifex_data.db"
+        if not db_path.exists():
+            return {"error": f"Database not found at {db_path}"}
+        db = Database(f"sqlite:///{db_path}")
+        raw = db.get_ohlcv(symbol, datetime.fromisoformat(start), datetime.fromisoformat(end))
+        if not raw:
+            return {"error": f"No data for {symbol} in {start}–{end}"}
+        daily_ranges = [b.high - b.low for b in raw]
+        daily_atr = _mean(daily_ranges) if daily_ranges else 0.0
+        bars = [
+            {
+                "symbol": symbol,
+                "price": b.close,
+                "open": b.open,
+                "high": b.high,
+                "low": b.low,
+                "close": b.close,
+                "volume": float(b.volume),
+                "daily_atr": daily_atr,
+                "timestamp": b.timestamp,
+            }
+            for b in raw
+        ]
+        timestamps = [b.timestamp for b in raw]
+        source_label = f"real:{symbol}:{start}:{end}"
+    else:
+        path_config = _make_path_config(scenario, n_bars, timeframe)
+        paths = generate_paths(1, path_config)
+        bars, timestamps = _bars_from_path(paths[0], path_config, timeframe)
+        source_label = f"synthetic:{scenario}"
     adapter = _get_adapter()
     factory = resolve_factory(resolved_slug)
-    optimizer = StrategyOptimizer(adapter)
+    optimizer = StrategyOptimizer(
+        adapter,
+        mode=mode,
+        min_trade_count=min_trade_count,
+        min_expectancy=min_expectancy,
+        min_oos_objective=min_oos_metric,
+    )
+    walk_forward_summary: dict[str, Any] | None = None
 
     if n_samples is not None:
         # Random search with continuous bounds
@@ -684,6 +756,7 @@ def run_sweep_for_mcp(
             timestamps=timestamps,
             n_trials=n_samples,
             objective=metric,
+            is_fraction=is_fraction,
         )
     else:
         # Grid search
@@ -693,12 +766,31 @@ def run_sweep_for_mcp(
                 param_grid[k] = v
             else:
                 return {"error": f"For grid search, sweep_params['{k}'] must be a list of values"}
+        if mode == "production_intent":
+            effective_train = train_bars or max(int(len(bars) * 0.6), 50)
+            effective_test = test_bars or max(int(len(bars) * 0.2), 20)
+            if effective_train + effective_test <= len(bars):
+                wf = optimizer.walk_forward(
+                    engine_factory=lambda **p: factory(**{**clamped_base, **p}),
+                    param_grid=param_grid,
+                    bars=bars,
+                    timestamps=timestamps,
+                    train_bars=effective_train,
+                    test_bars=effective_test,
+                    objective=metric,
+                )
+                walk_forward_summary = {
+                    "windows": len(wf.windows),
+                    "efficiency": wf.efficiency,
+                    "combined_oos_metrics": wf.combined_oos_metrics,
+                }
         result = optimizer.grid_search(
             engine_factory=lambda **p: factory(**{**clamped_base, **p}),
             param_grid=param_grid,
             bars=bars,
             timestamps=timestamps,
             objective=metric,
+            is_fraction=is_fraction,
         )
 
     trials_data = result.trials.to_dicts() if len(result.trials) > 0 else []
@@ -714,7 +806,7 @@ def run_sweep_for_mcp(
         run_id = registry.save_run(
             result=result,
             strategy=resolved_slug,
-            symbol=f"synthetic:{scenario}",
+            symbol=source_label,
             objective=metric,
             search_type=search,
             source="mcp",
@@ -734,6 +826,13 @@ def run_sweep_for_mcp(
         "scenario": scenario,
         "strategy": strategy,
         "metric": metric,
+        "mode": mode,
+        "objective_direction": result.objective_direction,
+        "disqualified_trials": result.disqualified_trials,
+        "gate_results": result.gate_results,
+        "gate_details": result.gate_details,
+        "promotable": result.promotable,
+        "auto_activation_disabled": True,
         "best_params": result.best_params,
         "best_is_metrics": result.best_is_result.metrics,
         "best_oos_metrics": result.best_oos_result.metrics if result.best_oos_result else None,
@@ -745,6 +844,10 @@ def run_sweep_for_mcp(
     if run_id is not None:
         out["run_id"] = run_id
         out["pareto_candidates"] = pareto_candidates
+    if walk_forward_summary is not None:
+        out["walk_forward"] = walk_forward_summary
+    if mode == "production_intent":
+        out["evaluation_data"] = {"symbol": symbol, "start": start, "end": end}
     return out
 
 

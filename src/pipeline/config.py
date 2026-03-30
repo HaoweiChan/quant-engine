@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from dataclasses import dataclass, field
 
 from src.core.types import PyramidConfig
 
@@ -17,8 +17,12 @@ class RiskConfig:
     margin_ratio_threshold: float = 0.30
     signal_staleness_hours: float = 2.0
     feed_staleness_minutes: float = 5.0
+    feed_staleness_seconds: float = 3.0
+    feed_recovery_seconds: float = 5.0
     spread_spike_multiplier: float = 10.0
     max_loss: float = 500_000.0
+    daily_loss_limit_pct: float = 0.02
+    aum: float = 2_000_000.0
     check_interval_seconds: float = 30.0
     max_var_pct: float = 0.05
     max_beta_absolute: float = 2.0
@@ -31,6 +35,16 @@ class RiskConfig:
 class ExecutionConfig:
     slippage_points: float = 1.0
     max_retries: int = 3
+    run_mode: str = "micro_live"
+    calm_vol_threshold: float = 0.30
+    high_vol_threshold: float = 0.80
+    calm_wait_ms: float = 300.0
+    normal_wait_ms: float = 200.0
+    high_wait_ms: float = 100.0
+    quality_slippage_bps: float = 2.0
+    quality_breach_ratio: float = 0.20
+    p99_alert_threshold_ms: float = 200.0
+    allow_slo_override: bool = False
 
 
 @dataclass
@@ -93,14 +107,23 @@ def load_engine_config(path: Path | None = None) -> PipelineConfig:
         margin_limit=float(p.get("margin_limit", 0.50)),
         kelly_fraction=float(p.get("kelly_fraction", 0.25)),
         entry_conf_threshold=float(p.get("entry_conf_threshold", 0.65)),
+        max_equity_risk_pct=float(p.get("max_equity_risk_pct", 0.02)),
+        long_only_compat_mode=bool(p.get("long_only_compat_mode", False)),
     )
     r = cfg.get("risk", {})
+    feed_staleness_seconds = float(
+        r.get("feed_staleness_seconds", float(r.get("feed_staleness_minutes", 5.0)) * 60.0)
+    )
     risk = RiskConfig(
         margin_ratio_threshold=float(r.get("margin_ratio_threshold", 0.30)),
         signal_staleness_hours=float(r.get("signal_staleness_hours", 2.0)),
         feed_staleness_minutes=float(r.get("feed_staleness_minutes", 5.0)),
+        feed_staleness_seconds=feed_staleness_seconds,
+        feed_recovery_seconds=float(r.get("feed_recovery_seconds", 5.0)),
         spread_spike_multiplier=float(r.get("spread_spike_multiplier", 10.0)),
         max_loss=float(r.get("max_loss", 500_000)),
+        daily_loss_limit_pct=float(r.get("daily_loss_limit_pct", 0.02)),
+        aum=float(r.get("aum", 2_000_000.0)),
         check_interval_seconds=float(r.get("check_interval_seconds", 30)),
         max_var_pct=float(r.get("max_var_pct", 0.05)),
         max_beta_absolute=float(r.get("max_beta_absolute", 2.0)),
@@ -111,6 +134,16 @@ def load_engine_config(path: Path | None = None) -> PipelineConfig:
     execution = ExecutionConfig(
         slippage_points=float(e.get("slippage_points", 1.0)),
         max_retries=int(e.get("max_retries", 3)),
+        run_mode=str(e.get("run_mode", "micro_live")),
+        calm_vol_threshold=float(e.get("calm_vol_threshold", 0.30)),
+        high_vol_threshold=float(e.get("high_vol_threshold", 0.80)),
+        calm_wait_ms=float(e.get("calm_wait_ms", 300.0)),
+        normal_wait_ms=float(e.get("normal_wait_ms", 200.0)),
+        high_wait_ms=float(e.get("high_wait_ms", 100.0)),
+        quality_slippage_bps=float(e.get("quality_slippage_bps", 2.0)),
+        quality_breach_ratio=float(e.get("quality_breach_ratio", 0.20)),
+        p99_alert_threshold_ms=float(e.get("p99_alert_threshold_ms", 200.0)),
+        allow_slo_override=bool(e.get("allow_slo_override", False)),
     )
     ro = cfg.get("rollout", {})
     rollout = RolloutConfig(

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from collections import deque
+import structlog
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal
+from collections import deque
+from typing import TYPE_CHECKING, Any, Literal
 
 from src.core.policies import (
     AddPolicy,
@@ -28,6 +29,8 @@ from src.core.types import (
 if TYPE_CHECKING:
     from src.risk.pre_trade import PreTradeRiskCheck
 
+logger = structlog.get_logger(__name__)
+
 
 class PositionEngine:
     def __init__(
@@ -46,6 +49,7 @@ class PositionEngine:
         self._positions: list[Position] = []
         self._mode: Literal["model_assisted", "rule_only", "halted"] = "model_assisted"
         self._high_history: deque[float] = deque(maxlen=config.trail_lookback)
+        self._pre_trade_rejection_events: list[dict[str, Any]] = []
 
     # -- public API --
 
@@ -73,11 +77,14 @@ class PositionEngine:
 
         # Priority 4: entry signal (delegate to policy)
         if not self._positions and self._mode != "halted":
-            decision = self._entry_policy.should_enter(snapshot, effective_signal, state)
+            decision = self._entry_policy.should_enter(snapshot, effective_signal, state, account)
             if decision is not None:
-                entry_orders = self._execute_entry(decision, snapshot)
-                entry_orders = self._gate_orders(entry_orders, snapshot, account)
-                orders.extend(entry_orders)
+                if not self._passes_entry_margin_gate(decision, snapshot, account):
+                    decision = None
+                else:
+                    entry_orders = self._execute_entry(decision, snapshot)
+                    entry_orders = self._gate_orders(entry_orders, snapshot, account)
+                    orders.extend(entry_orders)
 
         # Priority 5: add position (delegate to policy, engine gates on margin)
         if self._positions and self._mode != "halted":
@@ -121,6 +128,10 @@ class PositionEngine:
                 self._positions.pop(i)
                 return pos
         return None
+
+    @property
+    def pre_trade_rejection_events(self) -> list[dict[str, Any]]:
+        return list(self._pre_trade_rejection_events)
 
     # -- private: stop-loss check (Priority 1) --
 
@@ -353,6 +364,61 @@ class PositionEngine:
             if result.approved:
                 approved.append(order)
         return approved
+
+    def _passes_entry_margin_gate(
+        self,
+        decision: EntryDecision,
+        snapshot: MarketSnapshot,
+        account: AccountState | None,
+    ) -> bool:
+        required_margin = decision.lots * snapshot.margin_per_unit
+        if account is None:
+            if not self._config.require_account_for_entry:
+                return True
+            self._record_pre_trade_rejection(
+                reason="missing_account_context",
+                snapshot=snapshot,
+                decision=decision,
+                required_margin=required_margin,
+                available_margin=None,
+            )
+            return False
+        try:
+            available_margin = float(getattr(account, "margin_available"))
+        except (TypeError, ValueError):
+            return True
+        if available_margin < required_margin:
+            self._record_pre_trade_rejection(
+                reason="insufficient_margin",
+                snapshot=snapshot,
+                decision=decision,
+                required_margin=required_margin,
+                available_margin=available_margin,
+            )
+            return False
+        return True
+
+    def _record_pre_trade_rejection(
+        self,
+        reason: str,
+        snapshot: MarketSnapshot,
+        decision: EntryDecision,
+        required_margin: float,
+        available_margin: float | None,
+    ) -> None:
+        event = {
+            "event_type": "pre_trade_rejection",
+            "strategy": decision.metadata.get("strategy", "pyramid_entry"),
+            "reason": reason,
+            "symbol": snapshot.contract_specs.symbol,
+            "required_margin": required_margin,
+            "available_margin": available_margin,
+            "decision_lots": decision.lots,
+            "decision_direction": decision.direction,
+            "timestamp": snapshot.timestamp.isoformat(),
+        }
+        self._pre_trade_rejection_events.append(event)
+        logger.warning("pre_trade_rejection", **event)
 
     # -- private: helpers --
 

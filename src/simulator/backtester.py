@@ -121,6 +121,7 @@ class BacktestRunner:
 
                 fill = self._fill_model.simulate(order, bar, ts)
                 trade_log.append(fill)
+                realized_pnl -= fill.commission_cost
 
                 # Dispatch FillEvent
                 fill_event = FillEvent(
@@ -164,6 +165,7 @@ class BacktestRunner:
         impact_report = self._build_impact_report(trade_log, equity_curve)
         metrics["total_market_impact"] = impact_report.total_market_impact
         metrics["total_spread_cost"] = impact_report.total_spread_cost
+        metrics["total_commission_cost"] = impact_report.total_commission_cost
         metrics["avg_latency_ms"] = impact_report.avg_latency_ms
         metrics["partial_fill_count"] = float(impact_report.partial_fill_count)
 
@@ -205,10 +207,11 @@ class BacktestRunner:
     def _build_impact_report(trade_log: list[Fill], equity_curve: list[float]) -> ImpactReport:
         total_impact = sum(abs(f.market_impact) for f in trade_log)
         total_spread = sum(abs(f.spread_cost) for f in trade_log)
+        total_commission = sum(abs(f.commission_cost) for f in trade_log)
         latencies = [f.latency_ms for f in trade_log if f.latency_ms > 0]
         avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
         partial_count = sum(1 for f in trade_log if f.is_partial)
-        naive_pnl = equity_curve[-1] - equity_curve[0] + total_impact + total_spread
+        naive_pnl = equity_curve[-1] - equity_curve[0] + total_impact + total_spread + total_commission
         realistic_pnl = equity_curve[-1] - equity_curve[0]
         ratio = realistic_pnl / naive_pnl if naive_pnl != 0 else 1.0
         breakdown = [
@@ -222,6 +225,7 @@ class BacktestRunner:
                 "lots": f.lots,
                 "market_impact": f.market_impact,
                 "spread_cost": f.spread_cost,
+                "commission_cost": f.commission_cost,
                 "latency_ms": f.latency_ms,
                 "is_partial": float(f.is_partial),
             }
@@ -233,6 +237,7 @@ class BacktestRunner:
             pnl_ratio=ratio,
             total_market_impact=total_impact,
             total_spread_cost=total_spread,
+            total_commission_cost=total_commission,
             avg_latency_ms=avg_latency,
             partial_fill_count=partial_count,
             per_trade_impact_breakdown=breakdown,

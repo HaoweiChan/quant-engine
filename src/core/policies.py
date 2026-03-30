@@ -2,10 +2,12 @@
 
 Policies answer "what to do"; the engine answers "how to execute it."
 """
+import structlog
 from abc import ABC, abstractmethod
 from collections import deque
 
 from src.core.types import (
+    AccountState,
     AddDecision,
     EngineState,
     EntryDecision,
@@ -15,6 +17,8 @@ from src.core.types import (
     PyramidConfig,
 )
 
+logger = structlog.get_logger(__name__)
+
 
 class EntryPolicy(ABC):
     @abstractmethod
@@ -23,6 +27,7 @@ class EntryPolicy(ABC):
         snapshot: MarketSnapshot,
         signal: MarketSignal | None,
         engine_state: EngineState,
+        account: AccountState | None = None,
     ) -> EntryDecision | None: ...
 
 
@@ -54,41 +59,82 @@ class StopPolicy(ABC):
 class PyramidEntryPolicy(EntryPolicy):
     def __init__(self, config: PyramidConfig) -> None:
         self._config = config
+        logger.info(
+            "pyramid_entry_policy_initialized",
+            long_only_compat_mode=config.long_only_compat_mode,
+            max_equity_risk_pct=config.max_equity_risk_pct,
+        )
 
     def should_enter(
         self,
         snapshot: MarketSnapshot,
         signal: MarketSignal | None,
         engine_state: EngineState,
+        account: AccountState | None = None,
     ) -> EntryDecision | None:
         if engine_state.mode in ("halted", "rule_only"):
+            logger.debug("entry_policy_rejected", reason="engine_mode_block", mode=engine_state.mode)
             return None
         if signal is None:
+            logger.debug("entry_policy_rejected", reason="missing_signal")
             return None
         if signal.direction_conf <= self._config.entry_conf_threshold:
+            logger.debug(
+                "entry_policy_rejected",
+                reason="low_confidence",
+                direction_conf=signal.direction_conf,
+            )
             return None
-        if signal.direction <= 0:
+        if abs(signal.direction) < 1e-9:
+            logger.debug("entry_policy_rejected", reason="flat_direction")
+            return None
+        if self._config.long_only_compat_mode and signal.direction < 0:
+            logger.info("entry_policy_rejected", reason="long_only_compat_mode")
             return None
 
         daily_atr = snapshot.atr["daily"]
-        lot_spec = self._config.lot_schedule[0]
-        total_lots = float(sum(lot_spec))
         stop_distance = self._config.stop_atr_mult * daily_atr
+        if stop_distance <= 0:
+            return None
+        direction = "long" if signal.direction > 0 else "short"
+        risk_per_contract = stop_distance * snapshot.point_value
+        if risk_per_contract <= 0:
+            return None
 
-        max_loss_if_stopped = total_lots * stop_distance * snapshot.point_value
-        if max_loss_if_stopped > self._config.max_loss:
-            scaled_lots = self._config.max_loss / (stop_distance * snapshot.point_value)
-            if scaled_lots < snapshot.min_lot:
-                return None
-            total_lots = scaled_lots
+        lot_spec = self._config.lot_schedule[0]
+        schedule_lots = float(sum(lot_spec))
+        if account is None:
+            equity_risk_lots = schedule_lots
+            logger.info("entry_policy_sizing_fallback", reason="missing_account_context")
+        else:
+            equity_risk_lots = (account.equity * self._config.max_equity_risk_pct) / risk_per_contract
+        static_cap_lots = self._config.max_loss / risk_per_contract
+        total_lots = min(schedule_lots, equity_risk_lots, static_cap_lots)
+        if total_lots < snapshot.min_lot:
+            logger.info(
+                "entry_policy_rejected",
+                reason="below_min_lot",
+                total_lots=total_lots,
+                min_lot=snapshot.min_lot,
+            )
+            return None
 
-        stop_level = snapshot.price - stop_distance
+        stop_level = (
+            snapshot.price - stop_distance
+            if direction == "long"
+            else snapshot.price + stop_distance
+        )
         return EntryDecision(
             lots=total_lots,
             contract_type="large",
             initial_stop=stop_level,
-            direction="long",
-            metadata={"signal_conf": signal.direction_conf},
+            direction=direction,
+            metadata={
+                "signal_conf": signal.direction_conf,
+                "equity_risk_lots": equity_risk_lots,
+                "static_cap_lots": static_cap_lots,
+                "compat_mode": self._config.long_only_compat_mode,
+            },
         )
 
 

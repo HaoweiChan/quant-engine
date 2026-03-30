@@ -39,9 +39,9 @@ Result JSON schema:
 """
 from __future__ import annotations
 
-import argparse
-import json
 import sys
+import json
+import argparse
 from pathlib import Path
 from typing import TYPE_CHECKING
 from statistics import mean as _mean
@@ -77,13 +77,6 @@ def main() -> None:
                 search_type="grid",
                 source="dashboard",
             )
-            # Auto-activate best candidate
-            best_cand = registry._conn.execute(
-                "SELECT id FROM param_candidates WHERE run_id = ? AND label LIKE 'best_%' LIMIT 1",
-                (run_id,),
-            ).fetchone()
-            if best_cand:
-                registry.activate(best_cand["id"])
             registry.close()
             result_data["run_id"] = run_id
         except Exception:
@@ -99,6 +92,7 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
     from datetime import datetime
 
     from src.adapters.taifex import TaifexAdapter
+    from src.core.types import ImpactParams
     from src.data.db import Database
     from src.simulator.fill_model import MarketImpactFillModel
     from src.simulator.strategy_optimizer import StrategyOptimizer
@@ -117,6 +111,11 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
     n_jobs: int = int(cfg.get("n_jobs", 1))
     slippage_bps: float = float(cfg.get("slippage_bps", 0.0))
     commission_bps: float = float(cfg.get("commission_bps", 0.0))
+    commission_fixed_per_contract: float = float(cfg.get("commission_fixed_per_contract", 0.0))
+    mode: str = cfg.get("mode", "research")
+    min_trade_count: int = int(cfg.get("min_trade_count", 30))
+    min_expectancy: float = float(cfg.get("min_expectancy", 0.0))
+    min_oos_objective: float = float(cfg.get("min_oos_objective", 0.0))
 
     db_path = Path(__file__).resolve().parent.parent.parent / "data" / "taifex_data.db"
     db = Database(f"sqlite:///{db_path}")
@@ -133,16 +132,20 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
     ]
     timestamps = [b.timestamp for b in raw]
 
-    # Inject cost model into each grid combo so the engine sees them
-    if slippage_bps:
-        param_grid["slippage_bps"] = [slippage_bps]
-    if commission_bps:
-        param_grid["commission_bps"] = [commission_bps]
+    impact_params = ImpactParams(
+        spread_bps=slippage_bps,
+        commission_bps=commission_bps,
+        commission_fixed_per_contract=commission_fixed_per_contract,
+    )
 
     opt = StrategyOptimizer(
         adapter=TaifexAdapter(),
-        fill_model=MarketImpactFillModel(),
+        fill_model=MarketImpactFillModel(params=impact_params),
         n_jobs=n_jobs,
+        mode=mode,
+        min_trade_count=min_trade_count,
+        min_expectancy=min_expectancy,
+        min_oos_objective=min_oos_objective,
     )
     result = opt.grid_search(
         engine_factory,
@@ -166,6 +169,12 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
         "trials": result.trials.to_dicts(),
         "best_params": result.best_params,
         "warnings": result.warnings,
+        "mode": result.mode,
+        "promotable": result.promotable,
+        "gate_results": result.gate_results,
+        "gate_details": result.gate_details,
+        "objective_direction": result.objective_direction,
+        "disqualified_trials": result.disqualified_trials,
         "is_metrics": result.best_is_result.metrics,
         "oos_metrics": result.best_oos_result.metrics if result.best_oos_result else None,
         "is_equity": is_eq[::step_is],

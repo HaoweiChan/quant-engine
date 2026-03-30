@@ -1,6 +1,8 @@
 """Message formatters for Telegram notifications."""
 from __future__ import annotations
 
+from typing import Any
+
 from src.core.types import RiskAction
 from src.execution.engine import ExecutionResult
 
@@ -38,6 +40,19 @@ def format_risk_alert(action: RiskAction, trigger: str, details: dict) -> str:
         f"Action: {action.value}\n"
         f"Trigger: {trigger}\n"
         f"Details: {details}"
+    )
+
+
+def format_pre_trade_rejection(event: dict[str, Any]) -> str:
+    return (
+        f"<b>PRE-TRADE REJECTION</b>\n"
+        f"Strategy: {event.get('strategy', 'unknown')}\n"
+        f"Symbol: {event.get('symbol', 'unknown')}\n"
+        f"Reason: {event.get('reason', 'unknown')}\n"
+        f"Required margin: {event.get('required_margin', 0.0):,.0f}\n"
+        f"Available margin: {event.get('available_margin', 0.0) if event.get('available_margin') is not None else 'N/A'}\n"
+        f"Direction: {event.get('decision_direction', 'unknown')}\n"
+        f"Lots: {event.get('decision_lots', 0.0)}"
     )
 
 

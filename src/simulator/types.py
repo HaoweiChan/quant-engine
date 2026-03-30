@@ -20,6 +20,7 @@ class Fill:
     reason: str
     market_impact: float = 0.0
     spread_cost: float = 0.0
+    commission_cost: float = 0.0
     latency_ms: float = 0.0
     fill_qty: float = 0.0
     remaining_qty: float = 0.0
@@ -34,6 +35,7 @@ class ImpactReport:
     pnl_ratio: float
     total_market_impact: float
     total_spread_cost: float
+    total_commission_cost: float
     avg_latency_ms: float
     partial_fill_count: int
     per_trade_impact_breakdown: list[dict[str, float]]
@@ -58,6 +60,13 @@ class OptimizerResult:
     best_is_result: BacktestResult
     best_oos_result: BacktestResult | None
     warnings: list[str] = field(default_factory=list)
+    objective_name: str = "sharpe"
+    objective_direction: str = "maximize"
+    disqualified_trials: int = 0
+    gate_results: dict[str, bool] = field(default_factory=dict)
+    gate_details: dict[str, float | str] = field(default_factory=dict)
+    promotable: bool = False
+    mode: str = "research"
 
 
 @dataclass

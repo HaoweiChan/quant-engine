@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import httpx
 import structlog
+from typing import Any
 
 logger = structlog.get_logger(__name__)
 
@@ -33,6 +34,11 @@ class NotificationDispatcher:
         except Exception:
             logger.exception("telegram_dispatch_error")
             return False
+
+    async def dispatch_pre_trade_rejection(self, event: dict[str, Any]) -> bool:
+        from src.alerting.formatters import format_pre_trade_rejection
+
+        return await self.dispatch(format_pre_trade_rejection(event))
 
     async def close(self) -> None:
         await self._client.aclose()

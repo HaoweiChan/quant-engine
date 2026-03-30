@@ -10,7 +10,7 @@ from datetime import datetime
 import structlog
 
 from src.broker_gateway.abc import BrokerGateway
-from src.broker_gateway.types import AccountSnapshot, Fill, LivePosition
+from src.broker_gateway.types import AccountSnapshot, Fill, LivePosition, OpenOrder, OrderEvent
 
 logger = structlog.get_logger(__name__)
 
@@ -262,6 +262,8 @@ class SinopacGateway(BrokerGateway):
         positions = self._fetch_positions()
         unrealized = sum(p.unrealized_pnl for p in positions)
         fills = self._fetch_fills()
+        open_orders = self._fetch_open_orders()
+        continuity_cursor = str(int(time.time() * 1000))
 
         return AccountSnapshot(
             connected=True,
@@ -274,6 +276,8 @@ class SinopacGateway(BrokerGateway):
             margin_available=available,
             positions=positions,
             recent_fills=fills,
+            open_orders=open_orders,
+            continuity_cursor=continuity_cursor,
         )
 
     def _fetch_positions(self) -> list[LivePosition]:
@@ -327,9 +331,76 @@ class SinopacGateway(BrokerGateway):
             ))
         return result
 
+    def _fetch_open_orders(self) -> list[OpenOrder]:
+        try:
+            trades = self._api.list_trades()
+        except Exception:
+            return []
+        result: list[OpenOrder] = []
+        for trade in trades:
+            order = getattr(trade, "order", None)
+            if order is None:
+                continue
+            status = getattr(trade, "status", None)
+            status_value = str(getattr(status, "status", "Submitted"))
+            if status_value in {"Filled", "Cancelled"}:
+                continue
+            quantity = float(getattr(order, "quantity", 0.0))
+            deal_quantity = float(getattr(status, "deal_quantity", 0.0)) if status else 0.0
+            remaining = max(quantity - deal_quantity, 0.0)
+            result.append(
+                OpenOrder(
+                    order_id=str(getattr(order, "id", "")),
+                    symbol=str(getattr(order, "code", "")),
+                    side="buy" if getattr(order, "action", "") == "Buy" else "sell",
+                    quantity=quantity,
+                    remaining_quantity=remaining,
+                    limit_price=float(getattr(order, "price", 0.0) or 0.0),
+                    status=status_value,
+                    updated_at=datetime.now(),
+                )
+            )
+        return result
+
     def get_equity_history(self, days: int = 30) -> list[tuple[datetime, float]]:
         # shioaji doesn't provide historical equity directly — delegate to snapshot store
         return []
+
+    def get_order_events_since(self, cursor: str | None) -> tuple[list[OrderEvent], str | None]:
+        try:
+            trades = self._api.list_trades() if self._api else []
+        except Exception:
+            return [], cursor
+        cursor_ts = 0
+        if cursor is not None:
+            try:
+                cursor_ts = int(cursor)
+            except ValueError:
+                cursor_ts = 0
+        events: list[OrderEvent] = []
+        next_cursor = cursor_ts
+        for trade in trades:
+            order = getattr(trade, "order", None)
+            if order is None:
+                continue
+            status = getattr(trade, "status", None)
+            status_text = str(getattr(status, "status", "Submitted"))
+            event_ts = int(time.time() * 1000)
+            if event_ts <= cursor_ts:
+                continue
+            next_cursor = max(next_cursor, event_ts)
+            events.append(
+                OrderEvent(
+                    broker_event_id=f"{getattr(order, 'id', 'unknown')}:{event_ts}",
+                    order_id=str(getattr(order, "id", "")),
+                    event_type=status_text.lower(),
+                    price=float(getattr(status, "deal_price", 0.0) or 0.0) if status else None,
+                    quantity=float(getattr(order, "quantity", 0.0)),
+                    timestamp=datetime.now(),
+                )
+            )
+        events.sort(key=lambda item: item.timestamp)
+        return events, str(next_cursor) if next_cursor else cursor
 
     def _should_reconnect(self, exc: Exception) -> bool:
         msg = str(exc).lower()

@@ -5,7 +5,7 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from src.broker_gateway.types import AccountSnapshot
+from src.broker_gateway.types import AccountSnapshot, OrderEvent
 
 
 class BrokerGateway(ABC):
@@ -31,6 +31,10 @@ class BrokerGateway(ABC):
     @abstractmethod
     def get_equity_history(self, days: int = 30) -> list[tuple[datetime, float]]:
         """Return historical equity data points for the last N days."""
+
+    @abstractmethod
+    def get_order_events_since(self, cursor: str | None) -> tuple[list[OrderEvent], str | None]:
+        """Return deterministic order/fill events newer than cursor and next cursor."""
 
     @property
     @abstractmethod

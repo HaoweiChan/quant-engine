@@ -9,10 +9,11 @@ Long:
   1. EMA(trend) is rising  (large-trend filter)
   2. Price pulled back into EMA(fast)/EMA(slow) zone  -> price <= EMA(slow)
   3. Pullback depth >= min_pullback_pts below EMA(fast)
-  4. StochRSI %K crossed UP through %D within stoch_cross_lookback bars
-  5. StochRSI %K was below stoch_oversold before that cross
-  6. ADX >= adx_min  (market is trending, not chopping)
-  7. Not in force-close window
+  4. RSI(short) < oversold threshold (structural stress)
+  5. ADX >= adx_min  (market is trending, not chopping)
+  6. VWAP alignment: price below VWAP (discount) for long
+  7. Volume confirmation: bar volume above rolling average
+  8. Not in force-close window
 
 Short: mirror image.
 
@@ -21,6 +22,7 @@ Exit logic (StopPolicy)
   Initial stop  : entry +/- atr_sl_mult x ATR
   T1 target     : entry +/- atr_t1_mult x ATR  ->  move stop to breakeven
   EMA(slow) trail : once at breakeven, trail stop at EMA(slow) +/- trail_buf.
+  Max hold bars : time-exit after N bars to prevent bleed.
   Force close   : 13:25-13:45 day / 04:50-05:00 night  ->  stop = price.
 
 ATR approximation: SMA(|delta-close|, atr_len) x 1.6
@@ -31,12 +33,9 @@ from collections import deque
 from datetime import datetime, time
 from typing import TYPE_CHECKING
 
-
-def _mean(vals: list[float]) -> float:
-    return sum(vals) / len(vals)
-
 from src.core.policies import EntryPolicy, NoAddPolicy, StopPolicy
 from src.core.types import (
+    AccountState,
     EngineConfig,
     EngineState,
     EntryDecision,
@@ -51,60 +50,112 @@ if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
 
 
+def _mean(vals: list[float]) -> float:
+    return sum(vals) / len(vals)
+
+
 PARAM_SCHEMA: dict[str, dict] = {
-    "bar_agg":       {"type": "int",   "default": 5,    "min": 1,    "max": 15,
-                      "description": "Aggregate N raw bars into one before indicator update (e.g. 5 = 5-min bars from 1-min feed).",
-                      "grid": [1, 3, 5, 10]},
-    "ema_fast":      {"type": "int",   "default": 13,   "min": 3,    "max": 50,
-                      "description": "Fast EMA period (pullback zone upper).",
-                      "grid": [5, 8, 13]},
-    "ema_slow":      {"type": "int",   "default": 34,   "min": 10,   "max": 80,
-                      "description": "Slow EMA period (pullback zone lower).",
-                      "grid": [15, 21, 34]},
-    "ema_trend":     {"type": "int",   "default": 144,  "min": 30,   "max": 300,
-                      "description": "Trend EMA period (direction filter)."},
-    "ema_align":     {"type": "int",   "default": 1,    "min": 0,    "max": 1,
-                      "description": "Require EMA alignment (fast>slow for long, fast<slow for short).",
-                      "grid": [0, 1]},
-    "stoch_rsi_len": {"type": "int",   "default": 14,   "min": 5,    "max": 30,
-                      "description": "RSI period for StochRSI calculation."},
-    "stoch_k":       {"type": "int",   "default": 3,    "min": 2,    "max": 10,
-                      "description": "StochRSI %K smoothing period."},
-    "stoch_d":       {"type": "int",   "default": 3,    "min": 2,    "max": 10,
-                      "description": "StochRSI %D smoothing period."},
-    "stoch_oversold":      {"type": "float", "default": 15.0, "min": 5.0,  "max": 40.0,
-                            "description": "StochRSI oversold threshold for long entries.",
-                            "grid": [15.0, 20.0, 25.0, 30.0]},
-    "stoch_overbought":    {"type": "float", "default": 85.0, "min": 60.0, "max": 95.0,
-                            "description": "StochRSI overbought threshold for short entries.",
-                            "grid": [70.0, 75.0, 80.0, 85.0]},
-    "stoch_cross_lookback": {"type": "int",  "default": 3,   "min": 2,    "max": 8,
-                             "description": "Bars to look back for StochRSI cross.",
-                             "grid": [2, 3, 4, 5]},
-    "min_pullback_pts":    {"type": "float", "default": 15.0, "min": 2.0,  "max": 30.0,
-                            "description": "Min pullback depth in points to filter wick touches.",
-                            "grid": [3.0, 5.0, 8.0, 12.0, 15.0]},
-    "atr_len":       {"type": "int",   "default": 10,   "min": 5,    "max": 50,
-                      "description": "ATR calculation period."},
-    "atr_sl_mult":   {"type": "float", "default": 1.5,  "min": 0.8,  "max": 5.0,
-                      "description": "ATR multiplier for initial stop loss.",
-                      "grid": [1.0, 1.2, 1.5, 2.0, 2.5]},
-    "atr_t1_mult":   {"type": "float", "default": 2.5,  "min": 1.5,  "max": 8.0,
-                      "description": "ATR multiplier for T1 target (breakeven trigger).",
-                      "grid": [2.0, 2.5, 3.0, 4.0, 5.0]},
-    "atr_ceil":      {"type": "float", "default": 0.0,  "min": 0.0,  "max": 5.0,
-                      "description": "Max ATR as multiple of rolling avg (0=disabled). Blocks entries in volatile chop.",
-                      "grid": [0.0, 1.5, 2.0, 2.5]},
-    "adx_len":       {"type": "int",   "default": 14,   "min": 7,    "max": 30,
-                      "description": "ADX calculation period."},
-    "adx_min":       {"type": "float", "default": 30.0, "min": 10.0, "max": 35.0,
-                      "description": "Minimum ADX for entry (trend strength filter).",
-                      "grid": [15.0, 18.0, 20.0, 22.0, 25.0, 30.0]},
-    "ema_trail_buffer_pts": {"type": "float", "default": 5.0, "min": 0.0, "max": 20.0,
-                             "description": "Points buffer for EMA trail stop.",
-                             "grid": [2.0, 5.0, 8.0, 10.0]},
-    "allow_night":   {"type": "int",   "default": 0,    "min": 0,    "max": 1,
-                      "description": "Allow entries during night session (0=no, 1=yes)."},
+    "bar_agg": {
+        "type": "int", "default": 3, "min": 1, "max": 15,
+        "description": "Aggregate N raw bars into one before indicator update.",
+        "grid": [1, 3, 5],
+    },
+    "ema_fast": {
+        "type": "int", "default": 5, "min": 3, "max": 50,
+        "description": "Fast EMA period (pullback zone upper).",
+        "grid": [5, 8, 13],
+    },
+    "ema_slow": {
+        "type": "int", "default": 34, "min": 10, "max": 80,
+        "description": "Slow EMA period (pullback zone lower).",
+        "grid": [15, 21, 34],
+    },
+    "ema_trend": {
+        "type": "int", "default": 144, "min": 30, "max": 300,
+        "description": "Trend EMA period (direction filter).",
+    },
+    "ema_align": {
+        "type": "int", "default": 1, "min": 0, "max": 1,
+        "description": "Require EMA alignment (fast>slow for long, fast<slow for short).",
+        "grid": [0, 1],
+    },
+    "rsi_len": {
+        "type": "int", "default": 3, "min": 2, "max": 7,
+        "description": "Short RSI period for structural stress confirmation.",
+        "grid": [3, 5],
+    },
+    "rsi_oversold": {
+        "type": "float", "default": 35.0, "min": 10.0, "max": 50.0,
+        "description": "RSI oversold threshold for long pullback entries.",
+        "grid": [25.0, 30.0, 35.0, 40.0, 45.0],
+    },
+    "rsi_overbought": {
+        "type": "float", "default": 65.0, "min": 55.0, "max": 90.0,
+        "description": "RSI overbought threshold for short pullback entries.",
+        "grid": [60.0, 65.0, 70.0, 75.0],
+    },
+    "vol_len": {
+        "type": "int", "default": 20, "min": 5, "max": 100,
+        "description": "Rolling window for volume average.",
+        "grid": [10, 20],
+    },
+    "vol_mult": {
+        "type": "float", "default": 0.8, "min": 0.5, "max": 2.0,
+        "description": "Min volume spike vs rolling average for entry.",
+        "grid": [0.8, 1.0, 1.2],
+    },
+    "vwap_filter": {
+        "type": "int", "default": 1, "min": 0, "max": 1,
+        "description": "Require VWAP directional alignment (1=on, 0=off).",
+        "grid": [0, 1],
+    },
+    "min_pullback_pts": {
+        "type": "float", "default": 3.0, "min": 2.0, "max": 30.0,
+        "description": "Min pullback depth in points to filter wick touches.",
+        "grid": [3.0, 5.0, 8.0, 12.0],
+    },
+    "atr_len": {
+        "type": "int", "default": 10, "min": 5, "max": 50,
+        "description": "ATR calculation period.",
+    },
+    "atr_sl_mult": {
+        "type": "float", "default": 2.0, "min": 0.5, "max": 3.0,
+        "description": "ATR multiplier for initial stop loss.",
+        "grid": [1.5, 2.0, 2.5, 3.0],
+    },
+    "atr_t1_mult": {
+        "type": "float", "default": 5.0, "min": 1.5, "max": 8.0,
+        "description": "ATR multiplier for T1 target (breakeven trigger).",
+        "grid": [3.0, 4.0, 5.0],
+    },
+    "atr_ceil": {
+        "type": "float", "default": 0.0, "min": 0.0, "max": 5.0,
+        "description": "Max ATR as multiple of rolling avg (0=disabled).",
+        "grid": [0.0, 1.5, 2.0, 2.5],
+    },
+    "adx_len": {
+        "type": "int", "default": 14, "min": 7, "max": 30,
+        "description": "ADX calculation period.",
+    },
+    "adx_min": {
+        "type": "float", "default": 30.0, "min": 10.0, "max": 40.0,
+        "description": "Minimum ADX for entry (trend strength filter).",
+        "grid": [20.0, 25.0, 30.0],
+    },
+    "ema_trail_buffer_pts": {
+        "type": "float", "default": 5.0, "min": 0.0, "max": 20.0,
+        "description": "Points buffer for EMA trail stop after breakeven.",
+        "grid": [2.0, 5.0, 8.0],
+    },
+    "max_hold_bars": {
+        "type": "int", "default": 120, "min": 10, "max": 300,
+        "description": "Max bars to hold before time-exit.",
+        "grid": [60, 90, 120, 180],
+    },
+    "allow_night": {
+        "type": "int", "default": 1, "min": 0, "max": 1,
+        "description": "Allow entries during night session (0=no, 1=yes).",
+    },
 }
 
 STRATEGY_META: dict = {
@@ -119,8 +170,9 @@ STRATEGY_META: dict = {
     },
     "description": (
         "EMA Trend Pullback is an intraday trend-following strategy. "
-        "Enters on pullbacks to EMA zone confirmed by StochRSI cross and ADX filter. "
-        "Exits via ATR T1 -> breakeven, then EMA trail."
+        "Enters on pullbacks to EMA zone confirmed by RSI-3 stress, "
+        "ADX >= 30 trend filter, and VWAP alignment. "
+        "Exits via ATR T1 -> breakeven, then EMA trail. Max hold 120 bars."
     ),
 }
 
@@ -128,36 +180,33 @@ _ATR_SCALE = 1.6
 
 
 class _Indicators:
-    """Rolling indicators fed one bar close at a time, with optional bar aggregation."""
+    """Rolling indicators with EMA-smoothed ADX, VWAP, volume, and bar aggregation."""
 
     def __init__(
         self,
         ema_fast: int,
         ema_slow: int,
         ema_trend: int,
-        stoch_rsi_len: int,
-        stoch_k: int,
-        stoch_d: int,
+        rsi_len: int,
         atr_len: int,
         adx_len: int,
+        vol_len: int = 20,
         bar_agg: int = 1,
     ) -> None:
         self._n_fast = ema_fast
         self._n_slow = ema_slow
         self._n_trend = ema_trend
-        self._srsi_len = stoch_rsi_len
-        self._stoch_k = stoch_k
-        self._stoch_d = stoch_d
+        self._rsi_len = rsi_len
         self._atr_len = atr_len
         self._adx_len = adx_len
+        self._vol_len = vol_len
         self._bar_agg = max(bar_agg, 1)
         self._agg_count = 0
-        max_buf = max(ema_trend + 2,
-                      stoch_rsi_len + stoch_k + stoch_d + 4,
-                      atr_len + 2,
-                      adx_len * 3)
+        max_buf = max(ema_trend + 2, rsi_len + 2, atr_len + 2, adx_len * 3)
         self._closes: deque[float] = deque(maxlen=max_buf + 1)
+        self._volumes: deque[float] = deque(maxlen=max(vol_len, 1) + 1)
         self._last_ts: datetime | None = None
+        self._last_vol: float = 0.0
         self._ema_fast_v: float | None = None
         self._ema_slow_v: float | None = None
         self._ema_trend_v: float | None = None
@@ -166,60 +215,80 @@ class _Indicators:
         self.ema_slow: float | None = None
         self.ema_trend: float | None = None
         self.ema_trend_rising: bool | None = None
-        self.stoch_k_val: float | None = None
-        self.stoch_d_val: float | None = None
-        self._k_hist: deque[float] = deque(maxlen=20)
-        self._d_hist: deque[float] = deque(maxlen=20)
+        self.rsi: float | None = None
         self.atr: float | None = None
         self.atr_avg: float | None = None
         self._atr_history: deque[float] = deque(maxlen=50)
-        self.adx: float | None = None
-        self._prev_close: float | None = None
-        self._sm_tr: float | None = None
-        self._sm_plus_dm: float | None = None
-        self._sm_minus_dm: float | None = None
-        self._dx_buf: deque[float] = deque(maxlen=adx_len + 1)
+        self.vol_ratio: float | None = None
+        # EMA-smoothed ADX (responsive, like keltner_vwap_breakout)
+        self.adx: float = 0.0
+        self._prev_price: float | None = None
+        self._adx_alpha = 2.0 / (adx_len + 1)
+        self._plus_dm_ema: float | None = None
+        self._minus_dm_ema: float | None = None
+        self._atr_dm_ema: float | None = None
+        self._adx_ema: float | None = None
+        # VWAP (daily reset)
+        self.vwap: float | None = None
+        self._vwap_date = None
+        self._cum_pv = 0.0
+        self._cum_vol = 0.0
 
-    def update(self, price: float, ts: datetime) -> None:
+    def update(self, price: float, ts: datetime, volume: float = 0.0) -> None:
         if ts == self._last_ts:
             return
         self._last_ts = ts
+        self._last_vol = volume
+        self._update_vwap(ts, price, volume)
+        self._update_adx(price)
         self._agg_count += 1
         if self._agg_count < self._bar_agg:
             return
         self._agg_count = 0
         self._closes.append(price)
+        self._volumes.append(volume)
         self._compute(price)
 
-    def stoch_cross_up_within(self, lookback: int, oversold: float) -> bool:
-        """True if %K crossed above %D within lookback bars from oversold."""
-        ks = list(self._k_hist)
-        ds = list(self._d_hist)
-        n = min(len(ks), len(ds))
-        if n < 2:
-            return False
-        w = min(lookback + 1, n)
-        ks, ds = ks[-w:], ds[-w:]
-        for i in range(1, len(ks)):
-            if ks[i] > ds[i] and ks[i - 1] <= ds[i - 1]:
-                if any(k < oversold for k in ks[:i]):
-                    return True
-        return False
+    def _update_vwap(self, ts: datetime, price: float, volume: float) -> None:
+        d = ts.date()
+        if d != self._vwap_date:
+            self._vwap_date = d
+            self._cum_pv = 0.0
+            self._cum_vol = 0.0
+        self._cum_pv += price * max(volume, 0.0)
+        self._cum_vol += max(volume, 0.0)
+        self.vwap = self._cum_pv / self._cum_vol if self._cum_vol > 0 else None
 
-    def stoch_cross_down_within(self, lookback: int, overbought: float) -> bool:
-        """True if %K crossed below %D within lookback bars from overbought."""
-        ks = list(self._k_hist)
-        ds = list(self._d_hist)
-        n = min(len(ks), len(ds))
-        if n < 2:
-            return False
-        w = min(lookback + 1, n)
-        ks, ds = ks[-w:], ds[-w:]
-        for i in range(1, len(ks)):
-            if ks[i] < ds[i] and ks[i - 1] >= ds[i - 1]:
-                if any(k > overbought for k in ks[:i]):
-                    return True
-        return False
+    def _update_adx(self, price: float) -> None:
+        """EMA-smoothed ADX — same responsive method as keltner_vwap_breakout."""
+        if self._prev_price is None:
+            self._prev_price = price
+            return
+        tr = abs(price - self._prev_price)
+        delta = price - self._prev_price
+        pdm = max(delta, 0.0)
+        mdm = max(-delta, 0.0)
+        a = self._adx_alpha
+        if self._atr_dm_ema is None:
+            self._atr_dm_ema = tr
+            self._plus_dm_ema = pdm
+            self._minus_dm_ema = mdm
+        else:
+            self._atr_dm_ema = a * tr + (1 - a) * self._atr_dm_ema
+            self._plus_dm_ema = a * pdm + (1 - a) * self._plus_dm_ema
+            self._minus_dm_ema = a * mdm + (1 - a) * self._minus_dm_ema
+        if self._atr_dm_ema and self._atr_dm_ema > 1e-9:
+            pdi = 100.0 * (self._plus_dm_ema / self._atr_dm_ema)
+            mdi = 100.0 * (self._minus_dm_ema / self._atr_dm_ema)
+            denom = pdi + mdi
+            if denom > 1e-9:
+                dx = 100.0 * abs(pdi - mdi) / denom
+                if self._adx_ema is None:
+                    self._adx_ema = dx
+                else:
+                    self._adx_ema = a * dx + (1 - a) * self._adx_ema
+                self.adx = self._adx_ema
+        self._prev_price = price
 
     @staticmethod
     def _ema_step(prev: float | None, price: float, n: int,
@@ -253,116 +322,62 @@ class _Indicators:
             self._atr_history.append(self.atr)
             if len(self._atr_history) >= 10:
                 self.atr_avg = _mean(list(self._atr_history))
-        self._compute_stoch_rsi(closes)
-        self._compute_adx(price)
-
-    def _rsi_from_slice(self, window: list[float]) -> float | None:
-        if len(window) < self._srsi_len + 1:
-            return None
-        changes = [window[i] - window[i - 1] for i in range(1, len(window))]
-        gains = [c for c in changes if c > 0]
-        losses = [-c for c in changes if c < 0]
-        ag = _mean(gains) if gains else 0.0
-        al = _mean(losses) if losses else 0.0
-        if al == 0:
-            return 100.0
-        return 100.0 - 100.0 / (1.0 + ag / al)
-
-    def _compute_stoch_rsi(self, closes: list[float]) -> None:
-        need = self._srsi_len + self._stoch_k + self._stoch_d + 2
-        if len(closes) < need:
-            return
-        rsi_series: list[float] = []
-        total_needed = self._stoch_k + self._stoch_d
-        for lag in range(total_needed - 1, -1, -1):
-            end = len(closes) - lag
-            sub = closes[max(0, end - self._srsi_len - 1): end]
-            r = self._rsi_from_slice(sub)
-            if r is None:
-                return
-            rsi_series.append(r)
-        raw_k: list[float] = []
-        for i in range(len(rsi_series) - self._stoch_k + 1):
-            w = rsi_series[i: i + self._stoch_k]
-            lo, hi = min(w), max(w)
-            raw_k.append(0.0 if hi == lo else (w[-1] - lo) / (hi - lo) * 100.0)
-        if len(raw_k) < self._stoch_d:
-            return
-        k = raw_k[-1]
-        d = _mean(raw_k[-self._stoch_d:])
-        self._k_hist.append(k)
-        self._d_hist.append(d)
-        self.stoch_k_val = k
-        self.stoch_d_val = d
-
-    def _compute_adx(self, price: float) -> None:
-        if self._prev_close is None:
-            self._prev_close = price
-            return
-        prev = self._prev_close
-        self._prev_close = price
-        tr = abs(price - prev)
-        plus_dm = max(price - prev, 0.0)
-        minus_dm = max(prev - price, 0.0)
-        if plus_dm == minus_dm:
-            plus_dm = minus_dm = 0.0
-        elif plus_dm < minus_dm:
-            plus_dm = 0.0
+        # RSI (simple, short-period structural stress)
+        if n >= self._rsi_len + 1:
+            changes = [closes[i] - closes[i - 1] for i in range(n - self._rsi_len, n)]
+            gains = [c for c in changes if c > 0]
+            losses = [-c for c in changes if c < 0]
+            ag = _mean(gains) if gains else 0.0
+            al = _mean(losses) if losses else 0.0
+            self.rsi = 100.0 if al == 0 else 100.0 - 100.0 / (1.0 + ag / al)
+        # Volume ratio
+        vols = list(self._volumes)
+        nv = len(vols)
+        if nv >= self._vol_len and self._vol_len > 0:
+            avg_vol = _mean(vols[-self._vol_len:])
+            self.vol_ratio = vols[-1] / avg_vol if avg_vol > 0 else 0.0
+        elif nv > 0 and vols[-1] > 0:
+            self.vol_ratio = 1.0
         else:
-            minus_dm = 0.0
-        n = float(self._adx_len)
-        if self._sm_tr is None:
-            self._sm_tr = tr
-            self._sm_plus_dm = plus_dm
-            self._sm_minus_dm = minus_dm
-        else:
-            self._sm_tr = self._sm_tr - self._sm_tr / n + tr
-            self._sm_plus_dm = self._sm_plus_dm - self._sm_plus_dm / n + plus_dm
-            self._sm_minus_dm = self._sm_minus_dm - self._sm_minus_dm / n + minus_dm
-        if self._sm_tr and self._sm_tr > 0:
-            pdi = 100.0 * self._sm_plus_dm / self._sm_tr
-            mdi = 100.0 * self._sm_minus_dm / self._sm_tr
-            denom = pdi + mdi
-            dx = 100.0 * abs(pdi - mdi) / denom if denom > 0 else 0.0
-            self._dx_buf.append(dx)
-            if len(self._dx_buf) >= self._adx_len:
-                self.adx = _mean(list(self._dx_buf)[-self._adx_len:])
+            self.vol_ratio = None
 
 
 class EMATrendPullbackEntry(EntryPolicy):
-    """Enter on EMA pullback with StochRSI reset and ADX trend filter."""
+    """Enter on EMA pullback with RSI stress, ADX trend, and VWAP alignment."""
 
     def __init__(
         self,
         lots: float = 1.0,
         contract_type: str = "large",
-        bar_agg: int = 5,
-        ema_fast: int = 8,
+        bar_agg: int = 3,
+        ema_fast: int = 5,
         ema_slow: int = 21,
         ema_trend: int = 89,
         ema_align: int = 1,
-        stoch_rsi_len: int = 14,
-        stoch_k: int = 3,
-        stoch_d: int = 3,
-        stoch_oversold: float = 20.0,
-        stoch_overbought: float = 80.0,
-        stoch_cross_lookback: int = 3,
-        min_pullback_pts: float = 8.0,
+        rsi_len: int = 3,
+        rsi_oversold: float = 35.0,
+        rsi_overbought: float = 65.0,
+        vol_len: int = 20,
+        vol_mult: float = 0.8,
+        vwap_filter: int = 1,
+        min_pullback_pts: float = 3.0,
         atr_len: int = 10,
-        atr_sl_mult: float = 1.5,
-        atr_t1_mult: float = 2.5,
+        atr_sl_mult: float = 2.0,
+        atr_t1_mult: float = 5.0,
         atr_ceil: float = 0.0,
         adx_len: int = 14,
-        adx_min: float = 20.0,
-        ema_trail_buffer_pts: float = 2.0,
-        allow_night: int = 0,
+        adx_min: float = 30.0,
+        ema_trail_buffer_pts: float = 5.0,
+        allow_night: int = 1,
+        max_hold_bars: int = 120,
     ) -> None:
         self._lots = lots
         self._contract_type = contract_type
         self._ema_align = bool(ema_align)
-        self._stoch_oversold = stoch_oversold
-        self._stoch_overbought = stoch_overbought
-        self._stoch_cross_lookback = stoch_cross_lookback
+        self._rsi_oversold = rsi_oversold
+        self._rsi_overbought = rsi_overbought
+        self._vol_mult = vol_mult
+        self._use_vwap = bool(vwap_filter)
         self._min_pullback = min_pullback_pts
         self._atr_sl_mult = atr_sl_mult
         self._atr_t1_mult = atr_t1_mult
@@ -371,8 +386,8 @@ class EMATrendPullbackEntry(EntryPolicy):
         self._allow_night = bool(allow_night)
         self.ind = _Indicators(
             ema_fast=ema_fast, ema_slow=ema_slow, ema_trend=ema_trend,
-            stoch_rsi_len=stoch_rsi_len, stoch_k=stoch_k, stoch_d=stoch_d,
-            atr_len=atr_len, adx_len=adx_len, bar_agg=bar_agg,
+            rsi_len=rsi_len, atr_len=atr_len, adx_len=adx_len,
+            vol_len=vol_len, bar_agg=bar_agg,
         )
 
     def should_enter(
@@ -380,6 +395,7 @@ class EMATrendPullbackEntry(EntryPolicy):
         snapshot: MarketSnapshot,
         signal: MarketSignal | None,
         engine_state: EngineState,
+        account: AccountState | None = None,
     ) -> EntryDecision | None:
         if engine_state.mode == "halted":
             return None
@@ -391,14 +407,14 @@ class EMATrendPullbackEntry(EntryPolicy):
         if in_force_close(t):
             return None
         price = snapshot.price
-        self.ind.update(price, snapshot.timestamp)
+        self.ind.update(price, snapshot.timestamp, snapshot.volume)
         ind = self.ind
         if any(v is None for v in (
             ind.ema_fast, ind.ema_slow, ind.ema_trend,
-            ind.ema_trend_rising, ind.stoch_k_val, ind.stoch_d_val, ind.atr,
+            ind.ema_trend_rising, ind.rsi, ind.atr,
         )):
             return None
-        if ind.adx is not None and ind.adx < self._adx_min:
+        if ind.adx < self._adx_min:
             return None
         atr = ind.atr
         if atr is None or atr <= 0:
@@ -406,15 +422,20 @@ class EMATrendPullbackEntry(EntryPolicy):
         if self._atr_ceil > 0 and ind.atr_avg is not None and ind.atr_avg > 0:
             if atr > self._atr_ceil * ind.atr_avg:
                 return None
+        # Volume confirmation
+        if ind.vol_ratio is not None and ind.vol_ratio < self._vol_mult:
+            return None
+        # Long: trend up, pullback into EMA zone, RSI oversold, VWAP discount
         if ind.ema_trend_rising is True:
             if self._ema_align and ind.ema_fast <= ind.ema_slow:
-                pass  # EMAs not properly stacked for long
+                pass
             else:
                 in_zone = price <= ind.ema_slow
                 deep_enough = (ind.ema_fast - price) >= self._min_pullback
-                stoch_ok = ind.stoch_cross_up_within(
-                    self._stoch_cross_lookback, self._stoch_oversold)
-                if in_zone and deep_enough and stoch_ok:
+                rsi_ok = ind.rsi < self._rsi_oversold
+                vwap_ok = (not self._use_vwap or ind.vwap is None
+                           or price < ind.vwap)
+                if in_zone and deep_enough and rsi_ok and vwap_ok:
                     return EntryDecision(
                         lots=self._lots, contract_type=self._contract_type,
                         initial_stop=price - atr * self._atr_sl_mult,
@@ -423,20 +444,22 @@ class EMATrendPullbackEntry(EntryPolicy):
                             "atr": atr, "ema_fast": ind.ema_fast,
                             "ema_slow": ind.ema_slow,
                             "t1_target": price + atr * self._atr_t1_mult,
-                            "stoch_k": ind.stoch_k_val, "adx": ind.adx,
+                            "rsi": ind.rsi, "adx": ind.adx,
+                            "vwap": ind.vwap,
                             "strategy": "ema_trend_pullback",
                         },
                     )
-        # Short: trend down, price in pullback zone, StochRSI cross from overbought
+        # Short: trend down, pullback up, RSI overbought, VWAP premium
         if ind.ema_trend_rising is False:
             if self._ema_align and ind.ema_fast >= ind.ema_slow:
-                pass  # EMAs not properly stacked for short
+                pass
             else:
                 in_zone = price >= ind.ema_slow
                 deep_enough = (price - ind.ema_fast) >= self._min_pullback
-                stoch_ok = ind.stoch_cross_down_within(
-                    self._stoch_cross_lookback, self._stoch_overbought)
-                if in_zone and deep_enough and stoch_ok:
+                rsi_ok = ind.rsi > self._rsi_overbought
+                vwap_ok = (not self._use_vwap or ind.vwap is None
+                           or price > ind.vwap)
+                if in_zone and deep_enough and rsi_ok and vwap_ok:
                     return EntryDecision(
                         lots=self._lots, contract_type=self._contract_type,
                         initial_stop=price + atr * self._atr_sl_mult,
@@ -445,7 +468,8 @@ class EMATrendPullbackEntry(EntryPolicy):
                             "atr": atr, "ema_fast": ind.ema_fast,
                             "ema_slow": ind.ema_slow,
                             "t1_target": price - atr * self._atr_t1_mult,
-                            "stoch_k": ind.stoch_k_val, "adx": ind.adx,
+                            "rsi": ind.rsi, "adx": ind.adx,
+                            "vwap": ind.vwap,
                             "strategy": "ema_trend_pullback",
                         },
                     )
@@ -453,21 +477,24 @@ class EMATrendPullbackEntry(EntryPolicy):
 
 
 class EMATrendPullbackStop(StopPolicy):
-    """ATR T1 -> breakeven, then EMA(slow) trailing close exit."""
+    """ATR T1 -> breakeven, then EMA(slow) trail, with max hold time-exit."""
 
     def __init__(
         self,
         indicators: _Indicators,
-        atr_sl_mult: float = 1.5,
-        atr_t1_mult: float = 2.5,
-        ema_trail_buffer_pts: float = 2.0,
+        atr_sl_mult: float = 2.0,
+        atr_t1_mult: float = 5.0,
+        ema_trail_buffer_pts: float = 5.0,
+        max_hold_bars: int = 120,
     ) -> None:
         self._ind = indicators
         self._atr_sl_mult = atr_sl_mult
         self._atr_t1_mult = atr_t1_mult
         self._trail_buf = ema_trail_buffer_pts
+        self._max_hold = max_hold_bars
         self._t1_target: float | None = None
         self._at_breakeven: bool = False
+        self._bar_counts: dict[str, int] = {}
 
     def initial_stop(
         self, entry_price: float, direction: str, snapshot: MarketSnapshot,
@@ -488,12 +515,16 @@ class EMATrendPullbackStop(StopPolicy):
         snapshot: MarketSnapshot,
         high_history: deque[float],
     ) -> float:
-        self._ind.update(snapshot.price, snapshot.timestamp)
+        self._ind.update(snapshot.price, snapshot.timestamp, snapshot.volume)
         price = snapshot.price
         t = snapshot.timestamp.time()
         stop = position.stop_level
         entry = position.entry_price
-        if in_force_close(t):
+        pid = position.position_id
+        self._bar_counts[pid] = self._bar_counts.get(pid, 0) + 1
+        # Force close: session end or max hold
+        if in_force_close(t) or self._bar_counts[pid] >= self._max_hold:
+            self._bar_counts.pop(pid, None)
             return price
         if position.direction == "long":
             if (not self._at_breakeven
@@ -522,26 +553,27 @@ def create_ema_trend_pullback_engine(
     max_loss: float = 500_000,
     lots: float = 1.0,
     contract_type: str = "large",
-    bar_agg: int = 5,
-    ema_fast: int = 8,
+    bar_agg: int = 3,
+    ema_fast: int = 5,
     ema_slow: int = 21,
     ema_trend: int = 89,
     ema_align: int = 1,
-    stoch_rsi_len: int = 14,
-    stoch_k: int = 3,
-    stoch_d: int = 3,
-    stoch_oversold: float = 20.0,
-    stoch_overbought: float = 80.0,
-    stoch_cross_lookback: int = 3,
-    min_pullback_pts: float = 8.0,
+    rsi_len: int = 3,
+    rsi_oversold: float = 35.0,
+    rsi_overbought: float = 65.0,
+    vol_len: int = 20,
+    vol_mult: float = 0.8,
+    vwap_filter: int = 1,
+    min_pullback_pts: float = 3.0,
     atr_len: int = 10,
-    atr_sl_mult: float = 1.5,
-    atr_t1_mult: float = 2.5,
+    atr_sl_mult: float = 2.0,
+    atr_t1_mult: float = 5.0,
     atr_ceil: float = 0.0,
     adx_len: int = 14,
-    adx_min: float = 20.0,
-    ema_trail_buffer_pts: float = 2.0,
-    allow_night: int = 0,
+    adx_min: float = 30.0,
+    ema_trail_buffer_pts: float = 5.0,
+    max_hold_bars: int = 120,
+    allow_night: int = 1,
 ) -> "PositionEngine":
     """Build a PositionEngine wired with the EMA Trend Pullback strategy."""
     from src.core.position_engine import PositionEngine
@@ -550,14 +582,14 @@ def create_ema_trend_pullback_engine(
         lots=lots, contract_type=contract_type, bar_agg=bar_agg,
         ema_fast=ema_fast, ema_slow=ema_slow, ema_trend=ema_trend,
         ema_align=ema_align,
-        stoch_rsi_len=stoch_rsi_len, stoch_k=stoch_k, stoch_d=stoch_d,
-        stoch_oversold=stoch_oversold, stoch_overbought=stoch_overbought,
-        stoch_cross_lookback=stoch_cross_lookback,
+        rsi_len=rsi_len, rsi_oversold=rsi_oversold, rsi_overbought=rsi_overbought,
+        vol_len=vol_len, vol_mult=vol_mult, vwap_filter=vwap_filter,
         min_pullback_pts=min_pullback_pts,
         atr_len=atr_len, atr_sl_mult=atr_sl_mult, atr_t1_mult=atr_t1_mult,
         atr_ceil=atr_ceil,
         adx_len=adx_len, adx_min=adx_min,
         ema_trail_buffer_pts=ema_trail_buffer_pts,
+        max_hold_bars=max_hold_bars,
         allow_night=allow_night,
     )
     stop = EMATrendPullbackStop(
@@ -565,6 +597,7 @@ def create_ema_trend_pullback_engine(
         atr_sl_mult=atr_sl_mult,
         atr_t1_mult=atr_t1_mult,
         ema_trail_buffer_pts=ema_trail_buffer_pts,
+        max_hold_bars=max_hold_bars,
     )
     return PositionEngine(
         entry_policy=entry,

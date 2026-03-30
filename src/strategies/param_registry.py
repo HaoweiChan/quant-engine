@@ -6,15 +6,15 @@ extraction, and an explicit is_active flag for production param selection.
 
 from __future__ import annotations
 
-import json
 import os
+import json
 import sqlite3
-from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
 
 import structlog
 
+from typing import Any
+from pathlib import Path
+from datetime import UTC, datetime
 from src.simulator.types import OptimizerResult
 
 logger = structlog.get_logger(__name__)
@@ -33,6 +33,10 @@ _METRIC_COLS = [
     "alpha",
 ]
 _LARGE_TRIAL_THRESHOLD = 5000
+
+
+def _sanitize_objective_column(objective: str) -> str:
+    return objective if objective in _METRIC_COLS else "sharpe"
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS param_runs (
@@ -53,7 +57,13 @@ CREATE TABLE IF NOT EXISTS param_runs (
     notes           TEXT,
     initial_capital REAL,
     strategy_hash   TEXT,
-    strategy_code   TEXT
+    strategy_code   TEXT,
+    objective_direction TEXT NOT NULL DEFAULT 'maximize',
+    mode            TEXT NOT NULL DEFAULT 'research',
+    disqualified_trials INTEGER NOT NULL DEFAULT 0,
+    gate_results_json TEXT,
+    gate_details_json TEXT,
+    promotable      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS param_trials (
@@ -125,6 +135,31 @@ class ParamRegistry:
         self._migrate_add_initial_capital()
         self._migrate_add_code_hash()
         self._migrate_add_alpha()
+        self._migrate_add_governance_columns()
+
+    def _migrate_add_governance_columns(self) -> None:
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(param_runs)").fetchall()]
+        if "objective_direction" not in cols:
+            self._conn.execute(
+                "ALTER TABLE param_runs ADD COLUMN objective_direction TEXT NOT NULL DEFAULT 'maximize'"
+            )
+        if "mode" not in cols:
+            self._conn.execute(
+                "ALTER TABLE param_runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'research'"
+            )
+        if "disqualified_trials" not in cols:
+            self._conn.execute(
+                "ALTER TABLE param_runs ADD COLUMN disqualified_trials INTEGER NOT NULL DEFAULT 0"
+            )
+        if "gate_results_json" not in cols:
+            self._conn.execute("ALTER TABLE param_runs ADD COLUMN gate_results_json TEXT")
+        if "gate_details_json" not in cols:
+            self._conn.execute("ALTER TABLE param_runs ADD COLUMN gate_details_json TEXT")
+        if "promotable" not in cols:
+            self._conn.execute(
+                "ALTER TABLE param_runs ADD COLUMN promotable INTEGER NOT NULL DEFAULT 0"
+            )
+        self._conn.commit()
 
     def _migrate_add_code_hash(self) -> None:
         """Add strategy_hash and strategy_code columns if missing (idempotent)."""
@@ -318,8 +353,9 @@ class ParamRegistry:
             """INSERT INTO param_runs
                (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
                 objective, is_fraction, n_trials, search_type, source, tag, notes,
-                initial_capital, strategy_hash, strategy_code)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                initial_capital, strategy_hash, strategy_code, objective_direction, mode,
+                disqualified_trials, gate_results_json, gate_details_json, promotable)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 now,
                 strategy,
@@ -328,7 +364,7 @@ class ParamRegistry:
                 train_end,
                 test_start,
                 test_end,
-                objective,
+                result.objective_name or objective,
                 is_fraction,
                 len(trials_dicts),
                 search_type,
@@ -338,6 +374,12 @@ class ParamRegistry:
                 initial_capital,
                 strategy_hash,
                 strategy_code,
+                result.objective_direction,
+                result.mode,
+                result.disqualified_trials,
+                json.dumps(result.gate_results),
+                json.dumps(result.gate_details),
+                int(result.promotable),
             ),
         )
         run_id = cur.lastrowid
@@ -391,7 +433,7 @@ class ParamRegistry:
                 ),
             )
         # Auto-create best candidate
-        best_candidate_id = self.save_candidate(
+        self.save_candidate(
             run_id=run_id,
             trial_id=None,
             params=result.best_params,
@@ -444,14 +486,23 @@ class ParamRegistry:
 
     # -- activate ---------------------------------------------------------
 
-    def activate(self, candidate_id: int) -> None:
+    def activate(self, candidate_id: int, enforce_gates: bool = True) -> None:
         """Mark a candidate as active, deactivating all others for that strategy."""
         row = self._conn.execute(
-            "SELECT strategy FROM param_candidates WHERE id = ?",
+            """SELECT c.strategy, c.run_id, r.mode, r.promotable, r.gate_results_json
+               FROM param_candidates c
+               JOIN param_runs r ON r.id = c.run_id
+               WHERE c.id = ?""",
             (candidate_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"Candidate {candidate_id} not found")
+        if enforce_gates and row["mode"] == "production_intent" and int(row["promotable"]) != 1:
+            gate_results = row["gate_results_json"] or "{}"
+            raise ValueError(
+                "Candidate activation blocked: production-intent run failed promotion gates "
+                f"(run_id={row['run_id']}, gates={gate_results})"
+            )
         now = datetime.now(UTC).isoformat(timespec="seconds")
         self._conn.execute(
             "UPDATE param_candidates SET is_active = 0 WHERE strategy = ?",
@@ -502,7 +553,9 @@ class ParamRegistry:
             """SELECT c.id AS cid, t.sharpe
                FROM param_candidates c
                JOIN param_trials t ON t.run_id = c.run_id AND t.is_oos = 0
+               JOIN param_runs r ON r.id = c.run_id
                WHERE c.strategy = ?
+                 AND (r.mode != 'production_intent' OR r.promotable = 1)
                ORDER BY t.sharpe DESC LIMIT 1""",
             (strategy,),
         ).fetchone()
@@ -644,7 +697,8 @@ class ParamRegistry:
         sql = """SELECT r.id, r.run_at, r.strategy, r.symbol, r.objective,
                         r.is_fraction, r.n_trials, r.search_type, r.source,
                         r.tag, r.notes, r.train_start, r.train_end,
-                        r.test_start, r.test_end, r.initial_capital, r.strategy_hash
+                        r.test_start, r.test_end, r.initial_capital, r.strategy_hash,
+                        r.objective_direction, r.mode, r.disqualified_trials, r.promotable
                  FROM param_runs r
                  WHERE r.strategy = ?"""
         params: list[Any] = [strategy]
@@ -657,12 +711,14 @@ class ParamRegistry:
         result = []
         for r in runs:
             run_id = r["id"]
+            objective_col = _sanitize_objective_column(r["objective"])
+            direction = "ASC" if r["objective_direction"] == "minimize" else "DESC"
             best = self._conn.execute(
                 """SELECT params, sharpe, calmar, sortino, profit_factor,
                           win_rate, max_drawdown_pct, trade_count, total_pnl, alpha
                    FROM param_trials
                    WHERE run_id = ? AND is_oos = 0
-                   ORDER BY {} DESC LIMIT 1""".format(r["objective"]),
+                   ORDER BY {} {} LIMIT 1""".format(objective_col, direction),
                 (run_id,),
             ).fetchone()
             cand_row = self._conn.execute(
@@ -691,6 +747,10 @@ class ParamRegistry:
                 "best_candidate_id": best_candidate_id,
                 "initial_capital": r["initial_capital"],
                 "strategy_hash": r["strategy_hash"],
+                "objective_direction": r["objective_direction"],
+                "mode": r["mode"],
+                "disqualified_trials": r["disqualified_trials"],
+                "promotable": bool(r["promotable"]),
             }
             if best:
                 entry["best_params"] = json.loads(best["params"])
@@ -712,12 +772,14 @@ class ParamRegistry:
             ).fetchone()
             if run is None:
                 continue
+            objective_col = _sanitize_objective_column(run["objective"])
+            direction = "ASC" if run["objective_direction"] == "minimize" else "DESC"
             best = self._conn.execute(
                 """SELECT params, sharpe, calmar, sortino, profit_factor,
                           win_rate, max_drawdown_pct, trade_count, total_pnl, alpha
                    FROM param_trials
                    WHERE run_id = ? AND is_oos = 0
-                   ORDER BY {} DESC LIMIT 1""".format(run["objective"]),
+                   ORDER BY {} {} LIMIT 1""".format(objective_col, direction),
                 (rid,),
             ).fetchone()
             entry: dict[str, Any] = {

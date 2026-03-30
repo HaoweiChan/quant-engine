@@ -159,6 +159,33 @@ def yearly_returns(
     return result
 
 
+def composite_fitness(
+    equity_curve: list[float],
+    trade_log: list[Fill],
+    periods_per_year: float = 252.0,
+    min_trades: int = 100,
+    min_expectancy: float = 0.0,
+    holding_penalty_divisor: float = 10.0,
+) -> float:
+    """Risk-adjusted composite fitness from Seed Strategy Architecture.
+    Formula: (calmar * profit_factor) / duration_penalty
+    Returns -9999.0 if disqualified by min_trades or min_expectancy gates.
+    """
+    tc = trade_count(trade_log)
+    if tc < min_trades:
+        return -9999.0
+    avg_w, avg_l = avg_win_loss(trade_log)
+    wr = win_rate(trade_log)
+    expectancy = (wr * avg_w) + ((1.0 - wr) * avg_l)
+    if expectancy < min_expectancy:
+        return -9999.0
+    cal = calmar_ratio(equity_curve, periods_per_year)
+    pf = profit_factor(trade_log)
+    ahp = avg_holding_period(trade_log)
+    duration_penalty = max(1.0, ahp / holding_penalty_divisor)
+    return (cal * pf) / duration_penalty
+
+
 def compute_all_metrics(
     equity_curve: list[float],
     trade_log: list[Fill],
@@ -177,6 +204,7 @@ def compute_all_metrics(
         "avg_loss": avg_l,
         "trade_count": float(trade_count(trade_log)),
         "avg_holding_period": avg_holding_period(trade_log),
+        "composite_fitness": composite_fitness(equity_curve, trade_log, periods_per_year),
     }
 
 

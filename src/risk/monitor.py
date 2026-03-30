@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
+from dataclasses import dataclass
+from collections.abc import Callable
 
 import structlog
 
@@ -33,14 +33,20 @@ class RiskMonitor:
         config: RiskConfig,
         on_mode_change: Callable[[str], None] | None = None,
         on_force_close: Callable[[], list[Any]] | None = None,
+        on_cancel_open_entries: Callable[[], list[Any]] | None = None,
+        on_manual_confirmation_required: Callable[[str], None] | None = None,
         portfolio_risk: PortfolioRiskEngine | None = None,
     ) -> None:
         self._config = config
         self._on_mode_change = on_mode_change
         self._on_force_close = on_force_close
+        self._on_cancel_open_entries = on_cancel_open_entries
+        self._on_manual_confirmation_required = on_manual_confirmation_required
         self._portfolio_risk: PortfolioRiskEngine | None = portfolio_risk
         self._last_signal_time: datetime | None = None
         self._last_feed_time: datetime | None = None
+        self._feed_recovered_since: datetime | None = None
+        self._guarded_feed_mode = False
         self._current_spread: float = 0.0
         self._normal_spread: float = 1.0
         self._events: list[RiskEvent] = []
@@ -61,41 +67,26 @@ class RiskMonitor:
         """Evaluate all risk conditions and return the highest priority action."""
         now = account.timestamp
 
-        # Priority 1: Drawdown circuit breaker
-        if account.equity > 0:
-            drawdown_amount = account.drawdown_pct * account.equity
-            if drawdown_amount >= self._config.max_loss:
-                self._emit_event(
-                    now,
-                    RiskAction.CLOSE_ALL,
-                    "drawdown_circuit_breaker",
-                    {
-                        "drawdown_pct": account.drawdown_pct,
-                        "drawdown_amount": drawdown_amount,
-                        "max_loss": self._config.max_loss,
-                    },
-                )
-                if self._on_force_close is not None:
-                    self._on_force_close()
-                if self._on_mode_change is not None:
-                    self._on_mode_change("halted")
-                return RiskAction.CLOSE_ALL
+        if self._is_daily_loss_breached(account):
+            self._emit_event(
+                now,
+                RiskAction.CLOSE_ALL,
+                "daily_loss_circuit_breaker",
+                {
+                    "daily_loss": self._compute_daily_loss(account),
+                    "daily_limit": self._config.daily_loss_limit_pct * self._config.aum,
+                    "drawdown_pct": account.drawdown_pct,
+                },
+            )
+            if self._on_force_close is not None:
+                self._on_force_close()
+            if self._on_mode_change is not None:
+                self._on_mode_change("halted")
+            return RiskAction.CLOSE_ALL
 
-        # Priority 2: Feed staleness
-        if self._last_feed_time is not None:
-            feed_age = now - self._last_feed_time
-            limit = timedelta(minutes=self._config.feed_staleness_minutes)
-            if feed_age > limit:
-                self._emit_event(
-                    now,
-                    RiskAction.HALT_NEW_ENTRIES,
-                    "feed_staleness",
-                    {
-                        "feed_age_seconds": feed_age.total_seconds(),
-                        "limit_minutes": self._config.feed_staleness_minutes,
-                    },
-                )
-                return RiskAction.HALT_NEW_ENTRIES
+        feed_action = self._check_feed_state(account, now)
+        if feed_action != RiskAction.NORMAL:
+            return feed_action
 
         # Priority 3: Spread spike anomaly
         if self._normal_spread > 0 and self._current_spread > 0:
@@ -166,6 +157,11 @@ class RiskMonitor:
 
         return RiskAction.NORMAL
 
+    def confirm_feed_resume(self) -> None:
+        self._guarded_feed_mode = False
+        self._feed_recovered_since = None
+        logger.info("risk_feed_guard_released")
+
     def _check_portfolio_risk(
         self,
         account: AccountState,
@@ -227,6 +223,52 @@ class RiskMonitor:
                 )
                 return RiskAction.HALT_NEW_ENTRIES
         return RiskAction.NORMAL
+
+    def _check_feed_state(self, account: AccountState, now: datetime) -> RiskAction:
+        if self._last_feed_time is None:
+            return RiskAction.NORMAL
+        feed_age = now - self._last_feed_time
+        stale_limit = timedelta(seconds=self._config.feed_staleness_seconds)
+        if feed_age > stale_limit:
+            self._guarded_feed_mode = True
+            self._feed_recovered_since = None
+            if self._on_cancel_open_entries is not None:
+                self._on_cancel_open_entries()
+            if self._on_manual_confirmation_required is not None:
+                self._on_manual_confirmation_required("feed_staleness")
+            self._emit_event(
+                now,
+                RiskAction.HALT_NEW_ENTRIES,
+                "feed_staleness",
+                {
+                    "feed_age_seconds": feed_age.total_seconds(),
+                    "limit_seconds": self._config.feed_staleness_seconds,
+                    "protective_exits_only": bool(account.positions),
+                },
+            )
+            return RiskAction.HALT_NEW_ENTRIES
+        if self._guarded_feed_mode:
+            if self._feed_recovered_since is None:
+                self._feed_recovered_since = now
+                return RiskAction.HALT_NEW_ENTRIES
+            recovered_for = (now - self._feed_recovered_since).total_seconds()
+            if recovered_for >= self._config.feed_recovery_seconds:
+                if self._on_manual_confirmation_required is not None:
+                    self._on_manual_confirmation_required("feed_recovered_requires_manual_confirm")
+            return RiskAction.HALT_NEW_ENTRIES
+        return RiskAction.NORMAL
+
+    def _compute_daily_loss(self, account: AccountState) -> float:
+        daily_pnl = account.realized_pnl + account.unrealized_pnl
+        realized_loss = max(-daily_pnl, 0.0)
+        drawdown_loss = account.drawdown_pct * account.equity if account.equity > 0 else 0.0
+        return max(realized_loss, drawdown_loss)
+
+    def _is_daily_loss_breached(self, account: AccountState) -> bool:
+        daily_loss = self._compute_daily_loss(account)
+        dynamic_cap = self._config.daily_loss_limit_pct * self._config.aum
+        legacy_cap = self._config.max_loss
+        return daily_loss >= min(dynamic_cap, legacy_cap)
 
     def update_signal_time(self, ts: datetime) -> None:
         self._last_signal_time = ts

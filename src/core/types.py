@@ -1,8 +1,8 @@
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
+from datetime import datetime
 from typing import Any, Literal
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -160,10 +160,14 @@ class PyramidConfig:
     margin_limit: float = 0.50
     kelly_fraction: float = 0.25
     entry_conf_threshold: float = 0.65
+    max_equity_risk_pct: float = 0.02
+    long_only_compat_mode: bool = False
 
     def __post_init__(self) -> None:
         if self.max_loss <= 0:
             raise ValueError("max_loss must be positive")
+        if not (0.0 < self.max_equity_risk_pct <= 1.0):
+            raise ValueError("max_equity_risk_pct must be in (0.0, 1.0]")
         if len(self.lot_schedule) != self.max_levels:
             n = len(self.lot_schedule)
             raise ValueError(f"lot_schedule length ({n}) must equal max_levels ({self.max_levels})")
@@ -208,6 +212,7 @@ class EngineConfig:
     trail_lookback: int = 22
     disaster_atr_mult: float = 4.5
     disaster_stop_enabled: bool = False
+    require_account_for_entry: bool = False
 
     def __post_init__(self) -> None:
         if self.max_loss <= 0:
@@ -331,6 +336,8 @@ class ImpactParams:
     sigma_source: str = "daily"
     adv_lookback: int = 20
     spread_bps: float = 1.0
+    commission_bps: float = 0.0
+    commission_fixed_per_contract: float = 0.0
     min_latency_ms: float = 5.0
     max_latency_ms: float = 50.0
     max_adv_participation: float = 0.10

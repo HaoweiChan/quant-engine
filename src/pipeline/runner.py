@@ -71,6 +71,7 @@ class PipelineRunner:
         self._state = PipelineState(equity=initial_equity)
         self._equity_curve: list[float] = [initial_equity]
         self._trade_log: list[ExecutionResult] = []
+        self._last_rejection_event_count = 0
 
     async def run_step(
         self,
@@ -95,6 +96,7 @@ class PipelineRunner:
             await self._apply_risk_action(action, snapshot)
 
         orders = self._engine.on_snapshot(snapshot, signal, account)
+        await self._notify_pre_trade_rejections()
 
         if not orders:
             results: list[ExecutionResult] = []
@@ -218,6 +220,25 @@ class PipelineRunner:
             await self._dispatcher.dispatch(msg)
         except Exception:
             logger.exception("risk_notification_failed")
+
+    async def _notify_pre_trade_rejections(self) -> None:
+        if self._dispatcher is None:
+            return
+        if not hasattr(self._engine, "pre_trade_rejection_events"):
+            return
+        events = self._engine.pre_trade_rejection_events
+        if self._last_rejection_event_count >= len(events):
+            return
+        pending = events[self._last_rejection_event_count :]
+        self._last_rejection_event_count = len(events)
+        for event in pending:
+            try:
+                if hasattr(self._dispatcher, "dispatch_pre_trade_rejection"):
+                    await self._dispatcher.dispatch_pre_trade_rejection(event)
+                else:
+                    await self._dispatcher.dispatch(str(event))
+            except Exception:
+                logger.exception("pre_trade_rejection_notification_failed")
 
     @staticmethod
     def _compute_fill_pnl(result: ExecutionResult) -> float:

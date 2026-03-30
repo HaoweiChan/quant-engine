@@ -24,6 +24,7 @@ class ExecutionResult:
     rejection_reason: str | None = None
     backtest_expected_price: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    slippage_bps: float = 0.0
 
 
 @dataclass

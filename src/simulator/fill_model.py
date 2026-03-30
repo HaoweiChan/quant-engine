@@ -42,6 +42,7 @@ class MarketImpactFillModel(FillModel):
                 fill_qty=0.0,
                 remaining_qty=order.lots,
                 is_partial=True,
+                commission_cost=0.0,
             )
 
         fill_qty = order.lots
@@ -57,6 +58,7 @@ class MarketImpactFillModel(FillModel):
         spread_cost = self._compute_spread(bar, close)
         latency_ms = self._rng.uniform(self._params.min_latency_ms, self._params.max_latency_ms)
         latency_price_shift = self._latency_price_shift(bar, latency_ms)
+        commission_cost = self._compute_commission(close, fill_qty)
 
         sign = 1.0 if order.side == "buy" else -1.0
         total_slippage = sign * (impact + spread_cost) + latency_price_shift
@@ -73,6 +75,7 @@ class MarketImpactFillModel(FillModel):
             reason=order.reason,
             market_impact=impact,
             spread_cost=spread_cost,
+            commission_cost=commission_cost,
             latency_ms=latency_ms,
             fill_qty=fill_qty,
             remaining_qty=remaining,
@@ -89,6 +92,11 @@ class MarketImpactFillModel(FillModel):
         if "spread" in bar:
             return bar["spread"] / 2.0
         return self._params.spread_bps * close / 10_000.0
+
+    def _compute_commission(self, close: float, fill_qty: float) -> float:
+        bps_component = abs(close) * abs(fill_qty) * self._params.commission_bps / 10_000.0
+        fixed_component = abs(fill_qty) * self._params.commission_fixed_per_contract
+        return bps_component + fixed_component
 
     def _latency_price_shift(self, bar: dict[str, float], latency_ms: float) -> float:
         """Interpolate price shift from open→close proportional to latency."""

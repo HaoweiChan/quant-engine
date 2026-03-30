@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
+from pathlib import Path
 
 from mcp.server import Server
 from mcp.types import TextContent, Tool
@@ -20,12 +20,12 @@ from src.mcp_server.facade import (
     run_stress_for_mcp,
     run_sweep_for_mcp,
 )
-from src.mcp_server.history import OptimizationHistory
 from src.mcp_server.validation import (
     backup_strategy_file,
     list_strategy_files,
     validate_strategy_content,
 )
+from src.mcp_server.history import OptimizationHistory
 
 _STRATEGIES_DIR = Path(__file__).resolve().parent.parent / "strategies"
 
@@ -202,10 +202,17 @@ TOOLS: list[Tool] = [
             "For grid search: provide sweep_params as {param: [val1, val2, ...]}. "
             "For random search: provide sweep_params as {param: [min, max]} and set n_samples. "
             "Returns: ranked list of parameter combinations by the chosen metric. "
+            "Default metric is composite_fitness (= calmar × profit_factor / duration_penalty). "
+            "NEVER optimize for net profit — use composite_fitness or calmar instead. "
+            "Mode controls governance: production_intent enforces promotion gates "
+            "and never auto-activates candidates. "
+            "Seed Architecture rules: use structural indicators (VWAP/ATR/ADX), "
+            "cap lookbacks at 30 bars on 1-min charts, RSI period <= 5 only, "
+            "require volume confirmation and time gating for intraday. "
             "Parameter sensitivity: test optimal ±20%, reject if performance collapses. "
             "Sample size: need 252*N trading days (daily) or 100*N_params trades (intraday). "
-            "Safe ranges: stop_atr_mult 1.0-2.5, trail_atr_mult 2.0-5.0 (must be > stop). "
-            "Kelly 0.10-0.35. Intraday: max_levels capped by top-of-book liquidity (25% depth rule)."
+            "Safe ranges: stop_atr_mult 0.1-2.0, atr_tp_multi 0.3-3.0. "
+            "Kelly 0.10-0.35. Intraday: enforce EOD close and max_hold_bars."
         ),
         inputSchema={
             "type": "object",
@@ -238,13 +245,62 @@ TOOLS: list[Tool] = [
                 },
                 "metric": {
                     "type": "string",
-                    "description": "Optimization metric: sortino|sharpe|calmar|win_rate|profit_factor",
-                    "default": "sortino",
+                    "description": (
+                        "Optimization metric: composite_fitness|calmar|sortino|sharpe|"
+                        "win_rate|profit_factor. Prefer composite_fitness for intraday "
+                        "(= calmar*PF/duration_penalty, auto-disqualifies low trade count)."
+                    ),
+                    "default": "composite_fitness",
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "Evaluation mode: production_intent|research",
+                    "default": "production_intent",
                 },
                 "scenario": {
                     "type": "string",
                     "description": "Price path preset for evaluation",
                     "default": "strong_bull",
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "Required in production_intent mode for real-data sweep",
+                },
+                "start": {
+                    "type": "string",
+                    "description": "Required in production_intent mode (YYYY-MM-DD)",
+                },
+                "end": {
+                    "type": "string",
+                    "description": "Required in production_intent mode (YYYY-MM-DD)",
+                },
+                "is_fraction": {
+                    "type": "number",
+                    "description": "In-sample fraction for IS/OOS split during ranking",
+                    "default": 0.8,
+                },
+                "min_trade_count": {
+                    "type": "integer",
+                    "description": "Production gate: minimum trade count",
+                    "default": 100,
+                },
+                "min_expectancy": {
+                    "type": "number",
+                    "description": "Production gate: minimum expectancy",
+                    "default": 0.0,
+                },
+                "min_oos_metric": {
+                    "type": "number",
+                    "description": "Production gate: minimum OOS objective floor",
+                    "default": 0.0,
+                },
+                "train_bars": {
+                    "type": "integer",
+                    "description": "Optional walk-forward train window bars (production_intent)",
+                },
+                "test_bars": {
+                    "type": "integer",
+                    "description": "Optional walk-forward test window bars (production_intent)",
                 },
                 "n_bars": {
                     "type": "integer",
@@ -596,8 +652,18 @@ def register_tools(app: Server) -> None:
                     sweep_params=arguments["sweep_params"],
                     strategy=arguments.get("strategy", "pyramid"),
                     n_samples=arguments.get("n_samples"),
-                    metric=arguments.get("metric", "sharpe"),
+                    metric=arguments.get("metric", "composite_fitness"),
+                    mode=arguments.get("mode", "production_intent"),
                     scenario=arguments.get("scenario", "strong_bull"),
+                    symbol=arguments.get("symbol"),
+                    start=arguments.get("start"),
+                    end=arguments.get("end"),
+                    is_fraction=arguments.get("is_fraction", 0.8),
+                    min_trade_count=arguments.get("min_trade_count", 100),
+                    min_expectancy=arguments.get("min_expectancy", 0.0),
+                    min_oos_metric=arguments.get("min_oos_metric", 0.0),
+                    train_bars=arguments.get("train_bars"),
+                    test_bars=arguments.get("test_bars"),
                     n_bars=arguments.get("n_bars"),
                     timeframe=arguments.get("timeframe", "daily"),
                 )

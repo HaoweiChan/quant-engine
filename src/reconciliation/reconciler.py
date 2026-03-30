@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -30,6 +30,13 @@ class ReconciliationConfig:
     policy: str = "alert_only"  # "alert_only" or "halt_on_mismatch"
 
 
+@dataclass
+class ResumeAuditRecord:
+    operator_id: str
+    confirmed_at: datetime
+    snapshot_id: str
+
+
 class PositionReconciler:
     """Compare engine positions against broker positions on a timer."""
 
@@ -51,9 +58,13 @@ class PositionReconciler:
         self._on_halt = on_halt
         self._on_disaster_stop_fill = on_disaster_stop_fill
         self._task: asyncio.Task[None] | None = None
-        self._mismatches: list[Mismatch] = field(default_factory=list)
         self._mismatches = []
         self._disaster_order_ids: set[str] = set()
+        self._startup_frozen = True
+        self._startup_safe = False
+        self._startup_snapshot_id = ""
+        self._resume_audit: list[ResumeAuditRecord] = []
+        self._startup_unsafe_reasons: list[str] = []
 
     async def start_loop(self, interval: float | None = None) -> None:
         """Run reconciliation on a timer until cancelled."""
@@ -78,6 +89,67 @@ class PositionReconciler:
     def mismatches(self) -> list[Mismatch]:
         return list(self._mismatches)
 
+    @property
+    def startup_frozen(self) -> bool:
+        return self._startup_frozen
+
+    @property
+    def startup_safe(self) -> bool:
+        return self._startup_safe
+
+    @property
+    def resume_audit(self) -> list[ResumeAuditRecord]:
+        return list(self._resume_audit)
+
+    def can_emit_orders(self) -> bool:
+        return self._startup_safe and not self._startup_frozen
+
+    def confirm_resume(self, operator_id: str) -> bool:
+        if not self._startup_safe or not self._startup_snapshot_id:
+            return False
+        self._startup_frozen = False
+        self._resume_audit.append(
+            ResumeAuditRecord(
+                operator_id=operator_id,
+                confirmed_at=datetime.now(),
+                snapshot_id=self._startup_snapshot_id,
+            )
+        )
+        logger.info(
+            "reconciler_resume_confirmed",
+            operator_id=operator_id,
+            snapshot_id=self._startup_snapshot_id,
+        )
+        return True
+
+    async def run_startup_reconciliation(self) -> bool:
+        self._startup_frozen = True
+        self._startup_safe = False
+        self._startup_unsafe_reasons = []
+        self._startup_snapshot_id = datetime.now().isoformat()
+
+        _, _, _, open_orders, continuity_ok = self._fetch_broker_state()
+        if not continuity_ok:
+            self._startup_unsafe_reasons.append("continuity_unavailable")
+        if open_orders:
+            cancelled = self._cancel_open_orders(open_orders)
+            logger.info("startup_open_orders_cancelled", count=cancelled)
+
+        mismatches = await self._reconcile()
+        has_critical = any(item.kind in ("ghost", "orphan", "quantity") for item in mismatches)
+        if has_critical:
+            self._startup_unsafe_reasons.append("critical_mismatch")
+
+        self._startup_safe = continuity_ok and not has_critical
+        logger.info(
+            "startup_reconciliation_completed",
+            startup_safe=self._startup_safe,
+            mismatch_count=len(mismatches),
+            reasons=self._startup_unsafe_reasons,
+            snapshot_id=self._startup_snapshot_id,
+        )
+        return self._startup_safe
+
     def register_disaster_order(self, order_id: str) -> None:
         """Register a disaster stop order ID for tracking."""
         self._disaster_order_ids.add(order_id)
@@ -86,14 +158,11 @@ class PositionReconciler:
         """Deregister a disaster stop order ID when it's no longer active."""
         self._disaster_order_ids.discard(order_id)
 
-    async def _reconcile(self) -> None:
-        try:
-            broker_positions = self._api.list_positions(self._api.futopt_account)
-            broker_margin = self._api.margin(self._api.futopt_account)
-            broker_fills = self._api.list_recent_fills(self._api.futopt_account)
-        except Exception:
+    async def _reconcile(self) -> list[Mismatch]:
+        broker_positions, broker_margin, broker_fills, _, _ = self._fetch_broker_state()
+        if broker_margin is None:
             logger.exception("reconciler_broker_fetch_failed")
-            return
+            return []
 
         engine_positions = self._get_positions()
         found: list[Mismatch] = []
@@ -104,9 +173,10 @@ class PositionReconciler:
         for key, engine_qty in engine_map.items():
             broker_qty = broker_map.pop(key, 0.0)
             if abs(engine_qty - broker_qty) > 0.001:
+                kind = "ghost" if broker_qty == 0.0 else "quantity"
                 found.append(
                     Mismatch(
-                        kind="quantity",
+                        kind=kind,
                         symbol=f"{key[0]}:{key[1]}",
                         engine_value=engine_qty,
                         broker_value=broker_qty,
@@ -159,6 +229,7 @@ class PositionReconciler:
             await self._handle_mismatches(found)
         else:
             logger.debug("reconciliation_ok")
+        return found
 
     def _check_account(self, broker_margin: Any) -> list[Mismatch]:
         result: list[Mismatch] = []
@@ -219,6 +290,56 @@ class PositionReconciler:
             key = (symbol, direction)
             result[key] = result.get(key, 0.0) + qty
         return result
+
+    def _fetch_broker_state(
+        self,
+    ) -> tuple[list[Any], Any | None, list[Any], list[Any], bool]:
+        continuity_ok = True
+        try:
+            broker_positions = self._api.list_positions(self._api.futopt_account)
+            broker_margin = self._api.margin(self._api.futopt_account)
+        except Exception:
+            return [], None, [], [], False
+        try:
+            broker_fills = self._api.list_recent_fills(self._api.futopt_account)
+        except Exception:
+            broker_fills = []
+            continuity_ok = False
+            logger.exception("reconciler_fill_fetch_failed")
+        try:
+            open_orders = self._list_open_orders()
+        except Exception:
+            open_orders = []
+            continuity_ok = False
+            logger.exception("reconciler_open_order_fetch_failed")
+        return broker_positions, broker_margin, broker_fills, open_orders, continuity_ok
+
+    def _list_open_orders(self) -> list[Any]:
+        if hasattr(self._api, "list_open_orders"):
+            return list(self._api.list_open_orders(self._api.futopt_account))
+        if not hasattr(self._api, "list_trades"):
+            return []
+        open_orders: list[Any] = []
+        for trade in self._api.list_trades():
+            status = getattr(getattr(trade, "status", None), "status", "")
+            if status in ("Filled", "Cancelled"):
+                continue
+            order = getattr(trade, "order", None)
+            if order is not None:
+                open_orders.append(order)
+        return open_orders
+
+    def _cancel_open_orders(self, open_orders: list[Any]) -> int:
+        cancelled = 0
+        if not hasattr(self._api, "cancel_order"):
+            return 0
+        for order in open_orders:
+            try:
+                self._api.cancel_order(order)
+                cancelled += 1
+            except Exception:
+                logger.exception("startup_open_order_cancel_failed")
+        return cancelled
 
     def _check_disaster_fill(
         self, symbol: str, broker_fills: list[dict[str, Any]]

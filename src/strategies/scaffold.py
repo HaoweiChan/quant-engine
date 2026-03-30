@@ -93,7 +93,14 @@ def _generate_content(
         policy_imports.append("NoAddPolicy")
     policy_imports.append("StopPolicy")
     lines.append(f"from src.core.policies import {', '.join(sorted(policy_imports))}")
-    type_imports = ["EngineConfig", "EngineState", "EntryDecision", "MarketSignal", "MarketSnapshot"]
+    type_imports = [
+        "AccountState",
+        "EngineConfig",
+        "EngineState",
+        "EntryDecision",
+        "MarketSignal",
+        "MarketSnapshot",
+    ]
     if "stop" in policies:
         type_imports.append("Position")
     lines.append(f"from src.core.types import ({', '.join(sorted(type_imports))})")
@@ -151,6 +158,7 @@ def _generate_content(
         lines.append("        snapshot: MarketSnapshot,")
         lines.append("        signal: MarketSignal | None,")
         lines.append("        engine_state: EngineState,")
+        lines.append("        account: AccountState | None = None,")
         lines.append("    ) -> EntryDecision | None:")
         lines.append('        if engine_state.mode == "halted":')
         lines.append("            return None")

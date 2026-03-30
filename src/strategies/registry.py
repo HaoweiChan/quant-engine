@@ -6,15 +6,14 @@ maintaining their own copies of parameter metadata.
 
 from __future__ import annotations
 
-import importlib
-import inspect
 import re
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-
+import inspect
 import structlog
+import importlib
 
+from typing import Any
+from pathlib import Path
+from dataclasses import dataclass, field
 from src.strategies import StrategyCategory, StrategyTimeframe
 
 logger = structlog.get_logger(__name__)
@@ -25,7 +24,9 @@ _INFRA_MODULES = frozenset({"registry", "param_registry", "param_loader", "scaff
 
 _SLUG_ALIASES: dict[str, str] = {
     "ta_orb": "intraday/breakout/ta_orb",
+    "structural_orb": "intraday/breakout/structural_orb",
     "atr_mean_reversion": "intraday/mean_reversion/atr_mean_reversion",
+    "ema_trend_pullback": "intraday/trend_following/ema_trend_pullback",
     "pyramid": "daily/trend_following/pyramid_wrapper",
     "pyramid_wrapper": "daily/trend_following/pyramid_wrapper",
 }
