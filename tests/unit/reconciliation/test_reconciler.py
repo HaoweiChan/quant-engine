@@ -36,11 +36,16 @@ class FakeBrokerMargin:
 def _make_api(
     broker_positions: list | None = None,
     broker_margin: FakeBrokerMargin | None = None,
+    broker_fills: list | None = None,
+    open_orders: list | None = None,
 ) -> MagicMock:
     api = MagicMock()
     api.futopt_account = MagicMock()
     api.list_positions.return_value = broker_positions or []
     api.margin.return_value = broker_margin or FakeBrokerMargin()
+    api.list_recent_fills.return_value = broker_fills or []
+    api.list_open_orders.return_value = open_orders or []
+    api.cancel_order = MagicMock()
     return api
 
 
@@ -159,3 +164,63 @@ class TestReconcilerLoop:
         reconciler.stop()
         await asyncio.sleep(0.05)
         assert task.cancelled() or task.done()
+
+
+class TestStartupReconciliation:
+    @pytest.mark.asyncio
+    async def test_startup_freeze_and_manual_resume_gate(self) -> None:
+        api = _make_api(
+            broker_positions=[FakeBrokerPosition(code="TX", direction="Buy", quantity=2)],
+        )
+        engine_positions = [FakePosition(symbol="TX", direction="long", lots=2.0)]
+        reconciler = PositionReconciler(
+            api=api,
+            get_engine_positions=lambda: engine_positions,
+            get_engine_equity=lambda: 2_000_000.0,
+        )
+        startup_safe = await reconciler.run_startup_reconciliation()
+        assert startup_safe
+        assert reconciler.startup_frozen
+        assert not reconciler.can_emit_orders()
+        assert reconciler.confirm_resume("operator-1")
+        assert reconciler.can_emit_orders()
+        assert len(reconciler.resume_audit) == 1
+
+    @pytest.mark.asyncio
+    async def test_startup_open_order_cleanup(self) -> None:
+        open_order = MagicMock()
+        api = _make_api(open_orders=[open_order])
+        reconciler = PositionReconciler(
+            api=api,
+            get_engine_positions=lambda: [],
+            get_engine_equity=lambda: 2_000_000.0,
+        )
+        await reconciler.run_startup_reconciliation()
+        api.cancel_order.assert_called_once_with(open_order)
+
+    @pytest.mark.asyncio
+    async def test_critical_mismatch_blocks_resume(self) -> None:
+        api = _make_api(
+            broker_positions=[FakeBrokerPosition(code="MX", direction="Buy", quantity=1)],
+        )
+        reconciler = PositionReconciler(
+            api=api,
+            get_engine_positions=lambda: [],
+            get_engine_equity=lambda: 2_000_000.0,
+        )
+        startup_safe = await reconciler.run_startup_reconciliation()
+        assert not startup_safe
+        assert not reconciler.confirm_resume("operator-1")
+        assert not reconciler.can_emit_orders()
+
+    @pytest.mark.asyncio
+    async def test_continuity_unavailable_blocks_resume(self) -> None:
+        api = _make_api()
+        del api.list_recent_fills
+        reconciler = PositionReconciler(
+            api=api,
+            get_engine_positions=lambda: [],
+            get_engine_equity=lambda: 2_000_000.0,
+        )
+        startup_safe = await reconciler.run_startup_reconciliation()
+        assert not startup_safe

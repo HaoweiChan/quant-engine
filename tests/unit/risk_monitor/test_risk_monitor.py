@@ -14,13 +14,15 @@ def _make_account(
     equity: float = 2_000_000.0,
     drawdown_pct: float = 0.0,
     margin_ratio: float = 0.3,
+    realized_pnl: float = 0.0,
+    unrealized_pnl: float = 0.0,
     ts: datetime | None = None,
     positions: list[Position] | None = None,
 ) -> AccountState:
     return AccountState(
         equity=equity,
-        unrealized_pnl=0.0,
-        realized_pnl=0.0,
+        unrealized_pnl=unrealized_pnl,
+        realized_pnl=realized_pnl,
         margin_used=equity * margin_ratio,
         margin_available=equity * (1 - margin_ratio),
         margin_ratio=margin_ratio,
@@ -69,13 +71,44 @@ class TestRiskMonitor:
         assert "rule_only" in mode_changes
 
     def test_feed_staleness_triggers_halt(self) -> None:
-        config = RiskConfig(feed_staleness_minutes=5.0)
+        config = RiskConfig(feed_staleness_seconds=3.0)
         monitor = RiskMonitor(config)
         now = datetime.now(UTC)
-        monitor.update_feed_time(now - timedelta(minutes=10))
+        monitor.update_feed_time(now - timedelta(seconds=10))
         account = _make_account(ts=now)
         action = monitor.check(account)
         assert action == RiskAction.HALT_NEW_ENTRIES
+
+    def test_daily_loss_limit_triggers_close_all(self) -> None:
+        config = RiskConfig(daily_loss_limit_pct=0.02, aum=2_000_000.0, max_loss=500_000.0)
+        monitor = RiskMonitor(config)
+        account = _make_account(realized_pnl=-60_000.0, unrealized_pnl=0.0)
+        action = monitor.check(account)
+        assert action == RiskAction.CLOSE_ALL
+
+    def test_stale_feed_cancels_entries_and_requires_confirmation(self) -> None:
+        config = RiskConfig(feed_staleness_seconds=3.0, feed_recovery_seconds=2.0)
+        cancelled: list[bool] = []
+        required: list[str] = []
+        monitor = RiskMonitor(
+            config,
+            on_cancel_open_entries=lambda: cancelled.append(True) or [],
+            on_manual_confirmation_required=required.append,
+        )
+        now = datetime.now(UTC)
+        monitor.update_feed_time(now - timedelta(seconds=10))
+        account = _make_account(ts=now)
+        first = monitor.check(account)
+        assert first == RiskAction.HALT_NEW_ENTRIES
+        assert cancelled
+        assert required
+
+        monitor.update_feed_time(now + timedelta(seconds=1))
+        guarded = monitor.check(_make_account(ts=now + timedelta(seconds=3)))
+        assert guarded == RiskAction.HALT_NEW_ENTRIES
+        monitor.confirm_feed_resume()
+        recovered = monitor.check(_make_account(ts=now + timedelta(seconds=4)))
+        assert recovered == RiskAction.NORMAL
 
     def test_spread_spike_triggers_halt(self) -> None:
         config = RiskConfig(spread_spike_multiplier=10.0)

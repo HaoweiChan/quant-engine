@@ -1,7 +1,7 @@
 
 import pytest
 
-from src.core.policies import ChandelierStopPolicy, NoAddPolicy, PyramidEntryPolicy
+from src.core.policies import ChandelierStopPolicy, EntryPolicy, NoAddPolicy, PyramidEntryPolicy
 from src.core.position_engine import PositionEngine, create_pyramid_engine
 from src.core.types import ContractSpecs, EngineConfig, PyramidConfig, TradingHours
 from tests.conftest import make_account, make_signal, make_snapshot
@@ -41,6 +41,34 @@ class TestInit:
 # -- Entry logic --
 
 class TestEntryLogic:
+    def test_entry_policy_receives_account_context(self, specs: ContractSpecs) -> None:
+        captured: list[object] = []
+
+        class SpyEntryPolicy(EntryPolicy):
+            def should_enter(
+                self,
+                snapshot,
+                signal,
+                engine_state,
+                account=None,
+            ):
+                captured.append(account)
+                return None
+
+        config = PyramidConfig(max_loss=500_000.0)
+        engine_config = EngineConfig(max_loss=config.max_loss)
+        engine = PositionEngine(
+            entry_policy=SpyEntryPolicy(),
+            add_policy=NoAddPolicy(),
+            stop_policy=ChandelierStopPolicy(config),
+            config=engine_config,
+        )
+        account = make_account()
+        snap = make_snapshot(20000.0, specs)
+        signal = make_signal(direction=1.0, direction_conf=0.8)
+        engine.on_snapshot(snap, signal, account=account)
+        assert captured and captured[0] is account
+
     def test_strong_signal_generates_entry(
         self, engine: PositionEngine, specs: ContractSpecs
     ) -> None:
@@ -347,6 +375,59 @@ class TestMarginSafety:
         assert len(margin_orders) == 0
 
 
+# -- Pre-trade margin gate --
+
+class TestPreTradeMarginGate:
+    def _strict_engine(self, config: PyramidConfig) -> PositionEngine:
+        engine_config = EngineConfig(
+            max_loss=config.max_loss,
+            margin_limit=config.margin_limit,
+            trail_lookback=config.trail_lookback,
+            require_account_for_entry=True,
+        )
+        return PositionEngine(
+            entry_policy=PyramidEntryPolicy(config),
+            add_policy=NoAddPolicy(),
+            stop_policy=ChandelierStopPolicy(config),
+            config=engine_config,
+        )
+
+    def test_insufficient_margin_blocks_entry_and_records_event(
+        self, specs: ContractSpecs
+    ) -> None:
+        engine = self._strict_engine(PyramidConfig(max_loss=500_000.0))
+        snap = make_snapshot(20000.0, specs, daily_atr=100.0)
+        signal = make_signal(direction=1.0, direction_conf=0.9)
+        low_margin_account = make_account(equity=2_000_000.0, margin_ratio=0.98)
+        orders = engine.on_snapshot(snap, signal, account=low_margin_account)
+        assert orders == []
+        events = engine.pre_trade_rejection_events
+        assert len(events) == 1
+        assert events[0]["reason"] == "insufficient_margin"
+
+    def test_missing_account_blocks_entry_when_required(self, specs: ContractSpecs) -> None:
+        engine = self._strict_engine(PyramidConfig(max_loss=500_000.0))
+        snap = make_snapshot(20000.0, specs, daily_atr=100.0)
+        signal = make_signal(direction=1.0, direction_conf=0.9)
+        orders = engine.on_snapshot(snap, signal, account=None)
+        assert orders == []
+        events = engine.pre_trade_rejection_events
+        assert len(events) == 1
+        assert events[0]["reason"] == "missing_account_context"
+
+    def test_stop_orders_bypass_entry_margin_gate(self, specs: ContractSpecs) -> None:
+        engine = self._strict_engine(PyramidConfig(max_loss=500_000.0))
+        entry_account = make_account(equity=20_000_000.0, margin_ratio=0.2)
+        entry_snap = make_snapshot(20000.0, specs, daily_atr=100.0)
+        signal = make_signal(direction=1.0, direction_conf=0.9)
+        entry_orders = engine.on_snapshot(entry_snap, signal, account=entry_account)
+        assert len(entry_orders) == 1
+        low_margin_account = make_account(equity=2_000_000.0, margin_ratio=0.99)
+        stop_snap = make_snapshot(19800.0, specs, daily_atr=100.0)
+        stop_orders = engine.on_snapshot(stop_snap, None, account=low_margin_account)
+        assert any(item.reason in ("stop_loss", "trailing_stop") for item in stop_orders)
+
+
 # -- Lot scaling respects max_loss --
 
 class TestLotScaling:
@@ -373,15 +454,18 @@ class TestShortDirection:
     def _make_short_engine(config: PyramidConfig) -> PositionEngine:
         """Build engine with a short-biased entry policy for testing."""
         from src.core.policies import EntryPolicy
-        from src.core.types import EngineState, EntryDecision, MarketSignal, MarketSnapshot
+        from src.core.types import AccountState, EngineState, EntryDecision, MarketSignal, MarketSnapshot
 
         class ShortEntryPolicy(EntryPolicy):
             def __init__(self, cfg: PyramidConfig) -> None:
                 self._config = cfg
 
             def should_enter(
-                self, snapshot: MarketSnapshot, signal: MarketSignal | None,
+                self,
+                snapshot: MarketSnapshot,
+                signal: MarketSignal | None,
                 engine_state: EngineState,
+                account: AccountState | None = None,
             ) -> EntryDecision | None:
                 if signal is None or signal.direction_conf <= self._config.entry_conf_threshold:
                     return None

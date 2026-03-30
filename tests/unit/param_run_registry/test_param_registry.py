@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-import tempfile
-from pathlib import Path
-
-import polars as pl
 import pytest
 
-from src.simulator.types import BacktestResult, OptimizerResult
+import polars as pl
+
+from pathlib import Path
 from src.strategies.param_registry import ParamRegistry
+from src.simulator.types import BacktestResult, OptimizerResult
 
 
 @pytest.fixture()
@@ -26,6 +25,11 @@ def registry(db_path: Path) -> ParamRegistry:
 def _make_result(
     trials: list[dict] | None = None,
     best_params: dict | None = None,
+    mode: str = "research",
+    promotable: bool = False,
+    disqualified_trials: int = 0,
+    gate_results: dict[str, bool] | None = None,
+    gate_details: dict[str, float | str] | None = None,
 ) -> OptimizerResult:
     """Create a minimal OptimizerResult for testing."""
     if trials is None:
@@ -81,6 +85,13 @@ def _make_result(
         best_params=bp,
         best_is_result=is_result,
         best_oos_result=None,
+        objective_name="sharpe",
+        objective_direction="maximize",
+        disqualified_trials=disqualified_trials,
+        gate_results=gate_results or {},
+        gate_details=gate_details or {},
+        promotable=promotable,
+        mode=mode,
     )
 
 
@@ -186,6 +197,32 @@ class TestSaveRun:
         ).fetchall()
         assert len(oos_trials) == 1
         assert oos_trials[0]["sharpe"] == 1.0
+
+    def test_persists_governance_metadata(self, registry: ParamRegistry) -> None:
+        result = _make_result(
+            mode="production_intent",
+            promotable=False,
+            disqualified_trials=2,
+            gate_results={"min_trade_count_pass": False},
+            gate_details={"min_trade_count": 100.0},
+        )
+        run_id = registry.save_run(
+            result=result,
+            strategy="atr_mean_reversion",
+            symbol="TX",
+            objective="sharpe",
+            source="test",
+        )
+        run = registry._conn.execute(
+            """SELECT mode, promotable, disqualified_trials, gate_results_json, gate_details_json
+               FROM param_runs WHERE id = ?""",
+            (run_id,),
+        ).fetchone()
+        assert run["mode"] == "production_intent"
+        assert run["promotable"] == 0
+        assert run["disqualified_trials"] == 2
+        assert json.loads(run["gate_results_json"]) == {"min_trade_count_pass": False}
+        assert json.loads(run["gate_details_json"]) == {"min_trade_count": 100.0}
 
 
 class TestParetoFrontier:
@@ -338,6 +375,50 @@ class TestActivate:
     def test_activate_nonexistent_raises(self, registry: ParamRegistry) -> None:
         with pytest.raises(ValueError, match="not found"):
             registry.activate(999)
+
+    def test_activation_blocked_when_production_gates_fail(self, registry: ParamRegistry) -> None:
+        result = _make_result(
+            mode="production_intent",
+            promotable=False,
+            gate_results={"min_trade_count_pass": False},
+        )
+        run_id = registry.save_run(
+            result=result,
+            strategy="atr_mean_reversion",
+            symbol="TX",
+            objective="sharpe",
+            source="test",
+        )
+        cand = registry._conn.execute(
+            "SELECT id FROM param_candidates WHERE run_id = ? AND label = 'best_sharpe'",
+            (run_id,),
+        ).fetchone()
+        with pytest.raises(ValueError, match="blocked"):
+            registry.activate(cand["id"])
+
+    def test_activation_allowed_when_production_gates_pass(self, registry: ParamRegistry) -> None:
+        result = _make_result(
+            mode="production_intent",
+            promotable=True,
+            gate_results={"min_trade_count_pass": True, "oos_floor_pass": True},
+        )
+        run_id = registry.save_run(
+            result=result,
+            strategy="atr_mean_reversion",
+            symbol="TX",
+            objective="sharpe",
+            source="test",
+        )
+        cand = registry._conn.execute(
+            "SELECT id FROM param_candidates WHERE run_id = ? AND label = 'best_sharpe'",
+            (run_id,),
+        ).fetchone()
+        registry.activate(cand["id"])
+        active = registry._conn.execute(
+            "SELECT is_active FROM param_candidates WHERE id = ?",
+            (cand["id"],),
+        ).fetchone()
+        assert active["is_active"] == 1
 
 
 class TestGetActive:

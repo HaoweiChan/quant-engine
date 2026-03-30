@@ -40,3 +40,12 @@ class TestEngineConfigValidation:
         engine = create_pyramid_engine(pyramid_config)
         assert engine._config.disaster_atr_mult == 4.5
         assert engine._config.disaster_stop_enabled is False
+
+    def test_pyramid_config_max_equity_risk_pct_validation(self) -> None:
+        with pytest.raises(ValueError, match="max_equity_risk_pct"):
+            PyramidConfig(max_loss=50000.0, max_equity_risk_pct=0.0)
+
+    def test_pyramid_config_risk_symmetry_defaults(self) -> None:
+        config = PyramidConfig(max_loss=50000.0)
+        assert config.max_equity_risk_pct == 0.02
+        assert config.long_only_compat_mode is False

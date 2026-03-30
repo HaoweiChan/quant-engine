@@ -15,6 +15,7 @@ def _make_fill(
     fill_price: float = 20001.0,
     market_impact: float = 1.5,
     spread_cost: float = 0.5,
+    commission_cost: float = 0.0,
     latency_ms: float = 10.0,
     is_partial: bool = False,
 ) -> Fill:
@@ -23,6 +24,7 @@ def _make_fill(
         lots=lots, fill_price=fill_price, slippage=1.0,
         timestamp=datetime(2024, 6, 1), reason="entry",
         market_impact=market_impact, spread_cost=spread_cost,
+        commission_cost=commission_cost,
         latency_ms=latency_ms, fill_qty=lots, remaining_qty=0.0,
         is_partial=is_partial,
     )
@@ -38,6 +40,7 @@ class TestImpactReport:
         report = BacktestRunner._build_impact_report(fills, equity_curve)
         assert report.total_market_impact == pytest.approx(5.0)
         assert report.total_spread_cost == pytest.approx(1.5)
+        assert report.total_commission_cost == pytest.approx(0.0)
         assert report.avg_latency_ms == pytest.approx(15.0)
 
     def test_naive_vs_realistic_pnl(self) -> None:
@@ -70,6 +73,7 @@ class TestImpactReport:
         report = BacktestRunner._build_impact_report([], equity_curve)
         assert report.total_market_impact == 0.0
         assert report.total_spread_cost == 0.0
+        assert report.total_commission_cost == 0.0
         assert report.avg_latency_ms == 0.0
         assert report.partial_fill_count == 0
         assert report.pnl_ratio == 1.0
@@ -83,10 +87,12 @@ class TestMetricsExtension:
         metrics: dict[str, float] = {}
         metrics["total_market_impact"] = report.total_market_impact
         metrics["total_spread_cost"] = report.total_spread_cost
+        metrics["total_commission_cost"] = report.total_commission_cost
         metrics["avg_latency_ms"] = report.avg_latency_ms
         metrics["partial_fill_count"] = float(report.partial_fill_count)
         assert metrics["total_market_impact"] == pytest.approx(2.0)
         assert metrics["total_spread_cost"] == pytest.approx(1.0)
+        assert metrics["total_commission_cost"] == pytest.approx(0.0)
         assert metrics["avg_latency_ms"] == pytest.approx(15.0)
         assert metrics["partial_fill_count"] == 0.0
 
@@ -96,6 +102,7 @@ class TestImpactReportDataclass:
         report = ImpactReport(
             naive_pnl=0.0, realistic_pnl=0.0, pnl_ratio=1.0,
             total_market_impact=0.0, total_spread_cost=0.0,
+            total_commission_cost=0.0,
             avg_latency_ms=0.0, partial_fill_count=0,
             per_trade_impact_breakdown=[],
         )

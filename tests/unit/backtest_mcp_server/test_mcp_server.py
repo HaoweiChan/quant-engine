@@ -1,17 +1,17 @@
 """Tests for the backtest MCP server modules."""
 from __future__ import annotations
 
+import pytest
 import textwrap
+
 from pathlib import Path
 
-import pytest
-
-from src.mcp_server.history import OptimizationHistory
 from src.mcp_server.validation import (
     backup_strategy_file,
     list_strategy_files,
     validate_strategy_content,
 )
+from src.mcp_server.history import OptimizationHistory
 
 # ---------------------------------------------------------------------------
 # 7.1 — validate_strategy_content
@@ -221,6 +221,33 @@ class TestFacade:
         assert "error" in result
         assert "Too many sweep parameters" in result["error"]
 
+    def test_run_sweep_research_includes_gate_fields(self):
+        from src.mcp_server.facade import run_sweep_for_mcp
+
+        result = run_sweep_for_mcp(
+            base_params={"max_loss": 500_000},
+            sweep_params={"stop_atr_mult": [1.0, 1.5]},
+            strategy="pyramid",
+            mode="research",
+            metric="sharpe",
+        )
+        assert result["mode"] == "research"
+        assert "gate_results" in result
+        assert "gate_details" in result
+        assert result["auto_activation_disabled"] is True
+
+    def test_run_sweep_production_requires_real_data_bounds(self):
+        from src.mcp_server.facade import run_sweep_for_mcp
+
+        result = run_sweep_for_mcp(
+            base_params={"max_loss": 500_000},
+            sweep_params={"stop_atr_mult": [1.0, 1.5]},
+            strategy="pyramid",
+            mode="production_intent",
+        )
+        assert "error" in result
+        assert "requires symbol, start, and end" in result["error"]
+
     def test_factory_resolution_pyramid(self):
         from src.mcp_server.facade import resolve_factory
         f = resolve_factory("pyramid")
@@ -280,6 +307,13 @@ class TestToolRegistration:
         for tool in TOOLS:
             assert tool.inputSchema is not None
             assert tool.description
+
+    def test_parameter_sweep_tool_defaults_to_production_intent(self):
+        from src.mcp_server.tools import TOOLS
+
+        sweep_tool = next(t for t in TOOLS if t.name == "run_parameter_sweep")
+        mode_schema = sweep_tool.inputSchema["properties"]["mode"]
+        assert mode_schema["default"] == "production_intent"
 
     def test_server_creates_successfully(self):
         from src.mcp_server.server import app

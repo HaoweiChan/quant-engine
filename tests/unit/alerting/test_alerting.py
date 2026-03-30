@@ -10,6 +10,7 @@ from src.alerting.formatters import (
     format_daily_summary,
     format_entry,
     format_exit,
+    format_pre_trade_rejection,
     format_risk_alert,
     format_trade,
 )
@@ -48,6 +49,20 @@ class TestFormatters:
         )
         assert "RISK ALERT" in msg
         assert "close_all" in msg
+
+    def test_pre_trade_rejection_format(self) -> None:
+        msg = format_pre_trade_rejection(
+            {
+                "symbol": "TX",
+                "reason": "insufficient_margin",
+                "required_margin": 184000.0,
+                "available_margin": 120000.0,
+                "decision_direction": "long",
+                "decision_lots": 1.0,
+            }
+        )
+        assert "PRE-TRADE REJECTION" in msg
+        assert "insufficient_margin" in msg
 
     def test_daily_summary(self) -> None:
         msg = format_daily_summary(2_000_000.0, 15_000.0, -3_000.0, 5)
@@ -111,3 +126,26 @@ class TestDispatcher:
             dispatcher._client = mock_client
             result = await dispatcher.dispatch("test message")
             assert result is False
+
+    @pytest.mark.asyncio
+    async def test_dispatch_pre_trade_rejection(self) -> None:
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 200
+        with patch("src.alerting.dispatcher.httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_resp
+            mock_cls.return_value = mock_client
+            dispatcher = NotificationDispatcher("fake_token", "123")
+            dispatcher._client = mock_client
+            ok = await dispatcher.dispatch_pre_trade_rejection(
+                {
+                    "symbol": "TX",
+                    "reason": "missing_account_context",
+                    "required_margin": 184000.0,
+                    "available_margin": None,
+                    "decision_direction": "short",
+                    "decision_lots": 1.0,
+                }
+            )
+            assert ok is True
+            mock_client.post.assert_called_once()

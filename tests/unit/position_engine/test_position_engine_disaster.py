@@ -88,6 +88,7 @@ class TestPositionEngineDisaster:
         account.margin_ratio = 0.1
         account.drawdown_pct = 0.0
         account.equity = 2_000_000.0
+        account.margin_available = 2_000_000.0
         account.positions = []
         engine.on_snapshot(snapshot, signal=signal, account=account)
         state = engine.get_state()
@@ -108,6 +109,7 @@ class TestPositionEngineDisaster:
         account.margin_ratio = 0.1
         account.drawdown_pct = 0.0
         account.equity = 2_000_000.0
+        account.margin_available = 2_000_000.0
         account.positions = []
         engine.on_snapshot(snapshot, signal=signal, account=account)
         state_before = engine.get_state()

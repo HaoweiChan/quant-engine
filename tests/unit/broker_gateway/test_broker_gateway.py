@@ -35,6 +35,8 @@ class TestBrokerGatewayABC:
                 return AccountSnapshot.disconnected()
             def get_equity_history(self, days=30):
                 return []
+            def get_order_events_since(self, cursor: str | None):
+                return [], cursor
             @property
             def broker_name(self) -> str:
                 return "test"
@@ -54,6 +56,8 @@ class TestAccountSnapshot:
         assert snap.equity == 0.0
         assert snap.positions == []
         assert snap.recent_fills == []
+        assert snap.open_orders == []
+        assert snap.continuity_cursor is None
 
 
 class TestAccountConfig:
@@ -91,6 +95,8 @@ class TestMockGateway:
         assert snap.equity > 0
         assert len(snap.positions) == 2
         assert len(snap.recent_fills) >= 1
+        assert len(snap.open_orders) >= 1
+        assert snap.continuity_cursor is not None
 
     def test_equity_history_returns_points(self) -> None:
         gw = MockGateway()
@@ -98,6 +104,16 @@ class TestMockGateway:
         assert len(history) == 10
         for ts, eq in history:
             assert eq > 0
+
+    def test_order_events_cursor_progression(self) -> None:
+        gw = MockGateway(seed=777, cache_ttl=0.0)
+        gw.get_account_snapshot()
+        events_first, cursor_first = gw.get_order_events_since(None)
+        assert len(events_first) >= 1
+        assert cursor_first is not None
+        events_second, cursor_second = gw.get_order_events_since(cursor_first)
+        assert events_second == []
+        assert cursor_second == cursor_first
 
     def test_equity_evolves(self) -> None:
         gw = MockGateway(seed=42)

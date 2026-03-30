@@ -10,7 +10,7 @@ from src.core.policies import (
     PyramidEntryPolicy,
 )
 from src.core.types import ContractSpecs, Position, PyramidConfig, TradingHours
-from tests.conftest import make_engine_state, make_signal, make_snapshot
+from tests.conftest import make_account, make_engine_state, make_signal, make_snapshot
 
 
 @pytest.fixture
@@ -37,7 +37,8 @@ class TestPyramidEntryPolicy:
         snap = make_snapshot(20000.0, specs, daily_atr=100.0)
         signal = make_signal(direction=1.0, direction_conf=0.8)
         state = make_engine_state()
-        decision = policy.should_enter(snap, signal, state)
+        account = make_account(equity=20_000_000.0)
+        decision = policy.should_enter(snap, signal, state, account)
         assert decision is not None
         assert decision.direction == "long"
         assert decision.lots == 7.0
@@ -48,34 +49,53 @@ class TestPyramidEntryPolicy:
         snap = make_snapshot(20000.0, specs)
         signal = make_signal(direction=1.0, direction_conf=0.5)
         state = make_engine_state()
-        assert policy.should_enter(snap, signal, state) is None
+        assert policy.should_enter(snap, signal, state, make_account()) is None
 
-    def test_bearish_signal_returns_none(self, config: PyramidConfig, specs: ContractSpecs) -> None:
+    def test_bearish_signal_returns_short(self, config: PyramidConfig, specs: ContractSpecs) -> None:
         policy = PyramidEntryPolicy(config)
         snap = make_snapshot(20000.0, specs)
         signal = make_signal(direction=-0.5, direction_conf=0.8)
         state = make_engine_state()
-        assert policy.should_enter(snap, signal, state) is None
+        decision = policy.should_enter(snap, signal, state, make_account())
+        assert decision is not None
+        assert decision.direction == "short"
+        assert decision.initial_stop > snap.price
 
     def test_no_signal_returns_none(self, config: PyramidConfig, specs: ContractSpecs) -> None:
         policy = PyramidEntryPolicy(config)
         snap = make_snapshot(20000.0, specs)
         state = make_engine_state()
-        assert policy.should_enter(snap, None, state) is None
+        assert policy.should_enter(snap, None, state, make_account()) is None
 
     def test_halted_mode_returns_none(self, config: PyramidConfig, specs: ContractSpecs) -> None:
         policy = PyramidEntryPolicy(config)
         snap = make_snapshot(20000.0, specs)
         signal = make_signal(direction=1.0, direction_conf=0.8)
         state = make_engine_state(mode="halted")
-        assert policy.should_enter(snap, signal, state) is None
+        assert policy.should_enter(snap, signal, state, make_account()) is None
 
     def test_rule_only_mode_returns_none(self, config: PyramidConfig, specs: ContractSpecs) -> None:
         policy = PyramidEntryPolicy(config)
         snap = make_snapshot(20000.0, specs)
         signal = make_signal(direction=1.0, direction_conf=0.8)
         state = make_engine_state(mode="rule_only")
-        assert policy.should_enter(snap, signal, state) is None
+        assert policy.should_enter(snap, signal, state, make_account()) is None
+
+    def test_missing_account_uses_fallback_sizing(self, config: PyramidConfig, specs: ContractSpecs) -> None:
+        policy = PyramidEntryPolicy(config)
+        snap = make_snapshot(20000.0, specs)
+        signal = make_signal(direction=1.0, direction_conf=0.8)
+        state = make_engine_state()
+        decision = policy.should_enter(snap, signal, state, None)
+        assert decision is not None
+
+    def test_compat_mode_blocks_short(self, specs: ContractSpecs) -> None:
+        config = PyramidConfig(max_loss=500_000.0, long_only_compat_mode=True)
+        policy = PyramidEntryPolicy(config)
+        snap = make_snapshot(20000.0, specs)
+        signal = make_signal(direction=-1.0, direction_conf=0.9)
+        state = make_engine_state()
+        assert policy.should_enter(snap, signal, state, make_account()) is None
 
     def test_risk_scaling(self, specs: ContractSpecs) -> None:
         config = PyramidConfig(max_loss=100_000.0)
@@ -83,7 +103,7 @@ class TestPyramidEntryPolicy:
         snap = make_snapshot(20000.0, specs, daily_atr=100.0)
         signal = make_signal(direction=1.0, direction_conf=0.8)
         state = make_engine_state()
-        decision = policy.should_enter(snap, signal, state)
+        decision = policy.should_enter(snap, signal, state, make_account())
         assert decision is not None
         assert decision.lots < 7.0
 
@@ -93,7 +113,7 @@ class TestPyramidEntryPolicy:
         snap = make_snapshot(20000.0, specs, daily_atr=100.0)
         signal = make_signal(direction=1.0, direction_conf=0.8)
         state = make_engine_state()
-        assert policy.should_enter(snap, signal, state) is None
+        assert policy.should_enter(snap, signal, state, make_account()) is None
 
 
 # -- PyramidAddPolicy --
