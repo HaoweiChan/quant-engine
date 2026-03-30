@@ -40,12 +40,50 @@ files apply:
 parameter range, and acceptance criterion must be read through the lens of
 the strategy's type.
 
+## Seed Architecture Principles (MANDATORY)
+
+These principles are derived from docs/Seed-Strategy-Architecture-For-ML-Agents.md
+and validated through live optimization runs. They apply to ALL optimization loops.
+
+### Indicator Selection
+- **REQUIRED structural indicators**: VWAP, ATR, ADX, Time-of-Day session logic.
+- **BANNED lagging indicators**: MACD, standard MA crossovers, Stochastics.
+- **RSI exception**: RSI with period <= 5 is acceptable as a structural stress
+  indicator. RSI-14 is lagging momentum — do not use it.
+- **ATR for all dynamic stops/sizing**: never use fixed-point stops on futures.
+- **ADX as regime filter**: markets chop 70% of the time. ADX separates
+  trend-following entries (ADX >= threshold) from mean-reversion entries (ADX < threshold).
+
+### Fitness Function
+- **Default metric**: `composite_fitness` (= calmar × profit_factor / duration_penalty).
+- **NEVER optimize for net profit or raw PnL** — it finds lucky outliers.
+- **Calmar > Sharpe** for intraday (captures tail risk better).
+- Duration penalty = max(1, avg_holding_hours / 10) — penalizes stale positions.
+- Composite fitness auto-disqualifies candidates with < 100 trades or
+  expectancy below the minimum (covers slippage + commission).
+
+### Parameter Bounds
+- Restrict all parameter ranges to prevent overfitting.
+- Keltner/ATR multipliers: [0.05, 3.0] (not unbounded).
+- ADX threshold: [20, 40] (too low = no filter, too high = no trades).
+- RSI period: [2, 7] for structural stress use.
+- Lookback periods: cap at 30 bars on 1-min charts (a 200-period EMA on
+  1-min data is 3+ hours of lag — useless for intraday).
+
+### Intraday Mandatory Rules
+- **EOD force-close**: all positions must close before session end.
+- **Max hold bars**: enforce a maximum holding period to free the engine.
+- **Time gating**: block entries in low-edge windows (first/last 15 min).
+- **Volume confirmation**: require volume >= vol_mult × rolling average.
+- **Slippage + commission**: always model at least 1 bps slippage + 1 bps commission.
+
 ## Before You Start
 
 1. Call `get_parameter_schema` — learn all parameters, ranges, scenarios, and
    the **recommended_timeframe** (especially for intraday strategies).
 2. **Classify the strategy type** using Step 0 above.
 3. Read this skill fully. Do NOT start changing parameters blindly.
+4. **Read `references/seed-strategy-guidelines.md`** for the full rationale.
 
 ### Timeframe Selection
 
@@ -198,7 +236,7 @@ Decision rules:
 ## Stopping Conditions
 
 Stop the optimization loop when ANY of these are true:
-- **Target reached**: Sharpe > 1.0 across all scenarios (good enough)
+- **Target reached**: composite_fitness > 5.0 OR (calmar > 1.2 AND alpha > 50%)
 - **Diminishing returns**: 3 consecutive rejected hypotheses
 - **Budget exhausted**: 50+ MCP tool calls in this session
 - **User satisfied**: User says to stop
@@ -208,11 +246,24 @@ Stop the optimization loop when ANY of these are true:
 NEVER optimize these — they are risk management constraints:
 - `max_loss`: Set by the user's risk tolerance, not by optimization
 - `margin_limit`: Broker safety rail, not a tunable parameter
+- `slippage_bps` / `commission_bps`: safety overhead, not tunable
+- `min_trade_count`: statistical validity gate, not tunable
 
 ## Parameter Priority Order
 
 When optimizing, follow this sequence (from `references/statistical-validity.md`):
-1. Entry parameters (entry_conf_threshold, regime filters)
-2. Stop parameters (stop_atr_mult, trail_atr_mult, trail_lookback)
+1. Entry parameters (ADX threshold, Keltner mult, RSI thresholds, VWAP filter)
+2. Stop parameters (atr_sl_multi, atr_tp_multi, max_hold_bars)
 3. Position sizing (add_trigger_atr, lot_schedule, kelly_fraction)
-4. Final validation on held-out scenarios
+4. Time/volume filters (time_gate, vol_mult, cooldown_bars)
+5. Final validation on held-out data (different date range)
+
+## Default Sweep Configuration
+
+When running `run_parameter_sweep`, use these defaults unless overridden:
+- `metric`: `composite_fitness` (NOT sharpe or sortino)
+- `mode`: `production_intent`
+- `min_trade_count`: 100
+- `min_expectancy`: 0.0 (set > 0 for TAIFEX to cover tick costs)
+- `is_fraction`: 0.8
+- Always sweep ≤ 3 parameters at once
