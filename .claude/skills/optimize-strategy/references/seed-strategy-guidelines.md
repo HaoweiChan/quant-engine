@@ -1,6 +1,6 @@
 # Seed Strategy Architecture Guidelines
 
-Derived from `docs/Seed-Strategy-Architecture-For-ML-Agents.md` and validated
+Derived from `docs/archive/seed-strategy-architecture-for-ml-agents.md` and validated
 through live optimization on TAIFEX H1 2025 data (keltner_vwap_breakout achieving
 alpha 52.68%, calmar 11.75, 184 trades).
 

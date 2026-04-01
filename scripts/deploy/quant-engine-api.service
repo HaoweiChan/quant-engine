@@ -1,0 +1,18 @@
+[Unit]
+Description=Quant Engine API (FastAPI + dashboard static files)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+WorkingDirectory=__PROJECT_DIR__
+Environment=QUANT_FRONTEND_DIST=__PROJECT_DIR__/frontend/dist
+EnvironmentFile=-__PROJECT_DIR__/.env
+ExecStart=__UV_BIN__ run uvicorn src.api.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

@@ -2,7 +2,7 @@
 
 The quant-engine dashboard currently uses Streamlit (`src/dashboard/app.py`, 597 lines). All page logic is self-contained Python — data helpers (`_load_ohlcv`, `_generate_equity_curve`, `_generate_trades`, `_run_grid_mc`) are pure functions with no Streamlit dependencies. The presentation layer (charts, tables, layout) is the only part coupled to Streamlit.
 
-The reference design (`docs/pyramid-position-engine.jsx`) defines a precise dark terminal aesthetic: deep navy backgrounds, JetBrains Mono / IBM Plex fonts, color-coded stat cards, and dark Recharts-style charts. The goal is to replicate this in Python without JSX.
+The reference design (`docs/archive/pyramid-position-engine.jsx`) defines a precise dark terminal aesthetic: deep navy backgrounds, JetBrains Mono / IBM Plex fonts, color-coded stat cards, and dark Recharts-style charts. The goal is to replicate this in Python without JSX.
 
 ```
 CURRENT                         TARGET

@@ -33,7 +33,7 @@
 
 ## 6. Documentation
 
-- [x] 6.1 Update `docs/STRUCTURE.md` to match the new directory layout
+- [x] 6.1 Update `docs/structure.md` to match the new directory layout
 
 ## 7. Verification
 

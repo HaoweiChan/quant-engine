@@ -1,6 +1,6 @@
 ## Context
 
-The project directory is `quant-engine/` and the Python package lives at `quant-engine/quant_engine/` — a flat layout that creates confusing visual redundancy. The documented structure in `docs/STRUCTURE.md` describes a `src/quant_engine/` layout that was never adopted, plus several directories (`scripts/`, `notebooks/`, `data/`) that don't exist.
+The project directory is `quant-engine/` and the Python package lives at `quant-engine/quant_engine/` — a flat layout that creates confusing visual redundancy. The documented structure in `docs/structure.md` describes a `src/quant_engine/` layout that was never adopted, plus several directories (`scripts/`, `notebooks/`, `data/`) that don't exist.
 
 Current layout:
 
@@ -29,7 +29,7 @@ quant-engine/               ← project root (we're here in Cursor)
 
 - Eliminate the `quant-engine/quant_engine/` redundancy by renaming the package dir to `src/`
 - Move config TOML files out of the package into top-level `config/`
-- Update `docs/STRUCTURE.md` to match reality
+- Update `docs/structure.md` to match reality
 - Keep all module interfaces and behavior unchanged
 
 **Non-Goals:**

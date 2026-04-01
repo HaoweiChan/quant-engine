@@ -1,6 +1,6 @@
 ## Context
 
-The teardown in `docs/Engine-Tear-down-Risk-And-Symmetry.md` identifies three production blockers in the current TAIFEX position pipeline:
+The teardown in `docs/archive/engine-tear-down-risk-and-symmetry.md` identifies three production blockers in the current TAIFEX position pipeline:
 - Entry policy effectively behaves long-only, suppressing short-side opportunity and directional symmetry.
 - Entry sizing relies on static loss assumptions, which can over-risk the account as equity changes.
 - Position engine can emit entry orders before validating available margin, causing avoidable broker rejections.

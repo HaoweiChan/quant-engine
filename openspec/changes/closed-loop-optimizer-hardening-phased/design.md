@@ -8,7 +8,7 @@ The current optimization stack spans multiple module boundaries:
 - Candidate persistence and activation (`src/strategies/param_registry.py`)
 - Fill realism (`src/simulator/fill_model.py`, `src/simulator/backtester.py`)
 
-Per `docs/ARCHITECTURE.md`, optimization must preserve one-way model-to-position flow and keep deployment safety under explicit governance. Current behavior allows selection and promotion of candidates without sufficiently strict robustness gates, and some optimization pathways still use synthetic/proxy scoring.
+Per `docs/architecture.md`, optimization must preserve one-way model-to-position flow and keep deployment safety under explicit governance. Current behavior allows selection and promotion of candidates without sufficiently strict robustness gates, and some optimization pathways still use synthetic/proxy scoring.
 
 Current optimization topology:
 

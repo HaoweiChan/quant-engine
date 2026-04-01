@@ -1,4 +1,4 @@
-"""E2E tests verifying compliance with TRD-Core-Quant-Engine.md requirements.
+"""E2E tests verifying compliance with docs/archive/trd-core-quant-engine.md requirements.
 
 Each test class maps to a TRD section:
  §1 Data Integrity & PIT Architecture

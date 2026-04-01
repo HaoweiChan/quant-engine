@@ -1,0 +1,16 @@
+[Unit]
+Description=Quant Engine frontend (Vite dev server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+WorkingDirectory=__PROJECT_DIR__/frontend
+ExecStart=/usr/bin/env npm run dev -- --host 127.0.0.1 --port 5173
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

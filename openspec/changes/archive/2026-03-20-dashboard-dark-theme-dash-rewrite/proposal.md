@@ -1,6 +1,6 @@
 ## Why
 
-The current Streamlit dashboard uses default light-themed widgets and basic charts that don't match the trading-terminal aesthetic required for professional use. The existing `docs/pyramid-position-engine.jsx` reference design establishes a precise dark visual language — deep navy backgrounds, monospace fonts, color-coded P&L metrics, and Recharts-style dark charts — that the Python dashboard should replicate without switching to JSX.
+The current Streamlit dashboard uses default light-themed widgets and basic charts that don't match the trading-terminal aesthetic required for professional use. The existing `docs/archive/pyramid-position-engine.jsx` reference design establishes a precise dark visual language — deep navy backgrounds, monospace fonts, color-coded P&L metrics, and Recharts-style dark charts — that the Python dashboard should replicate without switching to JSX.
 
 ## What Changes
 

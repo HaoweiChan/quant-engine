@@ -1,0 +1,22 @@
+# Tailnet-only reverse proxy for Quant Engine.
+# Replace __TAILSCALE_HOST__ with your MagicDNS host, for example:
+# quant-vps.tailnet-name.ts.net
+http://__TAILSCALE_HOST__ {
+    encode zstd gzip
+
+    @backend path /api/* /ws/* /docs* /openapi.json
+    handle @backend {
+        reverse_proxy 127.0.0.1:8000
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:8000
+    }
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "same-origin"
+        Permissions-Policy "camera=(), geolocation=(), microphone=()"
+    }
+}

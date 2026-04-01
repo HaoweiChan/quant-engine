@@ -42,7 +42,7 @@ the strategy's type.
 
 ## Seed Architecture Principles (MANDATORY)
 
-These principles are derived from docs/Seed-Strategy-Architecture-For-ML-Agents.md
+These principles are derived from docs/archive/seed-strategy-architecture-for-ml-agents.md
 and validated through live optimization runs. They apply to ALL optimization loops.
 
 ### Indicator Selection
