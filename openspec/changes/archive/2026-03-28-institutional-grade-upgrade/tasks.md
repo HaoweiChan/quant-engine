@@ -52,6 +52,6 @@
 ## 7. Pipeline Wiring & Integration
 
 - [x] 7.1 Wire OMS into pipeline: `PositionEngine → OMS → ExecutionEngine` in `src/pipeline/runner.py`. Acceptance: full pipeline runs end-to-end with OMS.
-- [x] 7.2 Run all existing backtest presets with new fill model, document PnL delta in `docs/migration-impact-report.md`. Acceptance: report shows before/after metrics for all 7 presets.
+- [x] 7.2 Run all existing backtest presets with new fill model, document PnL delta in `docs/intraday-live-operations.md`. Acceptance: report shows before/after metrics for all 7 presets.
 - [x] 7.3 End-to-end integration test: bar data → PositionEngine (with pre-trade gate) → OMS → MarketImpactFillModel → verify fills have impact/spread/latency populated. Acceptance: single test exercises entire Phase A stack.
 - [x] 7.4 Fix any broken imports from `ClosePriceFillModel` removal across tests and facades. Acceptance: `ruff check`, `mypy`, `pytest` all pass clean.

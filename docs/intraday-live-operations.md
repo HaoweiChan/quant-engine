@@ -11,6 +11,27 @@ This runbook covers phase-1 TAIFEX deployment from `shadow` mode to `micro_live`
 - Confirm gateway connectivity and credentials are valid.
 - Confirm operator on-call channel is available for alerts.
 
+## Execution Baseline (Phase A)
+
+This rollout assumes the realistic execution stack is active:
+
+- Fill model: `MarketImpactFillModel` (replaces naive close/open fill assumptions).
+- OMS slicing available: TWAP, VWAP, POV for larger parent orders.
+- Pre-trade risk gate enabled for gross exposure and ADV participation controls.
+
+Expected impact versus naive historical assumptions:
+
+- Backtest PnL typically degrades by ~10-30% after market impact, spread, and latency are modeled.
+- This is expected and preferred because it reduces simulation-to-live drift.
+
+Verify these metrics are present in backtest outputs before enabling micro-live:
+
+- `total_market_impact`
+- `total_spread_cost`
+- `avg_latency_ms`
+- `partial_fill_count`
+- `impact_report`
+
 ## Startup Procedure
 
 1. Start isolated runtime supervisor:

@@ -18,4 +18,4 @@ Feature implementation tasks should be tracked in `openspec/changes/<change-id>/
 
 - Live runbook: `docs/intraday-live-operations.md`
 - Optimizer rollout: `docs/closed-loop-optimizer-rollout.md`
-- Migration notes: `docs/migration-impact-report.md`
+- Migration impact notes are merged into `docs/intraday-live-operations.md`.

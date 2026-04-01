@@ -20,7 +20,6 @@ This file is the index for documentation in `docs/`.
 
 - `intraday-live-operations.md` - intraday live rollout and rollback runbook.
 - `closed-loop-optimizer-rollout.md` - optimizer hardening rollout runbook.
-- `migration-impact-report.md` - migration impact and compatibility notes.
 
 ## Research and critique archive
 
