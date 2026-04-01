@@ -18,6 +18,16 @@ function parseTimestamp(ts: string): Date {
 }
 
 
+function formatNaiveTimestamp(date: Date): string {
+  const yyyy = date.getUTCFullYear().toString().padStart(4, "0");
+  const mm = (date.getUTCMonth() + 1).toString().padStart(2, "0");
+  const dd = date.getUTCDate().toString().padStart(2, "0");
+  const hh = date.getUTCHours().toString().padStart(2, "0");
+  const min = date.getUTCMinutes().toString().padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}:00`;
+}
+
+
 function dayFloor(date: Date): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
 }
@@ -95,11 +105,25 @@ function mapTaipeiSessionTimestamp(timestamp: string, timeframeMinutes: number):
   }
 
   if (timeframeMinutes >= 1440) {
-    return tradeDate.toISOString();
+    return formatNaiveTimestamp(tradeDate);
   }
   const alignedSessionMinute = Math.floor(sessionMinute / timeframeMinutes) * timeframeMinutes;
   const displayLocal = new Date(tradeDate.getTime() + alignedSessionMinute * 60 * 1000);
-  return displayLocal.toISOString();
+  return formatNaiveTimestamp(displayLocal);
+}
+
+
+function alignDisplayTimestamp(timestamp: string, timeframeMinutes: number): string | null {
+  const local = parseTimestamp(timestamp);
+  if (Number.isNaN(local.getTime())) return null;
+  const localDay = dayFloor(local);
+  if (timeframeMinutes >= 1440) {
+    return formatNaiveTimestamp(localDay);
+  }
+  const mins = local.getUTCHours() * 60 + local.getUTCMinutes();
+  const alignedMinute = Math.floor(mins / timeframeMinutes) * timeframeMinutes;
+  const aligned = new Date(localDay.getTime() + alignedMinute * 60 * 1000);
+  return formatNaiveTimestamp(aligned);
 }
 
 
@@ -178,15 +202,17 @@ export function toProfessionalSessionBars(
   bars: OHLCVBar[],
   timeframeMinutes: number,
 ): OHLCVBar[] {
-  const mapped: { bar: OHLCVBar; sessionTs: string }[] = [];
+  const mapped: { bar: OHLCVBar; sessionTs: string; displayTs: string }[] = [];
   for (const bar of bars) {
     if (isEmptyBar(bar)) continue;
     const sessionTs = mapTaipeiSessionTimestamp(bar.timestamp, timeframeMinutes);
+    const displayTs = alignDisplayTimestamp(bar.timestamp, timeframeMinutes);
     if (!sessionTs) continue;
-    mapped.push({ bar, sessionTs });
+    if (!displayTs) continue;
+    mapped.push({ bar, sessionTs, displayTs });
   }
   mapped.sort((a, b) => parseTimestamp(a.sessionTs).getTime() - parseTimestamp(b.sessionTs).getTime());
-  const dedup: { bar: OHLCVBar; sessionTs: string }[] = [];
+  const dedup: { bar: OHLCVBar; sessionTs: string; displayTs: string }[] = [];
   let lastTime = Number.NaN;
   for (const entry of mapped) {
     const t = parseTimestamp(entry.sessionTs).getTime();
@@ -201,8 +227,8 @@ export function toProfessionalSessionBars(
   if (dedup.length > 0) {
     return dedup.map((entry) => ({
       ...entry.bar,
-      // Use session-aligned timestamps so chart ticks map to market session boundaries.
-      timestamp: entry.sessionTs,
+      // Keep display clock in Taipei local session time while preserving session-aware ordering.
+      timestamp: entry.displayTs,
     }));
   }
   return bars
