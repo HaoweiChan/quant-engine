@@ -105,17 +105,22 @@ class GatewayRegistry:
 
     def _bg_connect(self, account_id: str, gateway: BrokerGateway) -> None:
         """Attempt gateway.connect() in a background thread (non-blocking)."""
+        config = self._configs.get(account_id)
+        simulation = bool(config and (config.sandbox_mode or config.demo_trading))
         def _do_connect() -> None:
             try:
-                gateway.connect(account_id=account_id)  # type: ignore[call-arg]
-                logger.info("gateway_connected", account_id=account_id)
+                gateway.connect(account_id=account_id, simulation=simulation)  # type: ignore[call-arg]
+                logger.info("gateway_connected", account_id=account_id, simulation=simulation)
             except TypeError:
-                # Gateway doesn't accept account_id kwarg — try bare connect()
                 try:
-                    gateway.connect()
+                    gateway.connect(account_id=account_id)  # type: ignore[call-arg]
                     logger.info("gateway_connected", account_id=account_id)
-                except Exception as exc:
-                    logger.warning("gateway_connect_failed", account_id=account_id, error=str(exc))
+                except TypeError:
+                    try:
+                        gateway.connect()
+                        logger.info("gateway_connected", account_id=account_id)
+                    except Exception as exc:
+                        logger.warning("gateway_connect_failed", account_id=account_id, error=str(exc))
             except Exception as exc:
                 logger.warning("gateway_connect_failed", account_id=account_id, error=str(exc))
         threading.Thread(target=_do_connect, daemon=True, name=f"gw-connect-{account_id}").start()

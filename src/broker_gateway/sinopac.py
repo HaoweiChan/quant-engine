@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import time
 import asyncio
+import structlog
 import threading
 from typing import Any
-from datetime import datetime
-
-import structlog
+from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from src.broker_gateway.abc import BrokerGateway
+from src.broker_gateway.live_bar_store import LiveMinuteBarStore
 from src.broker_gateway.types import AccountSnapshot, Fill, LivePosition, OpenOrder, OrderEvent
 
 logger = structlog.get_logger(__name__)
@@ -62,6 +63,7 @@ class SinopacGateway(BrokerGateway):
         self._last_connect_attempt_ts = 0.0
         self._reconnect_interval_secs = 20.0
         self._tick_loop: asyncio.AbstractEventLoop | None = None
+        self._live_bar_store = LiveMinuteBarStore()
 
     @property
     def broker_name(self) -> str:
@@ -76,6 +78,7 @@ class SinopacGateway(BrokerGateway):
         account_id: str | None = None,
         api_key: str | None = None,
         api_secret: str | None = None,
+        simulation: bool = False,
     ) -> None:
         """Login to shioaji.
 
@@ -85,6 +88,7 @@ class SinopacGateway(BrokerGateway):
         3. Legacy group-based GSM lookup via secrets.toml [sinopac] section
         """
         self._account_id = account_id or self._account_id
+        self._simulation = simulation
         self._last_connect_attempt_ts = time.monotonic()
         try:
             _sj = _ensure_shioaji()
@@ -133,11 +137,16 @@ class SinopacGateway(BrokerGateway):
         last_error: Exception | None = None
         for source, key, secret in unique_candidates:
             try:
-                self._api = _sj.Shioaji()
+                self._api = _sj.Shioaji(simulation=simulation)
                 self._api.login(api_key=key, secret_key=secret)
                 self._connected = True
                 self._connect_error = None
-                logger.info("sinopac_gateway_connected", account_id=account_id, credential_source=source)
+                logger.info(
+                    "sinopac_gateway_connected",
+                    account_id=account_id,
+                    credential_source=source,
+                    simulation=simulation,
+                )
                 self._subscribe_market_data()
                 return
             except Exception as exc:
@@ -179,6 +188,15 @@ class SinopacGateway(BrokerGateway):
             if price <= 0:
                 return
             symbol = "TX" if code.startswith("TXF") else "MTX" if code.startswith("MXF") else code
+            raw_ts = getattr(tick, "datetime", None)
+            if isinstance(raw_ts, datetime):
+                tick_timestamp = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=ZoneInfo("Asia/Taipei"))
+            else:
+                tick_timestamp = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
+            try:
+                self._live_bar_store.ingest_tick(symbol, price, volume, tick_timestamp)
+            except Exception as exc:
+                logger.debug("sinopac_live_bar_upsert_error", symbol=symbol, error=str(exc))
             try:
                 loop = self._tick_loop
                 if not loop or loop.is_closed():
@@ -186,7 +204,7 @@ class SinopacGateway(BrokerGateway):
                     loop = get_main_loop()
                     self._tick_loop = loop
                 if loop and loop.is_running():
-                    asyncio.run_coroutine_threadsafe(push_tick(symbol, price, volume), loop)
+                    asyncio.run_coroutine_threadsafe(push_tick(symbol, price, volume, tick_timestamp), loop)
             except Exception as exc:
                 logger.debug("sinopac_tick_push_error", error=str(exc))
         try:
@@ -409,8 +427,8 @@ class SinopacGateway(BrokerGateway):
     def _reconnect(self) -> None:
         logger.info("sinopac_attempting_reconnect")
         _sj = _ensure_shioaji()
-        self._api = _sj.Shioaji()
-        self.connect(account_id=self._account_id)
+        self._api = _sj.Shioaji(simulation=getattr(self, "_simulation", False))
+        self.connect(account_id=self._account_id, simulation=getattr(self, "_simulation", False))
         logger.info("sinopac_reconnected")
 
     def _maybe_reconnect_disconnected(self) -> None:
