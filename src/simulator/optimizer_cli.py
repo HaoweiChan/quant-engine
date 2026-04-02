@@ -12,7 +12,7 @@ Config JSON schema:
     "end":          "2026-03-14",
     "param_grid":   {"bb_len": [15, 20, 25], "rsi_oversold": [25, 30], ...},
     "is_fraction":  0.8,
-    "objective":    "sharpe",
+    "objective":    "sortino",
     "n_jobs":       1
 }
 
@@ -30,7 +30,7 @@ Result JSON schema:
     "is_bars":      int,
     "oos_bars":     int,
     "param_keys":   [...],
-    "objective":    "sharpe",
+    "objective":    "sortino",
     "symbol":       "TX",
     "start":        "...",
     "end":          "...",
@@ -70,7 +70,7 @@ def main() -> None:
                 result=optimizer_result,
                 strategy=cfg.get("factory_name", "").replace("create_", "").replace("_engine", ""),
                 symbol=cfg["symbol"],
-                objective=cfg.get("objective", "sharpe"),
+                objective=cfg.get("objective", "sortino"),
                 train_start=cfg.get("start"),
                 train_end=cfg.get("end"),
                 is_fraction=float(cfg.get("is_fraction", 0.8)),
@@ -107,7 +107,7 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
     end_dt = datetime.fromisoformat(cfg["end"])
     param_grid: dict = cfg["param_grid"]
     is_fraction: float = float(cfg.get("is_fraction", 0.8))
-    objective: str = cfg.get("objective", "sharpe")
+    objective: str = cfg.get("objective", "sortino")
     n_jobs: int = int(cfg.get("n_jobs", 1))
     slippage_bps: float = float(cfg.get("slippage_bps", 0.0))
     commission_bps: float = float(cfg.get("commission_bps", 0.0))

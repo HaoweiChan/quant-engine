@@ -36,7 +36,7 @@ _LARGE_TRIAL_THRESHOLD = 5000
 
 
 def _sanitize_objective_column(objective: str) -> str:
-    return objective if objective in _METRIC_COLS else "sharpe"
+    return objective if objective in _METRIC_COLS else "sortino"
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS param_runs (
@@ -520,7 +520,7 @@ class ParamRegistry:
         """Delete a run and all its trials and candidates.
 
         If the deleted run contained the active candidate, auto-activate the
-        remaining candidate with the highest sharpe for that strategy.
+        remaining candidate with the highest sortino for that strategy.
         Returns info about what happened (e.g. auto-activated candidate).
         """
         run_row = self._conn.execute(
@@ -548,21 +548,21 @@ class ParamRegistry:
         return result
 
     def _auto_activate_best(self, strategy: str) -> dict[str, Any] | None:
-        """Activate the candidate with the highest sharpe for a strategy."""
+        """Activate the candidate with the highest sortino for a strategy."""
         row = self._conn.execute(
-            """SELECT c.id AS cid, t.sharpe
+            """SELECT c.id AS cid, t.sortino
                FROM param_candidates c
                JOIN param_trials t ON t.run_id = c.run_id AND t.is_oos = 0
                JOIN param_runs r ON r.id = c.run_id
                WHERE c.strategy = ?
                  AND (r.mode != 'production_intent' OR r.promotable = 1)
-               ORDER BY t.sharpe DESC LIMIT 1""",
+               ORDER BY t.sortino DESC LIMIT 1""",
             (strategy,),
         ).fetchone()
         if row is None:
             return None
         self.activate(row["cid"])
-        return {"candidate_id": row["cid"], "sharpe": row["sharpe"]}
+        return {"candidate_id": row["cid"], "sortino": row["sortino"]}
 
     # -- get_active -------------------------------------------------------
 

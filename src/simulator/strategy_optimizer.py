@@ -120,7 +120,7 @@ class StrategyOptimizer:
         param_grid: dict[str, list[Any]],
         bars: list[dict[str, Any]],
         timestamps: list[datetime],
-        objective: str = "sharpe",
+        objective: str = "sortino",
         is_fraction: float = 0.8,
     ) -> OptimizerResult:
         """Exhaustive grid search across all param combinations.
@@ -204,7 +204,7 @@ class StrategyOptimizer:
         timestamps: list[datetime],
         train_bars: int,
         test_bars: int,
-        objective: str = "sharpe",
+        objective: str = "sortino",
     ) -> WalkForwardResult:
         """Rolling walk-forward: optimize on IS, verify on OOS, compute efficiency.
 
@@ -266,7 +266,7 @@ class StrategyOptimizer:
         bars: list[dict[str, Any]],
         timestamps: list[datetime],
         n_trials: int = 50,
-        objective: str = "sharpe",
+        objective: str = "sortino",
         is_fraction: float = 0.8,
         seed: int | None = None,
     ) -> OptimizerResult:
