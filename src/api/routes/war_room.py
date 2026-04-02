@@ -36,13 +36,14 @@ def _resolve_deployment_info(session) -> dict:
             info["deployed_params"] = json.loads(row["params"])
             # Get backtest metrics from the associated trial
             trial = reg._conn.execute(
-                """SELECT sharpe, total_pnl, win_rate, max_drawdown_pct, profit_factor, trade_count
-                   FROM param_trials WHERE run_id = ? ORDER BY sharpe DESC LIMIT 1""",
+                """SELECT sharpe, sortino, total_pnl, win_rate, max_drawdown_pct, profit_factor, trade_count
+                   FROM param_trials WHERE run_id = ? ORDER BY sortino DESC LIMIT 1""",
                 (row["run_id"],),
             ).fetchone()
             if trial:
                 info["backtest_metrics"] = {
                     "sharpe": trial["sharpe"],
+                    "sortino": trial["sortino"],
                     "total_pnl": trial["total_pnl"],
                     "win_rate": trial["win_rate"],
                     "max_drawdown_pct": trial["max_drawdown_pct"],
@@ -97,6 +98,7 @@ async def war_room() -> dict:
         accounts[acct_id] = {
             "display_name": config.display_name if config else acct_id,
             "broker": config.broker if config else "",
+            "sandbox_mode": bool(config.sandbox_mode) if config else False,
             "connected": bool(snap and snap.connected),
             "connect_error": info.get("connect_error"),
             "equity": snap.equity if snap and snap.connected else 0,

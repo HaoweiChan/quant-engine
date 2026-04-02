@@ -94,7 +94,7 @@ async def delete_run(run_id: int) -> dict:
     """Delete a run and its associated trials and candidates.
 
     If the deleted run held the active candidate, auto-activates the
-    remaining candidate with the highest sharpe.
+    remaining candidate with the highest sortino.
     """
     from src.strategies.param_registry import ParamRegistry
 

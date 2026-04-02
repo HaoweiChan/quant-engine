@@ -262,11 +262,11 @@ def get_param_grid_for_strategy(slug: str) -> dict[str, dict]:
 
 # Objectives available in the optimizer (maps display label → metric key)
 OPT_OBJECTIVES: list[dict[str, str]] = [
+    {"label": "Sortino Ratio", "value": "sortino"},
     {"label": "Sharpe Ratio", "value": "sharpe"},
     {"label": "Profit Factor", "value": "profit_factor"},
     {"label": "Calmar Ratio", "value": "calmar"},
     {"label": "Win Rate", "value": "win_rate"},
-    {"label": "Sortino Ratio", "value": "sortino"},
 ]
 
 
@@ -313,7 +313,7 @@ def _poll_subprocess() -> None:
             data = json.loads(Path(output_path).read_text())
             if data.get("status") == "ok":
                 n_combos = len(data.get("trials", []))
-                obj = data.get("objective", "sharpe")
+                obj = data.get("objective", "sortino")
                 best_val = data.get("is_metrics", {}).get(obj, 0)
                 _opt_state.result_data = data
                 _opt_state.progress = (
@@ -416,12 +416,18 @@ def load_ohlcv(symbol: str, start: datetime, end: datetime, tf_minutes: int) -> 
     """
     if not _DB_PATH.exists():
         return pd.DataFrame()
+    session_filter_sql = (
+        "(time(timestamp) >= '15:00:00' "
+        "OR time(timestamp) < '05:00:00' "
+        "OR (time(timestamp) >= '08:45:00' AND time(timestamp) <= '13:45:59'))"
+    )
     conn = sqlite3.connect(str(_DB_PATH))
     try:
         if tf_minutes <= 1:
             query = (
                 "SELECT timestamp, open, high, low, close, volume "
                 "FROM ohlcv_bars WHERE symbol = ? AND timestamp >= ? AND timestamp <= ? "
+                f"AND {session_filter_sql} "
                 "ORDER BY timestamp"
             )
             df = pd.read_sql_query(
@@ -429,10 +435,66 @@ def load_ohlcv(symbol: str, start: datetime, end: datetime, tf_minutes: int) -> 
                 params=(symbol, start.isoformat(), end.isoformat()),
                 parse_dates=["timestamp"],
             )
+        elif tf_minutes >= 1440:
+            # Daily bars: group by TAIFEX trading day.
+            # Night session (>=15:00) belongs to next calendar day's trading day.
+            # Night session after midnight (<05:00) belongs to current calendar day.
+            # Day session (08:45-13:45) belongs to current calendar day.
+            query = f"""
+            WITH trading_days AS (
+                SELECT
+                    rowid,
+                    timestamp,
+                    open, high, low, close, volume,
+                    CASE
+                        WHEN time(timestamp) >= '15:00:00'
+                            THEN date(timestamp, '+1 day')
+                        WHEN time(timestamp) < '05:00:00'
+                            THEN date(timestamp)
+                        ELSE date(timestamp)
+                    END AS trade_date
+                FROM ohlcv_bars
+                WHERE symbol = :sym
+                  AND timestamp >= :ts_start
+                  AND timestamp <= :ts_end
+                  AND {session_filter_sql}
+            ),
+            day_bounds AS (
+                SELECT
+                    trade_date,
+                    MIN(rowid) AS first_rid,
+                    MAX(rowid) AS last_rid,
+                    MAX(high)  AS high,
+                    MIN(low)   AS low,
+                    SUM(volume) AS volume
+                FROM trading_days
+                GROUP BY trade_date
+            )
+            SELECT
+                f.timestamp,
+                f.open,
+                db.high,
+                db.low,
+                l.close,
+                db.volume
+            FROM day_bounds db
+            JOIN ohlcv_bars f ON f.rowid = db.first_rid
+            JOIN ohlcv_bars l ON l.rowid = db.last_rid
+            ORDER BY db.trade_date
+            """
+            df = pd.read_sql_query(
+                query, conn,
+                params={
+                    "sym": symbol,
+                    "ts_start": start.isoformat(),
+                    "ts_end": end.isoformat(),
+                },
+                parse_dates=["timestamp"],
+            )
         else:
-            # Aggregate in SQL: bucket = floor(unix_ts / bucket_secs)
+            # Sub-daily aggregation: bucket = floor(unix_ts / bucket_secs)
             bucket_secs = tf_minutes * 60
-            query = """
+            query = f"""
             WITH buckets AS (
                 SELECT
                     CAST(strftime('%s', timestamp) / :bkt AS INTEGER) AS bkt,
@@ -445,6 +507,7 @@ def load_ohlcv(symbol: str, start: datetime, end: datetime, tf_minutes: int) -> 
                 WHERE symbol = :sym
                   AND timestamp >= :ts_start
                   AND timestamp <= :ts_end
+                  AND {session_filter_sql}
                 GROUP BY bkt
             )
             SELECT

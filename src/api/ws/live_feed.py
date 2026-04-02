@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from datetime import datetime
+from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -49,14 +49,23 @@ class Broadcaster:
 live_broadcaster = Broadcaster()
 
 
-async def push_tick(symbol: str, price: float, volume: int) -> None:
+def _format_tick_timestamp(ts: datetime | str | None) -> str:
+    if isinstance(ts, str) and ts.strip():
+        return ts
+    if isinstance(ts, datetime):
+        dt = ts if ts.tzinfo else ts.replace(tzinfo=ZoneInfo("Asia/Taipei"))
+        return dt.astimezone(ZoneInfo("Asia/Taipei")).isoformat()
+    return datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Taipei")).isoformat()
+
+
+async def push_tick(symbol: str, price: float, volume: int, timestamp: datetime | str | None = None) -> None:
     """Called from Shioaji callback bridge to push tick data."""
     await live_broadcaster.broadcast({
         "type": "tick",
         "symbol": symbol,
         "price": price,
         "volume": volume,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": _format_tick_timestamp(timestamp),
     })
 
 

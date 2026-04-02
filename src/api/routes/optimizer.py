@@ -21,7 +21,7 @@ class OptimizerRequest(BaseModel):
     end: str = "2026-03-14"
     param_grid: dict[str, list]
     is_fraction: float = 0.8
-    objective: str = "sharpe"
+    objective: str = "sortino"
     n_jobs: int = 1
     slippage_bps: float = 0.0
     commission_bps: float = 0.0
