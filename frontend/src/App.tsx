@@ -7,9 +7,9 @@ import { Trading } from "@/pages/Trading";
 
 
 const primaryTabs = [
-  { value: "datahub", label: "Data Hub" },
-  { value: "strategy", label: "Strategy" },
   { value: "trading", label: "Trading" },
+  { value: "strategy", label: "Strategy" },
+  { value: "datahub", label: "Data Hub" },
 ] as const;
 
 const tabComponents: Record<string, React.FC> = {

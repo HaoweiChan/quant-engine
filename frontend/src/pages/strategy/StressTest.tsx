@@ -15,10 +15,8 @@ const PAD = { top: 10, bottom: 20, left: 60, right: 10 };
 
 const FanChartSVG = React.memo(function FanChartSVG({
   bands,
-  nDays,
 }: {
   bands: MCSimulationResult["bands"];
-  nDays: number;
 }) {
   const len = bands.p50.length;
   const { yMin, yMax, ticks, fmtY } = useMemo(() => {
@@ -202,7 +200,7 @@ export function StressTest() {
             <StatCard label="P(RUIN)" value={`${(result.prob_ruin * 100).toFixed(1)}%`} color={result.prob_ruin > 0.05 ? colors.red : colors.green} />
           </StatRow>
           <ChartCard title={`EQUITY FAN CHART — ${result.n_paths} paths × ${result.n_days}d (${result.method})`}>
-            <FanChartSVG bands={result.bands} nDays={result.n_days} />
+            <FanChartSVG bands={result.bands} />
           </ChartCard>
           {finalValues.length > 0 && (
             <ChartCard title="TERMINAL EQUITY PERCENTILES">

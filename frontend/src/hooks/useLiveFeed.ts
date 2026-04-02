@@ -2,12 +2,15 @@ import { useEffect, useRef, useCallback } from "react";
 import { useTradingStore } from "@/stores/tradingStore";
 import { useMarketDataStore } from "@/stores/marketDataStore";
 
-export function useLiveFeed() {
+export function useLiveFeed(
+  processTickOverride?: (tick: { price: number; volume: number; timestamp: string }) => void,
+) {
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef(0);
   const shouldReconnectRef = useRef(true);
   const setWsConnected = useTradingStore((s) => s.setWsConnected);
-  const processLiveTick = useMarketDataStore((s) => s.processLiveTick);
+  const globalProcessTick = useMarketDataStore((s) => s.processLiveTick);
+  const processTick = processTickOverride ?? globalProcessTick;
   const connectRef = useRef<() => void>(() => {});
 
   const connect = useCallback(() => {
@@ -30,13 +33,13 @@ export function useLiveFeed() {
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === "tick") {
-          processLiveTick({ price: msg.price, volume: msg.volume, timestamp: msg.timestamp });
+          processTick({ price: msg.price, volume: msg.volume, timestamp: msg.timestamp });
         }
       } catch {
         // ignore malformed messages
       }
     };
-  }, [setWsConnected, processLiveTick]);
+  }, [setWsConnected, processTick]);
 
   useEffect(() => {
     connectRef.current = connect;

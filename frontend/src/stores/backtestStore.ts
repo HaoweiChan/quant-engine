@@ -7,6 +7,7 @@ interface BacktestState {
   error: string | null;
   progress: number;
   progressMessage: string;
+  startRun: () => void;
   setResult: (r: BacktestResult | null) => void;
   setLoading: (v: boolean) => void;
   setError: (e: string | null) => void;
@@ -19,6 +20,7 @@ export const useBacktestStore = create<BacktestState>((set) => ({
   error: null,
   progress: 0,
   progressMessage: "",
+  startRun: () => set({ result: null, loading: true, error: null }),
   setResult: (result) => set({ result, loading: false, error: null }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error, loading: false }),

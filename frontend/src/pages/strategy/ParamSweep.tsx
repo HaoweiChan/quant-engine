@@ -136,7 +136,7 @@ export function ParamSweep() {
     : [];
 
   const [method, setMethod] = useState<SweepMethod>("grid");
-  const [metric, setMetric] = useState<Metric>("sharpe");
+  const [metric, setMetric] = useState<Metric>("sortino");
   const [xParam, setXParam] = useState("");
   const [yParam, setYParam] = useState("");
   const [xMin, setXMin] = useState(1);
@@ -149,7 +149,7 @@ export function ParamSweep() {
   const [selectedCellKey, setSelectedCellKey] = useState<string | null>(null);
   const [paramGridStr, setParamGridStr] = useState<Record<string, string>>({});
   const [isFraction, setIsFraction] = useState(0.8);
-  const [objective, setObjective] = useState("sharpe");
+  const [objective, setObjective] = useState("sortino");
   const [nJobs, setNJobs] = useState(2);
   const [optStatus, setOptStatus] = useState<OptimizerStatus | null>(null);
   const [running, setRunning] = useState(false);
@@ -350,8 +350,8 @@ export function ParamSweep() {
             <div>
               <div className="text-[11px] mb-1" style={{ color: colors.dim }}>Objective</div>
               <select value={objective} onChange={(e) => setObjective(e.target.value)} className="rounded px-2 py-1.5 text-[11px]" style={inputStyle}>
-                <option value="sharpe">Sharpe</option>
                 <option value="sortino">Sortino</option>
+                <option value="sharpe">Sharpe</option>
                 <option value="calmar">Calmar</option>
                 <option value="total_return">Total Return</option>
               </select>

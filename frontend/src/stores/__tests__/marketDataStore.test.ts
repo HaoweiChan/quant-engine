@@ -31,10 +31,18 @@ describe("marketDataStore", () => {
   });
 
   describe("processLiveTick", () => {
-    it("returns early when bars is empty", () => {
+    it("creates first live bar when history is empty", () => {
       const state = useMarketDataStore.getState();
-      state.processLiveTick({ price: 100, volume: 50, timestamp: "2025-03-01T10:05:00Z" });
-      expect(useMarketDataStore.getState().lastLiveTick).toBeNull();
+      state.processLiveTick({ price: 100, volume: 50, timestamp: "2025-03-01 10:05:00" });
+      const next = useMarketDataStore.getState();
+      expect(next.bars).toHaveLength(1);
+      expect(next.lastLiveTick).not.toBeNull();
+      expect(next.lastLiveTick!.timestamp).toBe("2025-03-01 10:00:00");
+      expect(next.lastLiveTick!.open).toBe(100);
+      expect(next.lastLiveTick!.high).toBe(100);
+      expect(next.lastLiveTick!.low).toBe(100);
+      expect(next.lastLiveTick!.close).toBe(100);
+      expect(next.lastLiveTick!.volume).toBe(50);
     });
 
     it("aggregates tick into current bar within timeframe", () => {

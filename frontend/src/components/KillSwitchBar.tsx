@@ -33,7 +33,7 @@ export function KillSwitchBar() {
       {status && (
         <span className="text-[9px] font-semibold px-2 py-0.5 rounded" style={{
           fontFamily: "var(--font-mono)",
-          color: status === "halted" ? colors.red : status === "resumed" ? colors.green : colors.yellow,
+          color: status === "halted" ? colors.red : status === "resumed" ? colors.green : colors.gold,
           background: "rgba(255,255,255,0.05)",
         }}>
           {status.toUpperCase()}

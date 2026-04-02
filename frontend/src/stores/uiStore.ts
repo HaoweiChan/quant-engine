@@ -14,9 +14,9 @@ interface UiState {
 }
 
 export const useUiStore = create<UiState>((set) => ({
-  primaryTab: "datahub",
+  primaryTab: "trading",
   strategySubTab: "editor",
-  tradingSubTab: "accounts",
+  tradingSubTab: "warroom",
   setPrimaryTab: (tab) => set({ primaryTab: tab }),
   setStrategySubTab: (tab) => set({ strategySubTab: tab }),
   setTradingSubTab: (tab) => set({ tradingSubTab: tab }),

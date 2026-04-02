@@ -1,20 +1,18 @@
-import { useEffect, useState, useMemo, useRef } from "react";
+import { useCallback, useEffect, useState, useMemo, useRef } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Sidebar, SectionLabel, ParamInput } from "@/components/Sidebar";
 import { StatCard, StatRow } from "@/components/StatCard";
 import { ChartCard } from "@/components/ChartCard";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
 import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
-import { OHLCVChart, type IndicatorOverlay } from "@/components/charts/OHLCVChart";
+import { ChartStack } from "@/components/charts/ChartStack";
 import { useUiStore } from "@/stores/uiStore";
 import { useTradingStore } from "@/stores/tradingStore";
-import { useMarketDataStore } from "@/stores/marketDataStore";
+import { createMarketDataStore, type MarketDataStore } from "@/stores/marketDataStore";
+import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { createAccount, fetchAccounts, fetchStrategies, fetchWarRoomTyped, fetchOHLCV, deployToAccount, fetchDeployHistory, startSession, stopSession, fetchParamRuns, updateAccountStrategies } from "@/lib/api";
+import { createAccount, fetchAccounts, fetchStrategies, fetchWarRoomTyped, fetchOHLCV, deployToAccount, fetchDeployHistory, startSession, stopSession, fetchParamRuns, updateAccountStrategies, startCrawl, fetchCrawlStatus } from "@/lib/api";
 import type { AccountInfo, StrategyInfo, WarRoomSession, WarRoomData, DeployLogEntry, ParamRun } from "@/lib/api";
-import { INDICATOR_REGISTRY, createActiveIndicator, getIndicatorDef } from "@/lib/indicatorRegistry";
-import type { ActiveIndicator } from "@/lib/indicatorRegistry";
-import { toProfessionalSessionBars } from "@/lib/sessionChart";
 import { colors } from "@/lib/theme";
 import { useLiveFeed } from "@/hooks/useLiveFeed";
 import { useRiskAlerts } from "@/hooks/useRiskAlerts";
@@ -238,8 +236,6 @@ function AccountsTab() {
   );
 }
 
-const statusColor = (s: string) => s === "active" ? colors.green : s === "paused" ? colors.gold : colors.dim;
-const statusLabel = (s: string) => s.toUpperCase();
 const fmtParams = (p: Record<string, number> | null) => {
   if (!p) return "—";
   return Object.entries(p).map(([k, v]) => `${k}=${v}`).join(", ");
@@ -343,245 +339,7 @@ const TF_OPTIONS = [
   { label: "D", value: 1440 },
 ];
 
-const OVERLAY_INDICATORS = INDICATOR_REGISTRY.filter((d) => d.type === "overlay");
-
-
-function toUnixTime(ts: string): number {
-  const normalized = ts.includes("T") ? ts : ts.replace(" ", "T");
-  const zoned = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`;
-  return Math.floor(new Date(zoned).getTime() / 1000);
-}
-
-function CommandChartPane({
-  activeAccountId,
-  equityCurve,
-  bars,
-  tfMinutes,
-  onTfChange,
-}: {
-  activeAccountId: string;
-  equityCurve: { timestamp: string; equity: number }[];
-  bars?: { timestamp: string; open: number; high: number; low: number; close: number; volume: number }[];
-  tfMinutes: number;
-  onTfChange: (tf: number) => void;
-}) {
-  const chartCardRef = useRef<HTMLDivElement | null>(null);
-  const equityValues = equityCurve.map((p) => p.equity);
-  const [indicators, setIndicators] = useState<ActiveIndicator[]>([]);
-  const [addingIndicator, setAddingIndicator] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState(false);
-  const sessionBars = useMemo(
-    () => toProfessionalSessionBars(bars ?? [], tfMinutes),
-    [bars, tfMinutes],
-  );
-
-  const addIndicator = (registryId: string) => {
-    const count = indicators.filter((ai) => ai.registryId === registryId).length;
-    setIndicators((prev) => [...prev, createActiveIndicator(registryId, count)]);
-    setAddingIndicator(false);
-  };
-
-  const removeIndicator = (instanceId: string) => {
-    setIndicators((prev) => prev.filter((ai) => ai.instanceId !== instanceId));
-    if (editingId === instanceId) setEditingId(null);
-  };
-
-  const updateParam = (instanceId: string, paramName: string, value: number) => {
-    setIndicators((prev) =>
-      prev.map((ai) =>
-        ai.instanceId === instanceId
-          ? { ...ai, params: { ...ai.params, [paramName]: value } }
-          : ai,
-      ),
-    );
-  };
-
-  const overlaySeries = useMemo<IndicatorOverlay[]>(() => {
-    if (sessionBars.length === 0) return [];
-    const times = sessionBars.map((b) => toUnixTime(b.timestamp));
-    const timeToIndex = new Map<number, number>(times.map((t, i) => [t, i]));
-    const overlays: IndicatorOverlay[] = [];
-    for (const ai of indicators) {
-      const def = getIndicatorDef(ai.registryId);
-      if (!def) continue;
-      const computed = def.compute(sessionBars as any, ai.params, times);
-      for (const s of computed) {
-        const values = Array(times.length).fill(null) as (number | null)[];
-        for (const point of s.data) {
-          const idx = timeToIndex.get(point.time);
-          if (idx != null) values[idx] = point.value;
-        }
-        overlays.push({
-          label: `${def.label}${s.label ? ` (${s.label})` : ""}`,
-          values,
-          color: ai.color,
-        });
-      }
-    }
-    return overlays;
-  }, [sessionBars, indicators]);
-
-  useEffect(() => {
-    const onFullscreenChange = () => {
-      setExpanded(document.fullscreenElement === chartCardRef.current);
-    };
-    document.addEventListener("fullscreenchange", onFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
-  }, []);
-
-  const toggleExpand = async () => {
-    if (!chartCardRef.current) return;
-    if (document.fullscreenElement === chartCardRef.current) {
-      await document.exitFullscreen();
-      return;
-    }
-    await chartCardRef.current.requestFullscreen();
-  };
-
-  return (
-    <div className="flex flex-col gap-2 h-full">
-      <div
-        ref={chartCardRef}
-        className="flex-1 min-h-[220px]"
-        style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}
-      >
-        <div className="flex items-center justify-between p-2 border-b" style={{ borderColor: colors.cardBorder }}>
-          <span className="text-[10px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>LIVE CHART</span>
-          <div className="flex gap-1">
-            {TF_OPTIONS.map((o) => (
-              <button key={o.value} onClick={() => onTfChange(o.value)}
-                className="px-1.5 py-0.5 rounded text-[8px] cursor-pointer border-none"
-                style={{ fontFamily: "var(--font-mono)", background: tfMinutes === o.value ? "rgba(90,138,242,0.25)" : "transparent", color: tfMinutes === o.value ? colors.blue : colors.dim }}>
-                {o.label}
-              </button>
-            ))}
-            <button
-              onClick={toggleExpand}
-              className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none"
-              style={{ fontFamily: "var(--font-mono)", background: "rgba(90,138,242,0.12)", color: colors.text }}
-            >
-              {expanded ? "Collapse" : "Expand"}
-            </button>
-          </div>
-        </div>
-        <div className="px-2 py-1 border-b" style={{ borderColor: colors.cardBorder }}>
-          <div className="flex items-center gap-1.5 mb-1">
-            {addingIndicator ? (
-              <select
-                autoFocus
-                value=""
-                onChange={(e) => {
-                  if (e.target.value) addIndicator(e.target.value);
-                }}
-                onBlur={() => setAddingIndicator(false)}
-                className="rounded px-1.5 py-0.5 text-[9px]"
-                style={inputStyle}
-              >
-                <option value="">Select overlay…</option>
-                {OVERLAY_INDICATORS.map((def) => (
-                  <option key={def.id} value={def.id}>
-                    {def.label}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <button
-                onClick={() => setAddingIndicator(true)}
-                className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none text-white"
-                style={{ background: "#353849", fontFamily: "var(--font-mono)" }}
-              >
-                + Add Overlay
-              </button>
-            )}
-            {indicators.length === 0 && (
-              <span className="text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
-                No overlays selected
-              </span>
-            )}
-          </div>
-          {indicators.map((ai) => {
-            const def = getIndicatorDef(ai.registryId);
-            if (!def) return null;
-            const isEditing = editingId === ai.instanceId;
-            const paramStr =
-              def.params.length > 0
-                ? ` (${def.params.map((p) => `${p.label}:${ai.params[p.name]}`).join(", ")})`
-                : "";
-            return (
-              <div key={ai.instanceId} className="mb-1">
-                <div className="flex items-center gap-1.5 text-[8px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-                  <span className="inline-block w-2 h-2 rounded-full" style={{ background: ai.color }} />
-                  <span className="flex-1 truncate" style={{ color: colors.text }}>
-                    {def.label}
-                    {paramStr}
-                  </span>
-                  {def.params.length > 0 && (
-                    <button
-                      onClick={() => setEditingId(isEditing ? null : ai.instanceId)}
-                      className="cursor-pointer border-none bg-transparent text-[8px]"
-                      style={{ color: isEditing ? colors.cyan : colors.dim }}
-                      title="Edit parameters"
-                    >
-                      ⚙
-                    </button>
-                  )}
-                  <button
-                    onClick={() => removeIndicator(ai.instanceId)}
-                    className="cursor-pointer border-none bg-transparent text-[10px]"
-                    style={{ color: colors.red }}
-                    title="Remove indicator"
-                  >
-                    ×
-                  </button>
-                </div>
-                {isEditing && (
-                  <div className="ml-3 mt-0.5 flex flex-wrap gap-1.5">
-                    {def.params.map((p) => (
-                      <label key={p.name} className="flex items-center gap-1 text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
-                        <span>{p.label}</span>
-                        <input
-                          key={`${ai.instanceId}-${p.name}-${ai.params[p.name]}`}
-                          type="number"
-                          defaultValue={ai.params[p.name]}
-                          min={p.min}
-                          max={p.max}
-                          step={p.step ?? 1}
-                          onBlur={(e) => updateParam(ai.instanceId, p.name, Number(e.target.value))}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                          }}
-                          className="w-14 rounded px-1 py-0.5 text-[8px]"
-                          style={inputStyle}
-                        />
-                      </label>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-        <div className="p-2" style={{ height: "calc(100% - 100px)" }}>
-          <OHLCVChart
-            data={sessionBars}
-            overlays={overlaySeries}
-            height={expanded ? 520 : 180}
-            timeframeMinutes={tfMinutes}
-          />
-        </div>
-      </div>
-      <div className="flex-1 min-h-[160px]" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}>
-        <div className="text-[10px] p-2 border-b" style={{ borderColor: colors.cardBorder, color: colors.muted, fontFamily: "var(--font-mono)" }}>
-          EQUITY CURVE ({activeAccountId})
-        </div>
-        <div className="p-2 h-[calc(100%-30px)]">
-           <EquityCurveChart equity={equityValues} height={120} />
-        </div>
-      </div>
-    </div>
-  );
-}
+const LIVE_BAR_REFRESH_MS = 15_000;
 
 function OpenPositionsTable({ positions }: { positions: { symbol: string; side: string; quantity: number; avg_entry_price: number; current_price: number; unrealized_pnl: number; strategy?: string }[] }) {
   return (
@@ -663,6 +421,11 @@ function WarRoomTab() {
   const [data, setData] = useState<WarRoomData | null>(null);
   const [deployHistory, setDeployHistory] = useState<DeployLogEntry[]>([]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [availableStrategies, setAvailableStrategies] = useState<StrategyInfo[]>([]);
+  const [newBindingSlug, setNewBindingSlug] = useState("");
+  const [newBindingSymbol, setNewBindingSymbol] = useState("TX");
+  const [bindingSaving, setBindingSaving] = useState(false);
+  const [bindingError, setBindingError] = useState("");
   const activeAccountId = useTradingStore((s) => s.activeAccountId);
   const setActiveAccountId = useTradingStore((s) => s.setActiveAccountId);
   const storeAllSessions = useTradingStore(useShallow((s) => s.warRoomData?.all_sessions)) as any[] | null;
@@ -683,31 +446,124 @@ function WarRoomTab() {
     prevSessionsRef.current = filtered;
     return filtered;
   }, [activeAccountId, storeAllSessions]);
-  const marketBars = useMarketDataStore((s) => s.bars);
-  const setBars = useMarketDataStore((s) => s.setBars);
-  const setTfMinutes = useMarketDataStore((s) => s.setQuery);
-  const storeTf = useMarketDataStore((s) => s.tfMinutes);
-  const [tfMinutes, setTf] = useState(storeTf || 60);
-  const loadBars = (tf: number) => {
+  const accountBindings = useMemo(() => {
+    const seen = new Set<string>();
+    const bindings: { slug: string; symbol: string }[] = [];
+    for (const s of sessions) {
+      const key = `${s.strategy_slug}::${s.symbol}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      bindings.push({ slug: s.strategy_slug, symbol: s.symbol });
+    }
+    return bindings;
+  }, [sessions]);
+  // Isolated market data store for War Room (doesn't conflict with Data Hub)
+  const warRoomStoreRef = useRef<MarketDataStore>(null!);
+  if (!warRoomStoreRef.current) warRoomStoreRef.current = createMarketDataStore();
+  const warRoomStore = warRoomStoreRef.current;
+  const marketBars = useStore(warRoomStore, (s) => s.bars);
+  const lastLiveTick = useStore(warRoomStore, (s) => s.lastLiveTick);
+  const setBars = useStore(warRoomStore, (s) => s.setBars);
+  const [tfMinutes, setTf] = useState(60);
+  const [crawling, setCrawling] = useState(false);
+  const crawlPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Wire live feed ticks to isolated store
+  const processTickStable = useCallback(
+    (tick: { price: number; volume: number; timestamp: string }) => {
+      warRoomStore.getState().processLiveTick(tick);
+    },
+    [warRoomStore],
+  );
+  useLiveFeed(processTickStable);
+
+  const loadBars = useCallback((tf: number, afterCrawl = false) => {
     const today = new Date().toISOString().slice(0, 10);
-    const lookback = tf >= 1440 ? 180 : tf >= 60 ? 14 : 3;
+    const lookback = tf >= 1440 ? 365 : tf >= 60 ? 60 : 14;
     const start = new Date(Date.now() - lookback * 86400000).toISOString().slice(0, 10);
     fetchOHLCV("TX", start, today, tf).then((r) => {
       setBars(r.bars);
+      if (afterCrawl || r.bars.length === 0) return;
+      const lastTs = r.bars[r.bars.length - 1].timestamp;
+      const lastDate = new Date(lastTs.includes("T") ? lastTs : lastTs.replace(" ", "T") + "+08:00");
+      const taipeiNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Taipei" }));
+      const ageMs = taipeiNow.getTime() - lastDate.getTime();
+      const staleThresholdMs = tf >= 1440 ? 3 * 86_400_000 : 86_400_000;
+      if (ageMs > staleThresholdMs) {
+        const crawlStart = new Date(lastDate.getTime() + 86_400_000).toISOString().slice(0, 10);
+        setCrawling(true);
+        startCrawl("TX", crawlStart, today).then(() => {
+          crawlPollRef.current = setInterval(() => {
+            fetchCrawlStatus().then((st) => {
+              if (!st.running) {
+                if (crawlPollRef.current) clearInterval(crawlPollRef.current);
+                crawlPollRef.current = null;
+                setCrawling(false);
+                loadBars(tf, true);
+              }
+            }).catch(() => {});
+          }, 2000);
+        }).catch(() => setCrawling(false));
+      }
     }).catch(() => {});
-  };
+  }, [setBars]);
+  useEffect(() => { return () => { if (crawlPollRef.current) clearInterval(crawlPollRef.current); }; }, []);
   const handleTfChange = (tf: number) => {
     setTf(tf);
-    setTfMinutes({ tfMinutes: tf });
+    warRoomStore.getState().setQuery({ tfMinutes: tf });
     loadBars(tf);
   };
+  useEffect(() => {
+    fetchStrategies().then(setAvailableStrategies).catch(() => {});
+  }, []);
+  useEffect(() => {
+    setBindingError("");
+    setNewBindingSlug("");
+    setNewBindingSymbol("TX");
+  }, [activeAccountId]);
   useEffect(() => { loadBars(tfMinutes); }, []);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!crawling) loadBars(tfMinutes, true);
+    }, LIVE_BAR_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [crawling, loadBars, tfMinutes]);
   const poll = () => {
     fetchWarRoomTyped().then((res) => {
       setData(res);
       useTradingStore.getState().setWarRoomData(res as unknown as Record<string, unknown>);
     }).catch(() => {});
     fetchDeployHistory().then(setDeployHistory).catch(() => {});
+  };
+  const handleAddBinding = async () => {
+    if (!activeAccountId || !newBindingSlug) return;
+    if (accountBindings.some((b) => b.slug === newBindingSlug && b.symbol === newBindingSymbol)) return;
+    setBindingSaving(true);
+    setBindingError("");
+    try {
+      await updateAccountStrategies(activeAccountId, [
+        ...accountBindings,
+        { slug: newBindingSlug, symbol: newBindingSymbol },
+      ]);
+      setNewBindingSlug("");
+      poll();
+    } catch (e) {
+      setBindingError(e instanceof Error ? e.message : "Failed to update strategies");
+    }
+    setBindingSaving(false);
+  };
+  const handleRemoveBinding = async (slug: string, symbol: string) => {
+    if (!activeAccountId) return;
+    const nextBindings = accountBindings.filter((b) => !(b.slug === slug && b.symbol === symbol));
+    setBindingSaving(true);
+    setBindingError("");
+    try {
+      await updateAccountStrategies(activeAccountId, nextBindings);
+      poll();
+    } catch (e) {
+      setBindingError(e instanceof Error ? e.message : "Failed to update strategies");
+    }
+    setBindingSaving(false);
   };
   useEffect(() => {
     poll();
@@ -727,7 +583,6 @@ function WarRoomTab() {
   const totalMarginAvail = Object.values(accounts).reduce((sum, a) => sum + (a.margin_available ?? 0), 0);
   const marginRatio = (totalMarginUsed + totalMarginAvail) > 0 ? totalMarginUsed / (totalMarginUsed + totalMarginAvail) : 0;
   const riskGuards: RiskGuard[] = activeAccountData ? [
-    { label: "Max Daily Loss", current: Math.abs(activeAccountData.realized_pnl_today ?? 0), limit: 500_000 },
     { label: "Margin Utilization", current: activeAccountData.margin_used ?? 0, limit: (activeAccountData.margin_used ?? 0) + (activeAccountData.margin_available ?? 0), unit: "" },
   ] : [];
 
@@ -756,9 +611,16 @@ function WarRoomTab() {
                 <span className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
                   {info.display_name || id} {isSelected && <span style={{color: colors.green, marginLeft: 4}}>◉ SELECTED</span>}
                 </span>
-                <span className="text-[7px] font-semibold px-1.5 py-0.5 rounded text-white" style={{ background: info.connected ? colors.green : "#6B4040", letterSpacing: "0.5px" }}>
-                  {info.connected ? "LIVE" : "DISCONNECTED"}
-                </span>
+                <div className="flex gap-1">
+                  {info.sandbox_mode && (
+                    <span className="text-[7px] font-semibold px-1.5 py-0.5 rounded text-white" style={{ background: colors.orange, letterSpacing: "0.5px" }}>
+                      PAPER
+                    </span>
+                  )}
+                  <span className="text-[7px] font-semibold px-1.5 py-0.5 rounded text-white" style={{ background: info.connected ? colors.green : "#6B4040", letterSpacing: "0.5px" }}>
+                    {info.connected ? "LIVE" : "DISCONNECTED"}
+                  </span>
+                </div>
               </div>
               <div className="text-[22px] font-bold mb-0.5" style={{ fontFamily: "var(--font-mono)", color: info.connected ? colors.green : colors.dim }}>
                 {info.connected ? `$${info.equity.toLocaleString()}` : "—"}
@@ -787,34 +649,122 @@ function WarRoomTab() {
       
       {activeAccountId && activeAccountData && (
         <>
-          <SectionLabel>COMMAND CENTER: {activeAccountData.display_name || activeAccountId} (Showing {sessions.length} Configured Strategies)</SectionLabel>
-          {/* Row 1: Live Chart + Strategy Cards */}
-          <div className="flex flex-col lg:flex-row gap-4 mb-4">
-            <div className="flex-1">
-               <CommandChartPane
-                  key={activeAccountId}
-                  activeAccountId={activeAccountId}
-                  equityCurve={activeAccountData?.equity_curve ?? []}
-                  bars={marketBars}
-                  tfMinutes={tfMinutes}
-                  onTfChange={handleTfChange}
-                />
+          <SectionLabel>COMMAND CENTER: {activeAccountData.display_name || activeAccountId} (Showing {accountBindings.length} Configured Strategies)</SectionLabel>
+          <div className="mb-3 rounded-[5px]" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
+            <div className="text-[10px] p-2 border-b" style={{ borderColor: colors.cardBorder, color: colors.muted, fontFamily: "var(--font-mono)" }}>
+              STRATEGY BINDINGS
             </div>
-            <div className="flex-1 flex flex-col gap-2">
-              <div className="text-[10px] font-semibold tracking-wider mb-1" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>STRATEGY CARDS</div>
-              {sessions.length === 0 ? (
-                <div className="text-[10px] py-3" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
-                  No strategies configured for this account. Open the account settings to add strategies.
+            <div className="p-2">
+              {bindingError && (
+                <div className="text-[9px] mb-2" style={{ color: colors.red, fontFamily: "var(--font-mono)" }}>
+                  {bindingError}
+                </div>
+              )}
+              {accountBindings.length === 0 ? (
+                <div className="text-[9px] mb-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+                  No strategy bindings yet.
                 </div>
               ) : (
-                <div className="grid gap-2 grid-cols-1">
-                  {sessions.map((s) => (
-                    <DeployTile key={s.session_id} session={s} onAction={poll} />
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {accountBindings.map((binding) => (
+                    <div
+                      key={`${binding.slug}:${binding.symbol}`}
+                      className="flex items-center gap-1 px-1.5 py-0.5 rounded"
+                      style={{ background: colors.sidebar, border: `1px solid ${colors.cardBorder}` }}
+                    >
+                      <span className="text-[9px]" style={{ color: colors.text, fontFamily: "var(--font-mono)" }}>
+                        {binding.slug.split("/").pop()} · {binding.symbol}
+                      </span>
+                      <button
+                        onClick={() => handleRemoveBinding(binding.slug, binding.symbol)}
+                        disabled={bindingSaving}
+                        className="cursor-pointer border-none bg-transparent text-[10px]"
+                        style={{ color: colors.red }}
+                        title="Remove binding"
+                      >
+                        ×
+                      </button>
+                    </div>
                   ))}
                 </div>
               )}
+              <div className="flex flex-wrap gap-1.5">
+                <select
+                  value={newBindingSlug}
+                  onChange={(e) => setNewBindingSlug(e.target.value)}
+                  disabled={bindingSaving}
+                  className="rounded px-1.5 py-1 text-[9px] min-w-[190px]"
+                  style={inputStyle}
+                >
+                  <option value="">Select strategy...</option>
+                  {availableStrategies.map((s) => (
+                    <option key={s.slug} value={s.slug}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={newBindingSymbol}
+                  onChange={(e) => setNewBindingSymbol(e.target.value)}
+                  disabled={bindingSaving}
+                  className="rounded px-1.5 py-1 text-[9px]"
+                  style={inputStyle}
+                >
+                  {TAIFEX_SYMBOLS.map((s) => (
+                    <option key={s.value} value={s.value}>
+                      {s.value}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={handleAddBinding}
+                  disabled={bindingSaving || !newBindingSlug}
+                  className="px-2 py-1 rounded text-[9px] cursor-pointer border-none text-white"
+                  style={{ background: bindingSaving || !newBindingSlug ? colors.dim : "#2A6A4A", fontFamily: "var(--font-mono)" }}
+                >
+                  {bindingSaving ? "Saving..." : "Add Binding"}
+                </button>
+              </div>
             </div>
           </div>
+          {crawling && (
+            <div className="text-[10px] px-3 py-1.5 mb-2 rounded" style={{ background: colors.cardBorder, color: colors.orange, fontFamily: "var(--font-mono)" }}>
+              ⟳ Syncing market data — fetching latest bars from exchange…
+            </div>
+          )}
+          <div className="mb-4 flex flex-col gap-2">
+            <ChartStack
+              key={activeAccountId}
+              bars={marketBars}
+              activeIndicators={[]}
+              timeframeMinutes={tfMinutes}
+              showVolume={true}
+              liveTick={lastLiveTick}
+              onTimeframeChange={handleTfChange}
+              timeframeOptions={TF_OPTIONS}
+              expandable={true}
+              showOverlayControls={true}
+              headerLabel="LIVE CHART"
+            />
+            <div style={{ background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 }}>
+              <div className="text-[10px] p-2 border-b" style={{ borderColor: colors.cardBorder, color: colors.muted, fontFamily: "var(--font-mono)" }}>
+                EQUITY CURVE ({activeAccountId})
+              </div>
+              <div className="p-2">
+                <EquityCurveChart equity={(activeAccountData?.equity_curve ?? []).map((p) => p.equity)} height={120} />
+              </div>
+            </div>
+          </div>
+          {sessions.length > 0 && (
+            <div className="mb-4">
+              <div className="text-[10px] font-semibold tracking-wider mb-1" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>STRATEGY CARDS</div>
+              <div className="grid gap-2 grid-cols-1 lg:grid-cols-2 xl:grid-cols-3">
+                {sessions.map((s) => (
+                  <DeployTile key={s.session_id} session={s} onAction={poll} />
+                ))}
+              </div>
+            </div>
+          )}
           {/* Row 2: Open Positions + Recent Trades */}
           <div className="flex flex-col lg:flex-row gap-4 mb-4">
             <div className="flex-1">

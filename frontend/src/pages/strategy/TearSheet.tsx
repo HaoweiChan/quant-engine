@@ -19,6 +19,17 @@ import "prismjs/components/prism-python";
 type SortKey = "run_at" | "sharpe" | "sortino" | "alpha" | "total_pnl" | "win_rate" | "max_drawdown_pct" | "profit_factor" | "n_trials" | "search_type" | "symbol";
 type SortDir = "asc" | "desc";
 
+const STANDARD_TFS = [1, 3, 5, 15, 30, 60];
+const MAX_OHLC_DISPLAY = 4000;
+
+function pickChartTf(barsCount: number, baseTf: number): number {
+  for (const tf of STANDARD_TFS) {
+    if (tf < baseTf) continue;
+    if (Math.floor(barsCount * baseTf / tf) <= MAX_OHLC_DISPLAY) return tf;
+  }
+  return Math.max(baseTf, 60);
+}
+
 function getMetric(run: ParamRun, key: string): number | null {
   return run.best_metrics?.[key] ?? null;
 }
@@ -54,6 +65,7 @@ export function TearSheet() {
   const result = useBacktestStore((s) => s.result);
   const loading = useBacktestStore((s) => s.loading);
   const error = useBacktestStore((s) => s.error);
+  const startRun = useBacktestStore((s) => s.startRun);
   const setResult = useBacktestStore((s) => s.setResult);
   const setLoading = useBacktestStore((s) => s.setLoading);
   const setError = useBacktestStore((s) => s.setError);
@@ -64,6 +76,7 @@ export function TearSheet() {
   const [sortKey, setSortKey] = useState<SortKey>("run_at");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [ohlcvBars, setOhlcvBars] = useState<OHLCVBar[]>([]);
+  const [chartTfMin, setChartTfMin] = useState(1);
   const [codeModal, setCodeModal] = useState<{ hash: string; code: string; strategy: string } | null>(null);
   const [codeLoading, setCodeLoading] = useState(false);
 
@@ -140,7 +153,7 @@ export function TearSheet() {
 
   const sortedRuns = useMemo(() => {
     const runs = [...paramRuns];
-    const dir = sortDir === "desc" ? -1 : 1;
+    const dir = sortDir === "desc" ? 1 : -1;
     runs.sort((a, b) => {
       let va: number | string | null;
       let vb: number | string | null;
@@ -167,8 +180,7 @@ export function TearSheet() {
   const activeRunId = paramSource?.run_id ?? null;
 
   const handleRun = async () => {
-    setLoading(true);
-    setError(null);
+    startRun();
     setOhlcvBars([]);
     try {
       const [paramHash, metaInfo] = await Promise.all([
@@ -189,7 +201,9 @@ export function TearSheet() {
       setResult(r);
       refreshAll();
       const tfMin = r.timeframe_minutes ?? params.bar_agg ?? 1;
-      fetchOHLCV(symbol, startDate, endDate, tfMin)
+      const chartTf = pickChartTf(r.bars_count ?? 0, tfMin);
+      setChartTfMin(chartTf);
+      fetchOHLCV(symbol, startDate, endDate, chartTf)
         .then((d) => setOhlcvBars(d.bars))
         .catch(() => setOhlcvBars([]));
     } catch (e) {
@@ -272,12 +286,12 @@ export function TearSheet() {
           </StatRow>
           <ChartErrorBoundary fallbackLabel="Equity Curve">
             <ChartCard title="EQUITY CURVE vs BUY & HOLD">
-              <EquityCurveChart equity={equity} bnhEquity={result.bnh_equity} startDate={startDate} timeframeMinutes={result.timeframe_minutes ?? (params.bar_agg ?? 1)} />
+              <EquityCurveChart equity={equity} bnhEquity={result.bnh_equity} startDate={startDate} timeframeMinutes={result.timeframe_minutes ?? (params.bar_agg ?? 1)} timestamps={result.equity_timestamps} />
             </ChartCard>
           </ChartErrorBoundary>
           {ohlcvBars.length > 0 && (
             <ChartErrorBoundary fallbackLabel="Price Chart">
-              <ChartCard title={`${symbol} OHLC — ${result.timeframe_minutes ?? params.bar_agg ?? 1}min · TRADE SIGNALS`}>
+              <ChartCard title={`${symbol} OHLC — ${chartTfMin >= 60 ? `${chartTfMin / 60}h` : `${chartTfMin}min`} · TRADE SIGNALS`}>
                 <OHLCVChart data={ohlcvBars} signals={result.trade_signals ?? []} height={320} />
               </ChartCard>
             </ChartErrorBoundary>
@@ -286,7 +300,7 @@ export function TearSheet() {
             <div className="flex-1">
               <ChartErrorBoundary fallbackLabel="Drawdown">
                 <ChartCard title="DRAWDOWN">
-                  <DrawdownChart equity={equity} bnhEquity={result.bnh_equity} startDate={startDate} timeframeMinutes={result.timeframe_minutes ?? (params.bar_agg ?? 1)} />
+                  <DrawdownChart equity={equity} bnhEquity={result.bnh_equity} startDate={startDate} timeframeMinutes={result.timeframe_minutes ?? (params.bar_agg ?? 1)} timestamps={result.equity_timestamps} />
                 </ChartCard>
               </ChartErrorBoundary>
             </div>
