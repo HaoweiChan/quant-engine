@@ -8,31 +8,38 @@ interface EquityCurveChartProps {
   height?: number;
   startDate?: string;
   timeframeMinutes?: number;
+  timestamps?: number[];
 }
 
 const MAX_CHART_POINTS = 2000;
 
-function downsample(data: number[], maxPoints: number): number[] {
-  if (data.length <= maxPoints) return data;
-  const step = data.length / maxPoints;
-  const result: number[] = [];
-  for (let i = 0; i < maxPoints; i++) {
-    result.push(data[Math.round(i * step)]);
+interface Sample { value: number; idx: number }
+
+function downsample(data: number[], maxPoints: number): Sample[] {
+  if (data.length <= maxPoints) {
+    return data.map((v, i) => ({ value: v, idx: i }));
   }
-  if (result[result.length - 1] !== data[data.length - 1]) {
-    result.push(data[data.length - 1]);
+  const step = data.length / maxPoints;
+  const result: Sample[] = [];
+  for (let i = 0; i < maxPoints; i++) {
+    const origIdx = Math.round(i * step);
+    result.push({ value: data[origIdx], idx: origIdx });
+  }
+  const lastIdx = data.length - 1;
+  if (result[result.length - 1].idx !== lastIdx) {
+    result.push({ value: data[lastIdx], idx: lastIdx });
   }
   return result;
 }
 
-function toChartData(values: number[], baseDate: Date, tfMinutes: number) {
-  return values.map((v, i) => {
-    const d = new Date(baseDate.getTime() + i * tfMinutes * 60_000);
-    return { time: (d.getTime() / 1000) as unknown as string, value: v };
+function toChartData(samples: Sample[], timestamps: number[] | undefined, baseDate: Date, tfMinutes: number) {
+  return samples.map(({ value, idx }) => {
+    const epochSec = timestamps ? timestamps[idx] : baseDate.getTime() / 1000 + idx * tfMinutes * 60;
+    return { time: epochSec as unknown as string, value };
   });
 }
 
-export const EquityCurveChart = React.memo(function EquityCurveChart({ equity, bnhEquity, height = 260, startDate, timeframeMinutes }: EquityCurveChartProps) {
+export const EquityCurveChart = React.memo(function EquityCurveChart({ equity, bnhEquity, height = 260, startDate, timeframeMinutes, timestamps }: EquityCurveChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -77,7 +84,7 @@ export const EquityCurveChart = React.memo(function EquityCurveChart({ equity, b
     const baseDate = startDate ? new Date(startDate) : new Date("2025-01-01");
     const ds = downsample(equity, MAX_CHART_POINTS);
     const stratSeries = chart.addSeries(LineSeries, { color: colors.green, lineWidth: 2, title: "Strategy" });
-    stratSeries.setData(toChartData(ds, baseDate, tfMin));
+    stratSeries.setData(toChartData(ds, timestamps, baseDate, tfMin));
 
     if (bnhEquity && bnhEquity.length > 0) {
       const bnh = downsample(bnhEquity, MAX_CHART_POINTS);
@@ -88,7 +95,7 @@ export const EquityCurveChart = React.memo(function EquityCurveChart({ equity, b
         title: "Buy & Hold",
         crosshairMarkerVisible: true,
       });
-      bnhSeries.setData(toChartData(bnh, baseDate, tfMin));
+      bnhSeries.setData(toChartData(bnh, timestamps, baseDate, tfMin));
     }
 
     chart.timeScale().fitContent();
@@ -104,7 +111,7 @@ export const EquityCurveChart = React.memo(function EquityCurveChart({ equity, b
       window.removeEventListener("resize", handleResize);
       chart.remove();
     };
-  }, [equity, bnhEquity, height, startDate, timeframeMinutes]);
+  }, [equity, bnhEquity, height, startDate, timeframeMinutes, timestamps]);
 
   return <div ref={containerRef} />;
 });

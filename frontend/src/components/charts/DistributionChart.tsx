@@ -53,12 +53,13 @@ export const DistributionChart = React.memo(function DistributionChart({ values,
             color: colors.text,
           }}
           itemStyle={{ color: "#e2e8f0" }}
-          formatter={(_value: number, _name: string, props: { payload?: { mid: number; count: number } }) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          formatter={((_value: any, _name: any, props: any) => {
             const p = props.payload;
             if (!p) return [_value, _name];
             const amt = p.mid >= 0 ? `+$${p.mid.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : `-$${Math.abs(p.mid).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
             return [`${p.count} trades @ ${amt}`, "PnL"];
-          }}
+          }) as any}
           labelFormatter={() => ""}
         />
         <Bar dataKey="count" radius={[1, 1, 0, 0]}>

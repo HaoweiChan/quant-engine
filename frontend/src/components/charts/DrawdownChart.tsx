@@ -8,6 +8,7 @@ interface DrawdownChartProps {
   height?: number;
   startDate?: string;
   timeframeMinutes?: number;
+  timestamps?: number[];
 }
 
 const MAX_POINTS = 800;
@@ -33,7 +34,7 @@ function computeDrawdown(eq: number[]): number[] {
   });
 }
 
-export const DrawdownChart = React.memo(function DrawdownChart({ equity, bnhEquity, height = 200, startDate, timeframeMinutes }: DrawdownChartProps) {
+export const DrawdownChart = React.memo(function DrawdownChart({ equity, bnhEquity, height = 200, startDate, timeframeMinutes, timestamps }: DrawdownChartProps) {
   const { data, yMin, hasBnH } = useMemo(() => {
     if (equity.length === 0) return { data: [], yMin: -2, hasBnH: false };
     const baseDate = startDate ? new Date(startDate + "T09:00:00") : new Date();
@@ -41,7 +42,8 @@ export const DrawdownChart = React.memo(function DrawdownChart({ equity, bnhEqui
     const stratDD = computeDrawdown(equity);
     const bnhDD = bnhEquity && bnhEquity.length > 0 ? computeDrawdown(bnhEquity) : null;
     const raw = stratDD.map((dd, i) => {
-      const d = new Date(baseDate.getTime() + i * tfMin * 60_000);
+      const epochMs = timestamps ? timestamps[i] * 1000 : baseDate.getTime() + i * tfMin * 60_000;
+      const d = new Date(epochMs);
       const label = d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
       return { idx: i, dd, bnhDd: bnhDD ? (bnhDD[i] ?? 0) : undefined, label };
     });
@@ -49,7 +51,7 @@ export const DrawdownChart = React.memo(function DrawdownChart({ equity, bnhEqui
     const allDDs = sampled.flatMap((d) => [d.dd, d.bnhDd ?? 0]);
     const minDD = Math.min(...allDDs);
     return { data: sampled, yMin: Math.floor(minDD / 2) * 2 - 2, hasBnH: bnhDD !== null };
-  }, [equity, bnhEquity, startDate, timeframeMinutes]);
+  }, [equity, bnhEquity, startDate, timeframeMinutes, timestamps]);
 
   if (data.length === 0) return null;
 
@@ -80,11 +82,13 @@ export const DrawdownChart = React.memo(function DrawdownChart({ equity, bnhEqui
             color: colors.text,
           }}
           itemStyle={{ color: "#e2e8f0" }}
-          formatter={(value: number, name: string) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          formatter={(value: any, name: any) => {
             const label = name === "bnhDd" ? "Buy & Hold" : "Strategy";
-            return [`${value.toFixed(2)}%`, label];
+            return [`${Number(value).toFixed(2)}%`, label];
           }}
-          labelFormatter={(_label: string, payload: { payload?: { label?: string } }[]) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          labelFormatter={(_label: any, payload: any) => {
             const p = payload?.[0]?.payload;
             return p?.label ?? "";
           }}

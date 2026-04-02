@@ -1,9 +1,8 @@
-import React, { useEffect, useRef } from "react";
-import { createChart, createSeriesMarkers, type IChartApi, type ISeriesApi, type ISeriesMarkersPluginApi, type LineWidth, CandlestickSeries, HistogramSeries, LineSeries } from "lightweight-charts";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createChart, createSeriesMarkers, type IChartApi, type ISeriesApi, type ISeriesMarkersPluginApi, type LineWidth, CandlestickSeries, HistogramSeries, LineSeries, type Time } from "lightweight-charts";
 import type { OHLCVBar, TradeSignal } from "@/lib/api";
-import { toProfessionalSessionBars } from "@/lib/sessionChart";
+import { aggregateBars, buildSequentialTimes, toProfessionalSessionBars, SEQ_BASE_EPOCH } from "@/lib/sessionChart";
 import { colors } from "@/lib/theme";
-import { useMarketDataStore } from "@/stores/marketDataStore";
 
 export interface IndicatorOverlay {
   label: string;
@@ -19,44 +18,55 @@ interface OHLCVChartProps {
   overlays?: IndicatorOverlay[];
   signals?: TradeSignal[];
   timeframeMinutes?: number;
-}
-
-function toUnixTime(ts: string): number {
-  const normalized = ts.includes("T") ? ts : ts.replace(" ", "T");
-  const zoned = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`;
-  return Math.floor(new Date(zoned).getTime() / 1000);
+  onRequestOlderData?: () => void;
+  /** Optional live tick bar for real-time chart updates */
+  lastLiveTick?: OHLCVBar | null;
 }
 
 const MAX_CHART_POINTS = 4000;
 
-function downsampleBars(data: OHLCVBar[], max: number): OHLCVBar[] {
-  if (data.length <= max) return data;
-  const step = data.length / max;
-  const result: OHLCVBar[] = [];
-  for (let i = 0; i < max; i++) {
-    result.push(data[Math.round(i * step)]);
+
+function normalizeTickTime(time: unknown): number {
+  if (typeof time === "number") return time;
+  if (typeof time === "string") {
+    const parsed = Number(time);
+    return Number.isFinite(parsed) ? parsed : Number.NaN;
   }
-  if (result[result.length - 1] !== data[data.length - 1]) {
-    result.push(data[data.length - 1]);
+  if (time && typeof time === "object") {
+    const candidate = (time as { timestamp?: unknown; time?: unknown }).timestamp
+      ?? (time as { timestamp?: unknown; time?: unknown }).time;
+    if (typeof candidate === "number") return candidate;
+    if (typeof candidate === "string") {
+      const parsed = Number(candidate);
+      return Number.isFinite(parsed) ? parsed : Number.NaN;
+    }
   }
-  return result;
+  return Number.NaN;
 }
 
-function signalsToMarkers(signals: TradeSignal[], barTimes: number[]) {
-  if (!signals.length || !barTimes.length) return [];
+
+function signalsToMarkers(signals: TradeSignal[], bars: OHLCVBar[], seqTimes: number[]) {
+  if (!signals.length || !bars.length) return [];
+  const barEpochs = bars.map((b) => {
+    const n = b.timestamp.includes("T") ? b.timestamp : b.timestamp.replace(" ", "T");
+    const z = /(?:Z|[+-]\d{2}:\d{2})$/i.test(n) ? n : `${n}Z`;
+    return Math.floor(new Date(z).getTime() / 1000);
+  });
   return signals
     .map((s) => {
-      const sigTime = toUnixTime(s.timestamp);
-      let best = barTimes[0];
-      let bestDiff = Math.abs(sigTime - best);
-      for (const t of barTimes) {
-        const diff = Math.abs(sigTime - t);
-        if (diff < bestDiff) { best = t; bestDiff = diff; }
-        if (diff > bestDiff && t > sigTime) break;
+      const n = s.timestamp.includes("T") ? s.timestamp : s.timestamp.replace(" ", "T");
+      const z = /(?:Z|[+-]\d{2}:\d{2})$/i.test(n) ? n : `${n}Z`;
+      const sigTime = Math.floor(new Date(z).getTime() / 1000);
+      let bestIdx = 0;
+      let bestDiff = Math.abs(sigTime - barEpochs[0]);
+      for (let i = 1; i < barEpochs.length; i++) {
+        const diff = Math.abs(sigTime - barEpochs[i]);
+        if (diff < bestDiff) { bestIdx = i; bestDiff = diff; }
+        if (barEpochs[i] > sigTime && diff > bestDiff) break;
       }
       const isBuy = s.side === "buy";
       return {
-        time: best as any,
+        time: seqTimes[bestIdx] as any,
         position: isBuy ? "belowBar" as const : "aboveBar" as const,
         color: isBuy ? "#26a69a" : "#ef5350",
         shape: isBuy ? "arrowUp" as const : "arrowDown" as const,
@@ -73,6 +83,8 @@ export const OHLCVChart = React.memo(function OHLCVChart({
   overlays = [],
   signals = [],
   timeframeMinutes = 1,
+  onRequestOlderData,
+  lastLiveTick,
 }: OHLCVChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -80,9 +92,28 @@ export const OHLCVChart = React.memo(function OHLCVChart({
   const volSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const overlaySeriesRef = useRef<ISeriesApi<"Line">[]>([]);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<any> | null>(null);
-  const lastRenderedTimeRef = useRef<number | null>(null);
+  const formatTickRef = useRef<(time: number) => string>(() => "");
+  const lastSeqTimeRef = useRef<number | null>(null);
+  const lastRealTsRef = useRef<string | null>(null);
+  const seqStepRef = useRef(60);
+  const prevDataLengthRef = useRef(0);
+  const loadMoreCooldownRef = useRef(false);
+  const onRequestOlderDataRef = useRef(onRequestOlderData);
+  onRequestOlderDataRef.current = onRequestOlderData;
+  const barsRef = useRef<OHLCVBar[]>([]);
+  const stepRef = useRef(60);
+  const [hoverBar, setHoverBar] = useState<{
+    time: string; o: number; h: number; l: number; c: number; v: number;
+  } | null>(null);
 
-  const lastLiveTick = useMarketDataStore((s) => s.lastLiveTick);
+  const handleVisibleRangeChange = useCallback((range: any) => {
+    if (!range || loadMoreCooldownRef.current) return;
+    if (range.from < 10 && onRequestOlderDataRef.current) {
+      loadMoreCooldownRef.current = true;
+      onRequestOlderDataRef.current();
+      setTimeout(() => { loadMoreCooldownRef.current = false; }, 3000);
+    }
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -106,6 +137,16 @@ export const OHLCVChart = React.memo(function OHLCVChart({
         borderColor: colors.cardBorder,
         timeVisible: timeframeMinutes < 1440,
         secondsVisible: false,
+        tickMarkFormatter: (time: any) => {
+          const tickTime = normalizeTickTime(time);
+          return Number.isFinite(tickTime) ? formatTickRef.current(tickTime) : null;
+        },
+      },
+      localization: {
+        timeFormatter: (time: any) => {
+          const tickTime = normalizeTickTime(time);
+          return Number.isFinite(tickTime) ? formatTickRef.current(tickTime) : "";
+        },
       },
     });
     const candleSeries = chart.addSeries(CandlestickSeries, {
@@ -126,6 +167,21 @@ export const OHLCVChart = React.memo(function OHLCVChart({
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volSeriesRef.current = volSeries;
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
+    chart.subscribeCrosshairMove((param) => {
+      if (!param.time) { setHoverBar(null); return; }
+      const t = typeof param.time === "number" ? param.time : Number(param.time);
+      if (!Number.isFinite(t)) { setHoverBar(null); return; }
+      const currentStep = stepRef.current;
+      const idx = Math.round((t - SEQ_BASE_EPOCH) / currentStep);
+      if (idx < 0 || idx >= barsRef.current.length) { setHoverBar(null); return; }
+      const bar = barsRef.current[idx];
+      const displayTime = formatTickRef.current(t);
+      setHoverBar({
+        time: displayTime || bar.timestamp.slice(5, 16).replace("T", " "),
+        o: bar.open, h: bar.high, l: bar.low, c: bar.close, v: bar.volume,
+      });
+    });
     const handleResize = () => {
       if (containerRef.current) {
         chart.applyOptions({ width: containerRef.current.clientWidth });
@@ -135,26 +191,33 @@ export const OHLCVChart = React.memo(function OHLCVChart({
     window.addEventListener("resize", handleResize);
     return () => {
       window.removeEventListener("resize", handleResize);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
       markersPluginRef.current = null;
       chart.remove();
       overlaySeriesRef.current = [];
     };
-  }, [height, timeframeMinutes]);
+  }, [height, timeframeMinutes, handleVisibleRangeChange]);
 
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart || !candleSeriesRef.current || !volSeriesRef.current || data.length === 0) return;
 
-    const ds = downsampleBars(data, MAX_CHART_POINTS);
-    const points = ds
-      .map((bar) => ({ bar, time: toUnixTime(bar.timestamp) }))
-      .filter((p) => Number.isFinite(p.time));
-    if (points.length === 0) return;
-    const times = points.map((p) => p.time);
+    const ds = aggregateBars(data, MAX_CHART_POINTS);
+    if (ds.length === 0) return;
+    const step = Math.max(timeframeMinutes, 1) * 60;
+    const { times, formatTick } = buildSequentialTimes(ds, step);
+
+    const wasPrepended = data.length > prevDataLengthRef.current && prevDataLengthRef.current > 0;
+    const prependedCount = wasPrepended ? data.length - prevDataLengthRef.current : 0;
+    const savedRange = wasPrepended ? chart.timeScale().getVisibleLogicalRange() : null;
+
+    formatTickRef.current = formatTick;
+    barsRef.current = ds;
+    stepRef.current = step;
 
     candleSeriesRef.current.setData(
-      points.map(({ bar, time }) => ({
-        time: time as any,
+      ds.map((bar, i) => ({
+        time: times[i] as any,
         open: bar.open,
         high: bar.high,
         low: bar.low,
@@ -163,20 +226,19 @@ export const OHLCVChart = React.memo(function OHLCVChart({
     );
 
     volSeriesRef.current.setData(
-      points.map(({ bar, time }) => ({
-        time: time as any,
+      ds.map((bar, i) => ({
+        time: times[i] as any,
         value: bar.volume,
         color: bar.close >= bar.open ? "rgba(38,166,154,0.3)" : "rgba(255,82,82,0.3)",
       })),
     );
 
-    // Trade signal markers (v5 API: createSeriesMarkers)
     if (markersPluginRef.current) {
       markersPluginRef.current.setMarkers([]);
       markersPluginRef.current = null;
     }
     if (signals.length > 0) {
-      const markers = signalsToMarkers(signals, times);
+      const markers = signalsToMarkers(signals, ds, times);
       markersPluginRef.current = createSeriesMarkers(candleSeriesRef.current, markers);
     }
 
@@ -195,38 +257,82 @@ export const OHLCVChart = React.memo(function OHLCVChart({
         crosshairMarkerVisible: false,
       });
       const pts = ov.values
-        .map((v, i) => (v !== null && i < times.length ? { time: times[i] as any, value: v } : null))
-        .filter(Boolean) as { time: number; value: number }[];
+        .map((v, i) => (v !== null && i < times.length ? { time: times[i] as Time, value: v } : null))
+        .filter(Boolean) as { time: Time; value: number }[];
       s.setData(pts);
       overlaySeriesRef.current.push(s);
     }
-    lastRenderedTimeRef.current = times[times.length - 1];
-    chart.timeScale().fitContent();
-  }, [data, overlays, signals]);
+    lastSeqTimeRef.current = times[times.length - 1];
+    lastRealTsRef.current = ds[ds.length - 1].timestamp;
+    seqStepRef.current = step;
+    prevDataLengthRef.current = data.length;
+
+    if (savedRange && prependedCount > 0) {
+      chart.timeScale().setVisibleLogicalRange({
+        from: savedRange.from + prependedCount,
+        to: savedRange.to + prependedCount,
+      });
+    } else {
+      chart.timeScale().fitContent();
+    }
+  }, [data, overlays, signals, timeframeMinutes]);
 
   useEffect(() => {
     if (!lastLiveTick || !candleSeriesRef.current || !volSeriesRef.current) return;
     const converted = toProfessionalSessionBars([lastLiveTick], timeframeMinutes);
     if (converted.length === 0) return;
     const live = converted[0];
-    const tickTime = toUnixTime(live.timestamp);
-    if (!Number.isFinite(tickTime)) return;
-    const lastRendered = lastRenderedTimeRef.current;
-    if (lastRendered != null && tickTime < lastRendered) return;
+    const lastSeq = lastSeqTimeRef.current;
+    if (lastSeq == null) return;
+    // Same session bar as last → update in place; new bar → advance by step
+    const seqTime = live.timestamp === lastRealTsRef.current
+      ? lastSeq
+      : lastSeq + seqStepRef.current;
     candleSeriesRef.current.update({
-      time: tickTime as any,
+      time: seqTime as any,
       open: live.open,
       high: live.high,
       low: live.low,
       close: live.close,
     });
     volSeriesRef.current.update({
-      time: tickTime as any,
+      time: seqTime as any,
       value: live.volume,
       color: live.close >= live.open ? "rgba(38,166,154,0.3)" : "rgba(255,82,82,0.3)",
     });
-    lastRenderedTimeRef.current = tickTime;
+    lastSeqTimeRef.current = seqTime;
+    lastRealTsRef.current = live.timestamp;
   }, [lastLiveTick, timeframeMinutes]);
 
-  return <div ref={containerRef} />;
+  return (
+    <div style={{ position: "relative" }}>
+      {hoverBar && (
+        <div
+          style={{
+            position: "absolute",
+            top: 4,
+            left: 4,
+            zIndex: 10,
+            background: "rgba(13, 13, 38, 0.85)",
+            borderRadius: 3,
+            padding: "3px 8px",
+            fontFamily: "var(--font-mono)",
+            fontSize: 9,
+            display: "flex",
+            gap: 8,
+            pointerEvents: "none",
+            color: colors.muted,
+          }}
+        >
+          <span style={{ color: colors.text }}>{hoverBar.time}</span>
+          <span>O <span style={{ color: hoverBar.c >= hoverBar.o ? colors.green : colors.red }}>{hoverBar.o.toLocaleString()}</span></span>
+          <span>H <span style={{ color: colors.green }}>{hoverBar.h.toLocaleString()}</span></span>
+          <span>L <span style={{ color: colors.red }}>{hoverBar.l.toLocaleString()}</span></span>
+          <span>C <span style={{ color: hoverBar.c >= hoverBar.o ? colors.green : colors.red }}>{hoverBar.c.toLocaleString()}</span></span>
+          <span>V <span style={{ color: colors.text }}>{hoverBar.v.toLocaleString()}</span></span>
+        </div>
+      )}
+      <div ref={containerRef} />
+    </div>
+  );
 });

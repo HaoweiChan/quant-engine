@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from "react";
 import {
   createChart,
   type IChartApi,
@@ -38,10 +38,33 @@ interface ChartPaneProps {
   series?: SeriesOutput[];
   showTimeScale?: boolean;
   timeframeMinutes?: number;
+  onRequestOlderData?: () => void;
+  tickMarkFormatter?: (time: number) => string;
+  onCrosshairMove?: (time: number | null) => void;
 }
 
+
+function normalizeTickTime(time: unknown): number {
+  if (typeof time === "number") return time;
+  if (typeof time === "string") {
+    const parsed = Number(time);
+    return Number.isFinite(parsed) ? parsed : Number.NaN;
+  }
+  if (time && typeof time === "object") {
+    const candidate = (time as { timestamp?: unknown; time?: unknown }).timestamp
+      ?? (time as { timestamp?: unknown; time?: unknown }).time;
+    if (typeof candidate === "number") return candidate;
+    if (typeof candidate === "string") {
+      const parsed = Number(candidate);
+      return Number.isFinite(parsed) ? parsed : Number.NaN;
+    }
+  }
+  return Number.NaN;
+}
+
+
 export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function ChartPane(
-  { height, candles, volume, series = [], showTimeScale = true, timeframeMinutes = 1 },
+  { height, candles, volume, series = [], showTimeScale = true, timeframeMinutes = 1, onRequestOlderData, tickMarkFormatter, onCrosshairMove },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -49,11 +72,28 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const extraSeriesRef = useRef<ISeriesApi<any>[]>([]);
+  const tickFormatterRef = useRef<((time: number) => string) | undefined>(tickMarkFormatter);
+  const prevCandleLengthRef = useRef(0);
+  const loadMoreCooldownRef = useRef(false);
+  const onRequestOlderDataRef = useRef(onRequestOlderData);
+  const onCrosshairMoveRef = useRef(onCrosshairMove);
+  onCrosshairMoveRef.current = onCrosshairMove;
+  onRequestOlderDataRef.current = onRequestOlderData;
+  tickFormatterRef.current = tickMarkFormatter;
 
   useImperativeHandle(ref, () => ({
     chart: () => chartRef.current,
     firstSeries: () => candleSeriesRef.current ?? extraSeriesRef.current[0] ?? null,
   }));
+
+  const handleVisibleRangeChange = useCallback((range: any) => {
+    if (!range || loadMoreCooldownRef.current) return;
+    if (range.from < 10 && onRequestOlderDataRef.current) {
+      loadMoreCooldownRef.current = true;
+      onRequestOlderDataRef.current();
+      setTimeout(() => { loadMoreCooldownRef.current = false; }, 3000);
+    }
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -78,6 +118,21 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
         visible: showTimeScale,
         timeVisible: timeframeMinutes < 1440,
         secondsVisible: false,
+        tickMarkFormatter: (time: any) => {
+          const fn = tickFormatterRef.current;
+          if (!fn) return null;
+          const tickTime = normalizeTickTime(time);
+          if (!Number.isFinite(tickTime)) return null;
+          return fn(tickTime);
+        },
+      },
+      localization: {
+        timeFormatter: (time: any) => {
+          const fn = tickFormatterRef.current;
+          if (!fn) return "";
+          const tickTime = normalizeTickTime(time);
+          return Number.isFinite(tickTime) ? fn(tickTime) : "";
+        },
       },
     });
 
@@ -102,6 +157,16 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
     }
 
     chartRef.current = chart;
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
+    chart.subscribeCrosshairMove((param) => {
+      if (!onCrosshairMoveRef.current) return;
+      if (!param.time) {
+        onCrosshairMoveRef.current(null);
+        return;
+      }
+      const t = typeof param.time === "number" ? param.time : Number(param.time);
+      onCrosshairMoveRef.current(Number.isFinite(t) ? t : null);
+    });
     const handleResize = () => {
       if (containerRef.current) {
         chart.applyOptions({ width: containerRef.current.clientWidth });
@@ -111,18 +176,24 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
     window.addEventListener("resize", handleResize);
     return () => {
       window.removeEventListener("resize", handleResize);
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
       volSeriesRef.current = null;
       extraSeriesRef.current = [];
     };
-  }, [height, !!candles, !!volume, showTimeScale, timeframeMinutes]);
+  }, [height, !!candles, !!volume, showTimeScale, timeframeMinutes, handleVisibleRangeChange]);
 
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
     try {
+      const candleLen = candles?.length ?? 0;
+      const wasPrepended = candleLen > prevCandleLengthRef.current && prevCandleLengthRef.current > 0;
+      const prependedCount = wasPrepended ? candleLen - prevCandleLengthRef.current : 0;
+      const savedRange = wasPrepended ? chart.timeScale().getVisibleLogicalRange() : null;
+
       if (candleSeriesRef.current && candles && candles.length > 0) {
         candleSeriesRef.current.setData(candles as any);
       }
@@ -152,11 +223,19 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
           extraSeriesRef.current.push(s);
         }
       }
-      chart.timeScale().fitContent();
+      prevCandleLengthRef.current = candleLen;
+      if (savedRange && prependedCount > 0) {
+        chart.timeScale().setVisibleLogicalRange({
+          from: savedRange.from + prependedCount,
+          to: savedRange.to + prependedCount,
+        });
+      } else {
+        chart.timeScale().fitContent();
+      }
     } catch {
       /* lightweight-charts assertion errors are non-fatal here */
     }
-  }, [candles, volume, series]);
+  }, [candles, volume, series, tickMarkFormatter]);
 
   return <div ref={containerRef} />;
 });
