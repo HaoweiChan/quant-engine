@@ -40,7 +40,9 @@ TOOLS: list[Tool] = [
             "Use this for quick evaluation of a specific parameter combination. "
             "Returns: Sharpe ratio, max drawdown, win rate, total PnL, trade count. "
             "Always run this after modifying any strategy file. "
-            "For comparing two strategies, prefer run_monte_carlo instead (more robust)."
+            "For comparing two strategies, prefer run_monte_carlo instead (more robust). "
+            "Synthetic results are NOT eligible for optimization-loop termination; "
+            "terminate only after real-data validation."
         ),
         inputSchema={
             "type": "object",
@@ -136,6 +138,8 @@ TOOLS: list[Tool] = [
             "PREFER this over run_backtest when comparing two strategies. "
             "ALWAYS run this after writing a strategy file to verify improvement. "
             "Use 200-300 paths for iterative work, 500+ for final validation. "
+            "Synthetic Monte Carlo is exploratory only and cannot satisfy final "
+            "optimization termination criteria. "
             "IMPORTANT: For intraday strategies, set timeframe='intraday' and n_bars>=63000. "
             "Verify trade_count >= 100×N_params (degrees of freedom rule). "
             "Acceptance criteria: P50 PnL>0 across all scenarios, win rate within healthy "
@@ -202,10 +206,14 @@ TOOLS: list[Tool] = [
             "For grid search: provide sweep_params as {param: [val1, val2, ...]}. "
             "For random search: provide sweep_params as {param: [min, max]} and set n_samples. "
             "Returns: ranked list of parameter combinations by the chosen metric. "
-            "Default metric is composite_fitness (= calmar × profit_factor / duration_penalty). "
-            "NEVER optimize for net profit — use composite_fitness or calmar instead. "
+            "Default metric is sortino. "
+            "NEVER optimize for net profit — use sortino, composite_fitness, or calmar instead. "
             "Mode controls governance: production_intent enforces promotion gates "
             "and never auto-activates candidates. "
+            "Real-data guard is fail-closed by default (require_real_data=true), "
+            "so synthetic/research sweeps are blocked unless explicitly opted in. "
+            "Optimization-loop termination is allowed only when mode=production_intent "
+            "with real symbol/start/end data. "
             "Seed Architecture rules: use structural indicators (VWAP/ATR/ADX), "
             "cap lookbacks at 30 bars on 1-min charts, RSI period <= 5 only, "
             "require volume confirmation and time gating for intraday. "
@@ -246,11 +254,11 @@ TOOLS: list[Tool] = [
                 "metric": {
                     "type": "string",
                     "description": (
-                        "Optimization metric: composite_fitness|calmar|sortino|sharpe|"
-                        "win_rate|profit_factor. Prefer composite_fitness for intraday "
-                        "(= calmar*PF/duration_penalty, auto-disqualifies low trade count)."
+                        "Optimization metric: sortino|composite_fitness|calmar|sharpe|"
+                        "win_rate|profit_factor. Prefer sortino for downside-risk-aware "
+                        "selection; composite_fitness remains available for intraday robustness."
                     ),
-                    "default": "composite_fitness",
+                    "default": "sortino",
                 },
                 "mode": {
                     "type": "string",
@@ -315,6 +323,14 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": "Bar timeframe: daily|intraday (1-min bars with TAIFEX timestamps)",
                     "default": "daily",
+                },
+                "require_real_data": {
+                    "type": "boolean",
+                    "description": (
+                        "Fail-closed guard. Default true blocks synthetic/research optimization "
+                        "unless explicitly overridden for exploratory work."
+                    ),
+                    "default": True,
                 },
             },
             "required": ["base_params", "sweep_params"],
@@ -597,8 +613,11 @@ def register_tools(app: Server) -> None:
                     tool="run_backtest",
                     params=arguments.get("strategy_params", {}),
                     metrics=result.get("metrics", {}),
-                    scenario=arguments["scenario"],
+                    scenario=result.get("source_label", arguments["scenario"]),
                     strategy=arguments.get("strategy", "pyramid"),
+                    data_source=result.get("data_source"),
+                    source_label=result.get("source_label"),
+                    termination_eligible=bool(result.get("termination_eligible", False)),
                 )
                 return _json_response(result)
 
@@ -615,8 +634,11 @@ def register_tools(app: Server) -> None:
                         tool="run_backtest_realdata",
                         params=arguments.get("strategy_params", {}),
                         metrics=result.get("metrics", {}),
-                        scenario=f"real:{arguments['symbol']}",
+                        scenario=result.get("source_label", f"real:{arguments['symbol']}"),
                         strategy=arguments.get("strategy", "pyramid"),
+                        data_source=result.get("data_source"),
+                        source_label=result.get("source_label"),
+                        termination_eligible=bool(result.get("termination_eligible", False)),
                     )
                 # Strip large arrays from response to keep it readable
                 for key in ("daily_returns", "equity_curve", "bnh_returns", "bnh_equity"):
@@ -641,8 +663,11 @@ def register_tools(app: Server) -> None:
                         for k, v in result.items()
                         if k not in ("scenario", "strategy", "n_paths", "warning")
                     },
-                    scenario=arguments["scenario"],
+                    scenario=result.get("source_label", arguments["scenario"]),
                     strategy=arguments.get("strategy", "pyramid"),
+                    data_source=result.get("data_source"),
+                    source_label=result.get("source_label"),
+                    termination_eligible=bool(result.get("termination_eligible", False)),
                 )
                 return _json_response(result)
 
@@ -652,7 +677,7 @@ def register_tools(app: Server) -> None:
                     sweep_params=arguments["sweep_params"],
                     strategy=arguments.get("strategy", "pyramid"),
                     n_samples=arguments.get("n_samples"),
-                    metric=arguments.get("metric", "composite_fitness"),
+                    metric=arguments.get("metric", "sortino"),
                     mode=arguments.get("mode", "production_intent"),
                     scenario=arguments.get("scenario", "strong_bull"),
                     symbol=arguments.get("symbol"),
@@ -666,14 +691,18 @@ def register_tools(app: Server) -> None:
                     test_bars=arguments.get("test_bars"),
                     n_bars=arguments.get("n_bars"),
                     timeframe=arguments.get("timeframe", "daily"),
+                    require_real_data=arguments.get("require_real_data", True),
                 )
                 if "best_is_metrics" in result:
                     history.append(
                         tool="run_parameter_sweep",
                         params=result.get("best_params", {}),
                         metrics=result.get("best_is_metrics", {}),
-                        scenario=arguments.get("scenario", "strong_bull"),
+                        scenario=result.get("source_label", arguments.get("scenario", "strong_bull")),
                         strategy=arguments.get("strategy", "pyramid"),
+                        data_source=result.get("data_source"),
+                        source_label=result.get("source_label"),
+                        termination_eligible=bool(result.get("termination_eligible", False)),
                     )
                 return _json_response(result)
 

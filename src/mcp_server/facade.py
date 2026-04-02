@@ -326,6 +326,10 @@ def run_backtest_for_mcp(
         n_bars=len(bars),
         extra={"scenario": scenario, "timeframe": timeframe},
     )
+    out["data_source"] = "synthetic"
+    out["source_label"] = f"synthetic:{scenario}"
+    out["termination_eligible"] = False
+    out["termination_block_reason"] = "synthetic_data"
     out["param_warnings"] = param_warnings
     strategy_hash, strategy_code = _compute_code_hash(resolved_slug)
     if strategy_hash is not None:
@@ -466,6 +470,9 @@ def run_backtest_realdata_for_mcp(
         n_bars=len(bars),
         extra={"symbol": symbol, "start": start, "end": end},
     )
+    base["data_source"] = "real"
+    base["source_label"] = f"real:{symbol}:{start}:{end}"
+    base["termination_eligible"] = True
     strat_total_ret = (eq[-1] - eq[0]) / eq[0] if len(eq) > 1 and eq[0] > 0 else 0.0
     bnh_total_ret = (bnh_eq[-1] - bnh_eq[0]) / bnh_eq[0] if len(bnh_eq) > 1 and bnh_eq[0] > 0 else 0.0
     alpha = float(strat_total_ret - bnh_total_ret)
@@ -478,6 +485,14 @@ def run_backtest_realdata_for_mcp(
     base["trade_pnls"] = _extract_trade_pnls(result.trade_log)
     base["trade_signals"] = _serialize_trade_log(result.trade_log)
     base["timeframe_minutes"] = bar_agg
+    ts_epochs = [
+        int(ts.timestamp()) if hasattr(ts, "timestamp") else int(ts)
+        for ts in timestamps
+    ]
+    # equity_curve has n+1 values (initial + per-bar); prepend a ts 1s before first bar
+    if ts_epochs:
+        ts_epochs = [ts_epochs[0] - 1] + ts_epochs
+    base["equity_timestamps"] = ts_epochs
     base["param_warnings"] = param_warnings
     strategy_hash, strategy_code = _compute_code_hash(resolved_slug)
     if strategy_hash is not None:
@@ -539,6 +554,8 @@ def run_monte_carlo_for_mcp(
         "scenario": scenario,
         "strategy": strategy,
         "n_paths": clamped,
+        "data_source": "synthetic",
+        "source_label": f"synthetic:{scenario}",
         "percentiles": mc_result.percentiles,
         "mean_pnl": (
             sum(mc_result.terminal_pnl_distribution) / len(mc_result.terminal_pnl_distribution)
@@ -558,6 +575,8 @@ def run_monte_carlo_for_mcp(
     }
     if warning:
         result["warning"] = warning
+    result["termination_eligible"] = False
+    result["termination_block_reason"] = "synthetic_data"
     result["param_warnings"] = param_warnings
     return result
 
@@ -651,7 +670,7 @@ def run_sweep_for_mcp(
     sweep_params: dict[str, Any],
     strategy: str = "pyramid",
     n_samples: int | None = None,
-    metric: str = "composite_fitness",
+    metric: str = "sortino",
     mode: str = "production_intent",
     scenario: str = "strong_bull",
     symbol: str | None = None,
@@ -665,10 +684,19 @@ def run_sweep_for_mcp(
     test_bars: int | None = None,
     n_bars: int | None = None,
     timeframe: str = "daily",
+    require_real_data: bool = True,
 ) -> dict[str, Any]:
     """Run parameter sweep (grid or random search)."""
     if mode not in {"research", "production_intent"}:
         return {"error": "mode must be 'research' or 'production_intent'"}
+    if require_real_data and mode != "production_intent":
+        return {
+            "error": (
+                "Real-data guard blocked synthetic optimization. "
+                "Use mode='production_intent' with symbol/start/end, "
+                "or explicitly set require_real_data=false for exploratory research only."
+            )
+        }
     if len(sweep_params) > 3:
         return {
             "error": (
@@ -827,11 +855,18 @@ def run_sweep_for_mcp(
         "strategy": strategy,
         "metric": metric,
         "mode": mode,
+        "data_source": "real" if mode == "production_intent" else "synthetic",
+        "source_label": source_label,
+        "termination_eligible": mode == "production_intent",
+        "real_data_guard": {
+            "require_real_data": require_real_data,
+            "passed": mode == "production_intent",
+        },
         "objective_direction": result.objective_direction,
         "disqualified_trials": result.disqualified_trials,
         "gate_results": result.gate_results,
         "gate_details": result.gate_details,
-        "promotable": result.promotable,
+        "promotable": result.promotable if mode == "production_intent" else False,
         "auto_activation_disabled": True,
         "best_params": result.best_params,
         "best_is_metrics": result.best_is_result.metrics,
@@ -841,6 +876,11 @@ def run_sweep_for_mcp(
         "warnings": result.warnings,
         "param_warnings": param_warnings,
     }
+    if mode != "production_intent":
+        existing_warnings = out.get("warnings") or []
+        out["warnings"] = [*existing_warnings, "Synthetic/research sweep is non-promotable."]
+        out["promotion_blocked_reason"] = "synthetic_data"
+        out["termination_block_reason"] = "synthetic_data"
     if run_id is not None:
         out["run_id"] = run_id
         out["pareto_candidates"] = pareto_candidates

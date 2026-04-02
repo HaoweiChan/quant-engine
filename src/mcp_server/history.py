@@ -18,17 +18,27 @@ class OptimizationHistory:
         metrics: dict[str, Any],
         scenario: str,
         strategy: str = "pyramid",
+        data_source: str | None = None,
+        source_label: str | None = None,
+        termination_eligible: bool | None = None,
     ) -> None:
-        self._runs.append({
+        run: dict[str, Any] = {
             "tool": tool,
             "params": params,
             "metrics": metrics,
             "scenario": scenario,
             "strategy": strategy,
             "timestamp": datetime.now(UTC).isoformat(),
-        })
+        }
+        if data_source is not None:
+            run["data_source"] = data_source
+        if source_label is not None:
+            run["source_label"] = source_label
+        if termination_eligible is not None:
+            run["termination_eligible"] = termination_eligible
+        self._runs.append(run)
 
-    def get_all(self, sort_by: str = "sharpe") -> list[dict[str, Any]]:
+    def get_all(self, sort_by: str = "sortino") -> list[dict[str, Any]]:
         if not self._runs:
             return []
         return sorted(
