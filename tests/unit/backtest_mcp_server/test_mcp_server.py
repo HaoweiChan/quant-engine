@@ -176,6 +176,22 @@ class TestOptimizationHistory:
         h2 = OptimizationHistory()
         assert h2.count == 0
 
+    def test_append_supports_data_provenance(self):
+        h = OptimizationHistory()
+        h.append(
+            "run_parameter_sweep",
+            {"stop_atr_mult": 1.5},
+            {"sharpe": 1.1},
+            "real:TX:2025-01-01:2025-06-30",
+            data_source="real",
+            source_label="real:TX:2025-01-01:2025-06-30",
+            termination_eligible=True,
+        )
+        run = h.get_all()[0]
+        assert run["data_source"] == "real"
+        assert run["source_label"].startswith("real:TX:")
+        assert run["termination_eligible"] is True
+
 
 # ---------------------------------------------------------------------------
 # 7.5 — Facade functions
@@ -190,6 +206,9 @@ class TestFacade:
         assert "trade_count" in result
         assert "total_pnl" in result
         assert result["scenario"] == "strong_bull"
+        assert result["data_source"] == "synthetic"
+        assert result["termination_eligible"] is False
+        assert result["termination_block_reason"] == "synthetic_data"
 
     def test_run_backtest_invalid_scenario(self):
         from src.mcp_server.facade import run_backtest_for_mcp
@@ -209,6 +228,9 @@ class TestFacade:
         assert "win_rate" in result
         assert "ruin_probability" in result
         assert result["n_paths"] == 10
+        assert result["data_source"] == "synthetic"
+        assert result["termination_eligible"] is False
+        assert result["termination_block_reason"] == "synthetic_data"
 
     def test_run_sweep_rejects_too_many_params(self):
         from src.mcp_server.facade import run_sweep_for_mcp
@@ -230,11 +252,14 @@ class TestFacade:
             strategy="pyramid",
             mode="research",
             metric="sharpe",
+            require_real_data=False,
         )
         assert result["mode"] == "research"
         assert "gate_results" in result
         assert "gate_details" in result
         assert result["auto_activation_disabled"] is True
+        assert result["termination_eligible"] is False
+        assert result["termination_block_reason"] == "synthetic_data"
 
     def test_run_sweep_production_requires_real_data_bounds(self):
         from src.mcp_server.facade import run_sweep_for_mcp
