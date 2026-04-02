@@ -53,6 +53,7 @@ export interface BacktestResult {
   trade_pnls?: number[];
   trade_signals?: TradeSignal[];
   timeframe_minutes?: number;
+  equity_timestamps?: number[];
   symbol?: string;
   start?: string;
   end?: string;
@@ -193,8 +194,9 @@ export async function killSwitchResume(): Promise<{ status: string }> {
 }
 
 export interface HeartbeatResponse {
-  brokers: { broker: string; latency_ms: number | null; status: string }[];
-  timestamp: string;
+  brokers: { account_id: string; broker: string; latency_ms: number | null; status: string; connected: boolean }[];
+  timestamp: number;
+  halt_active: boolean;
 }
 
 export async function fetchHeartbeat(): Promise<HeartbeatResponse> {
@@ -350,7 +352,7 @@ export async function activateCandidate(candidateId: number): Promise<Record<str
   return fetchJSON(`/api/params/activate/${candidateId}`, { method: "POST" });
 }
 
-export async function deleteParamRun(runId: number): Promise<{ status: string; had_active?: boolean; auto_activated?: { candidate_id: number; sharpe: number } | null }> {
+export async function deleteParamRun(runId: number): Promise<{ status: string; had_active?: boolean; auto_activated?: { candidate_id: number; sortino?: number; sharpe?: number } | null }> {
   return fetchJSON(`/api/params/runs/${runId}`, { method: "DELETE" });
 }
 
@@ -414,6 +416,7 @@ export interface WarRoomData {
   accounts: Record<string, {
     display_name: string;
     broker: string;
+    sandbox_mode?: boolean;
     connected: boolean;
     connect_error?: string | null;
     equity: number;
