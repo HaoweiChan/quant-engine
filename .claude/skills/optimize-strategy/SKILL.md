@@ -96,6 +96,10 @@ Check the schema's `recommended_timeframe` field:
 Always pass `timeframe` and `n_bars` to `run_backtest`, `run_monte_carlo`,
 and `run_parameter_sweep` when working with intraday strategies.
 
+**Hard rule:** synthetic outputs (`run_backtest`, `run_monte_carlo`, or
+`run_parameter_sweep` in `research` mode) are exploratory only. They can guide
+hypotheses but can NEVER satisfy optimization termination criteria.
+
 ## The 5-Stage Optimization Loop
 
 ```
@@ -172,6 +176,7 @@ Rules:
 
 For **parameter changes**: use `run_parameter_sweep` to search a small range
 around your hypothesis (e.g., trail_atr_mult=[3.0, 3.5, 4.0, 4.5]).
+Use `mode="research"` with `require_real_data=false` for fast synthetic iteration.
 
 For **logic changes**: use `read_strategy_file` to understand current code,
 then `write_strategy_file` with modifications. Run `run_backtest` immediately
@@ -187,16 +192,25 @@ Constraints:
 ### Stage 4: EVALUATE
 
 **Read references:** `references/statistical-validity.md`
-**MCP tools:** `run_monte_carlo`, `run_stress_test`, `get_optimization_history`
+**MCP tools:** `run_monte_carlo`, `run_stress_test`, `run_backtest_realdata`, `run_parameter_sweep`, `get_optimization_history`
 
 Only reach this stage if Stage 3's quick backtests were promising. Now run
 the full validation suite.
 
-Run `run_monte_carlo` (n_paths=200) on the best candidate across ALL
-scenarios + stress tests. For intraday strategies, MC uses multiprocessing
-automatically.
+Use two-layer evaluation:
 
-Acceptance criteria (from `references/statistical-validity.md`):
+1. **Synthetic robustness (exploratory, non-terminating)**  
+   Run `run_monte_carlo` (n_paths=200) across scenarios + `run_stress_test`.
+   For intraday strategies, MC uses multiprocessing automatically.
+
+2. **Real-data termination gate (mandatory for accept/stop decisions)**  
+   Validate the candidate on TAIFEX history using:
+   - `run_backtest_realdata` on baseline params and candidate params
+   - `run_parameter_sweep` with `mode="production_intent"`, `require_real_data=true`,
+     and explicit `symbol/start/end`
+   The final commit/reject decision must be based on this real-data layer.
+
+Real-data acceptance criteria (from `references/statistical-validity.md`):
 - P50 PnL > 0 across all 7 scenarios
 - P25 PnL > -max_loss/2
 - Win rate within the **strategy type's healthy range** (Step 0) in at least 5 of 7 scenarios
@@ -215,6 +229,8 @@ Compare against baseline:
 Check for overfitting:
 - Run the ±20% parameter sensitivity test from `references/statistical-validity.md`
 - If performance collapses with small perturbation, the value is overfit
+
+Do not terminate the loop from synthetic metrics alone, even if they look superior.
 
 ---
 
@@ -236,7 +252,7 @@ Decision rules:
 ## Stopping Conditions
 
 Stop the optimization loop when ANY of these are true:
-- **Target reached**: composite_fitness > 5.0 OR (calmar > 1.2 AND alpha > 50%)
+- **Target reached on real data**: composite_fitness > 5.0 OR (calmar > 1.2 AND alpha > 50%) from `run_backtest_realdata` / `run_parameter_sweep(mode=production_intent)`
 - **Diminishing returns**: 3 consecutive rejected hypotheses
 - **Budget exhausted**: 50+ MCP tool calls in this session
 - **User satisfied**: User says to stop
@@ -260,10 +276,19 @@ When optimizing, follow this sequence (from `references/statistical-validity.md`
 
 ## Default Sweep Configuration
 
-When running `run_parameter_sweep`, use these defaults unless overridden:
-- `metric`: `composite_fitness` (NOT sharpe or sortino)
-- `mode`: `production_intent`
-- `min_trade_count`: 100
-- `min_expectancy`: 0.0 (set > 0 for TAIFEX to cover tick costs)
+When running `run_parameter_sweep`, use one of these profiles:
+
+**Exploration (loop iterations, synthetic allowed):**
+- `metric`: `composite_fitness`
+- `mode`: `research`
+- `require_real_data`: `false`
 - `is_fraction`: 0.8
 - Always sweep ≤ 3 parameters at once
+
+**Sign-off (final accept/stop decision, real data required):**
+- `metric`: `composite_fitness`
+- `mode`: `production_intent`
+- `require_real_data`: `true`
+- `symbol/start/end`: required (real TAIFEX interval)
+- `min_trade_count`: 100
+- `min_expectancy`: 0.0 (set > 0 for TAIFEX to cover tick costs)
