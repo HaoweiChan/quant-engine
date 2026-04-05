@@ -1,9 +1,10 @@
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { ChartCard } from "@/components/ChartCard";
 import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
 import { DistributionChart } from "@/components/charts/DistributionChart";
-import { OHLCVChart } from "@/components/charts/OHLCVChart";
+import { OHLCVChart, type OHLCVChartHandle, type IndicatorOverlay } from "@/components/charts/OHLCVChart";
+import { SubIndicatorChart, type SubIndicatorSeries } from "@/components/charts/SubIndicatorChart";
 import { StatCard, StatRow } from "@/components/StatCard";
 import { ChartErrorBoundary } from "@/components/ErrorBoundary";
 import { useStrategyStore } from "@/stores/strategyStore";
@@ -19,8 +20,53 @@ import "prismjs/components/prism-python";
 type SortKey = "run_at" | "sharpe" | "sortino" | "alpha" | "total_pnl" | "win_rate" | "max_drawdown_pct" | "profit_factor" | "n_trials" | "search_type" | "symbol";
 type SortDir = "asc" | "desc";
 
+function isoToEpoch(ts: string): number {
+  const n = ts.includes("T") ? ts : ts.replace(" ", "T");
+  const z = /(?:Z|[+-]\d{2}:\d{2})$/i.test(n) ? n : `${n}Z`;
+  return Math.floor(new Date(z).getTime() / 1000);
+}
+
+/**
+ * Align a full-backtest indicator values array to the bars currently displayed
+ * on the chart. Uses binary search on nativeEpochs (one per native bar) to find
+ * the closest native bar for each display bar, then returns the indicator value
+ * at that index. This corrects the index-clipping misalignment in both overview
+ * (aggregated TF) and detail (windowed 1m) modes.
+ */
+function alignIndicatorValues(
+  nativeEpochs: number[],
+  nativeValues: (number | null)[],
+  displayBars: OHLCVBar[],
+): (number | null)[] {
+  if (!nativeEpochs.length || !nativeValues.length || !displayBars.length) return [];
+  return displayBars.map((bar) => {
+    const barEpoch = isoToEpoch(bar.timestamp);
+    let lo = 0, hi = nativeEpochs.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (nativeEpochs[mid] < barEpoch) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo > 0 && Math.abs(nativeEpochs[lo - 1] - barEpoch) < Math.abs(nativeEpochs[lo] - barEpoch)) {
+      lo--;
+    }
+    return lo < nativeValues.length ? nativeValues[lo] : null;
+  });
+}
+
 const STANDARD_TFS = [1, 3, 5, 15, 30, 60];
 const MAX_OHLC_DISPLAY = 4000;
+const ZOOM_BTN: React.CSSProperties = {
+  background: "transparent",
+  color: "#8899aa",
+  border: "1px solid #8899aa",
+  borderRadius: 3,
+  padding: "1px 8px",
+  fontSize: 9,
+  cursor: "pointer",
+  fontFamily: "var(--font-mono)",
+  lineHeight: "18px",
+};
 
 function pickChartTf(barsCount: number, baseTf: number): number {
   for (const tf of STANDARD_TFS) {
@@ -59,6 +105,8 @@ export function TearSheet() {
   const initialCapital = useStrategyStore((s) => s.initialCapital);
   const slippageBps = useStrategyStore((s) => s.slippageBps);
   const commissionBps = useStrategyStore((s) => s.commissionBps);
+  const intraday = useStrategyStore((s) => s.intraday);
+  const setIntraday = useStrategyStore((s) => s.setIntraday);
   const strategies = useStrategyStore((s) => s.strategies);
   const setParams = useStrategyStore((s) => s.setParams);
   const currentStrat = strategies.find((s) => s.slug === strategy);
@@ -76,9 +124,15 @@ export function TearSheet() {
   const [sortKey, setSortKey] = useState<SortKey>("run_at");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [ohlcvBars, setOhlcvBars] = useState<OHLCVBar[]>([]);
-  const [chartTfMin, setChartTfMin] = useState(1);
   const [codeModal, setCodeModal] = useState<{ hash: string; code: string; strategy: string } | null>(null);
   const [codeLoading, setCodeLoading] = useState(false);
+  const [baseTfMin, setBaseTfMin] = useState(1);
+  const [overviewTfMin, setOverviewTfMin] = useState(60);
+  const [detailBars, setDetailBars] = useState<OHLCVBar[] | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [enabledIndicators, setEnabledIndicators] = useState<Set<string>>(new Set());
+  const [detailSyncRange, setDetailSyncRange] = useState<{ from: number; to: number } | null>(null);
 
   useEffect(() => {
     setResult(null);
@@ -119,6 +173,12 @@ export function TearSheet() {
     const newParams = { ...params };
     for (const [k, v] of Object.entries(run.best_params)) {
       if (k in newParams && typeof v === "number") newParams[k] = v;
+    }
+    // Set timeframe from notes (e.g., "tf=15min" → bar_agg=15)
+    const tfMatch = run.notes?.match(/tf=(\d+)min/);
+    if (tfMatch) {
+      const barAgg = Number(tfMatch[1]);
+      if ([1, 3, 5, 15, 30, 60].includes(barAgg)) newParams.bar_agg = barAgg;
     }
     setParams(newParams);
   };
@@ -179,9 +239,103 @@ export function TearSheet() {
 
   const activeRunId = paramSource?.run_id ?? null;
 
+  const ohlcvRef = useRef<OHLCVChartHandle>(null);
+  const stableSignals = useMemo(() => result?.trade_signals ?? [], [result?.trade_signals]);
+
+  // epoch timestamps for each native bar (equity_timestamps[0] is pre-bar initial)
+  const nativeEpochs = useMemo(
+    () => (result?.equity_timestamps ?? []).slice(1),
+    [result?.equity_timestamps],
+  );
+
+  // Initialize indicator toggles when new result arrives
+  useEffect(() => {
+    if (result?.indicator_meta) {
+      setEnabledIndicators(new Set(Object.keys(result.indicator_meta)));
+    }
+  }, [result?.indicator_meta]);
+
+  // Detail panel: price-panel overlays filtered by toggle state
+  const detailOverlays = useMemo<IndicatorOverlay[]>(() => {
+    if (!detailBars || !result?.indicator_series || !result?.indicator_meta) return [];
+    return Object.entries(result.indicator_series)
+      .filter(([key]) => result.indicator_meta?.[key]?.panel === "price" && enabledIndicators.has(key))
+      .map(([key, values]) => ({
+        label: result.indicator_meta![key].label,
+        values: alignIndicatorValues(nativeEpochs, values, detailBars),
+        color: result.indicator_meta![key].color,
+        lineWidth: 1,
+      }));
+  }, [result?.indicator_series, result?.indicator_meta, nativeEpochs, detailBars, enabledIndicators]);
+
+  // Detail panel: sub-panel series filtered by toggle state
+  const detailSubSeries = useMemo<SubIndicatorSeries[]>(() => {
+    if (!detailBars || !result?.indicator_series || !result?.indicator_meta) return [];
+    return Object.entries(result.indicator_series)
+      .filter(([key]) => result.indicator_meta?.[key]?.panel === "sub" && enabledIndicators.has(key))
+      .map(([key, values]) => ({
+        label: result.indicator_meta![key].label,
+        values: alignIndicatorValues(nativeEpochs, values, detailBars),
+        color: result.indicator_meta![key].color,
+      }));
+  }, [result?.indicator_series, result?.indicator_meta, nativeEpochs, detailBars, enabledIndicators]);
+
+  // Detail panel: signals filtered to detail window
+  const detailSignals = useMemo(() => {
+    if (!detailBars || detailBars.length === 0) return [];
+    const firstTs = detailBars[0].timestamp;
+    const lastTs = detailBars[detailBars.length - 1].timestamp;
+    return stableSignals.filter((s) => s.timestamp >= firstTs && s.timestamp <= lastTs);
+  }, [stableSignals, detailBars]);
+
+  const handleZoomIn = useCallback(() => {
+    const c = ohlcvRef.current?.chart();
+    if (!c) return;
+    const range = c.timeScale().getVisibleLogicalRange();
+    if (!range) return;
+    const mid = (range.from + range.to) / 2;
+    const half = (range.to - range.from) / 4;
+    c.timeScale().setVisibleLogicalRange({ from: mid - half, to: mid + half });
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    const c = ohlcvRef.current?.chart();
+    if (!c) return;
+    const range = c.timeScale().getVisibleLogicalRange();
+    if (!range) return;
+    const mid = (range.from + range.to) / 2;
+    const half = (range.to - range.from);
+    c.timeScale().setVisibleLogicalRange({ from: mid - half, to: mid + half });
+  }, []);
+
+  const handleFit = useCallback(() => {
+    ohlcvRef.current?.chart()?.timeScale().fitContent();
+  }, []);
+
+  const handleShowDetail = useCallback(async () => {
+    // Use the chart's displayed (aggregated) bars — not raw ohlcvBars — to
+    // map the visible logical range to correct timestamps.
+    const displayed = ohlcvRef.current?.displayedBars() ?? [];
+    if (displayed.length === 0) return;
+    const range = ohlcvRef.current?.chart()?.timeScale().getVisibleLogicalRange();
+    if (!range) return;
+    const fromIdx = Math.max(0, Math.floor(range.from));
+    const toIdx = Math.min(displayed.length - 1, Math.ceil(range.to));
+    const startTs = displayed[fromIdx].timestamp.slice(0, 10);
+    const endTs = displayed[toIdx].timestamp.slice(0, 10);
+    setDetailLoading(true);
+    try {
+      const d = await fetchOHLCV(symbol, startTs, endTs, baseTfMin);
+      if (d.bars.length > 0) { setDetailBars(d.bars); setDetailOpen(true); }
+    } finally { setDetailLoading(false); }
+  }, [symbol, baseTfMin]);
+
   const handleRun = async () => {
     startRun();
     setOhlcvBars([]);
+    setDetailBars(null);
+    setDetailOpen(false);
+    setDetailLoading(false);
     try {
       const [paramHash, metaInfo] = await Promise.all([
         computeParamHash(params),
@@ -191,6 +345,7 @@ export function TearSheet() {
         strategy, symbol, start: startDate, end: endDate, params,
         max_loss: maxLoss, initial_capital: initialCapital,
         slippage_bps: slippageBps, commission_bps: commissionBps,
+        intraday,
         provenance: {
           param_hash: paramHash,
           date_range: `${startDate}~${endDate}`,
@@ -201,8 +356,9 @@ export function TearSheet() {
       setResult(r);
       refreshAll();
       const tfMin = r.timeframe_minutes ?? params.bar_agg ?? 1;
+      setBaseTfMin(tfMin);
       const chartTf = pickChartTf(r.bars_count ?? 0, tfMin);
-      setChartTfMin(chartTf);
+      setOverviewTfMin(chartTf);
       fetchOHLCV(symbol, startDate, endDate, chartTf)
         .then((d) => setOhlcvBars(d.bars))
         .catch(() => setOhlcvBars([]));
@@ -224,6 +380,16 @@ export function TearSheet() {
   const fmtPct = (v: number) => `${(v * 100).toFixed(1)}%`;
   const fmtDollar = (v: number) => `$${v >= 0 ? "+" : ""}${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 
+  const overviewCloses = useMemo(() => ohlcvBars.map((b) => b.close), [ohlcvBars]);
+
+  const toggleIndicator = useCallback((key: string) => {
+    setEnabledIndicators(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }, []);
+
   return (
     <div className="p-3 overflow-y-auto" style={{ minWidth: 0 }}>
       <div className="flex items-center gap-3 mb-3">
@@ -235,6 +401,18 @@ export function TearSheet() {
         >
           {loading ? "Running…" : "Run Backtest"}
         </button>
+        <label
+          className="flex items-center gap-1 text-[10px] cursor-pointer select-none"
+          style={{ color: intraday ? colors.cyan : colors.dim, fontFamily: "var(--font-mono)" }}
+        >
+          <input
+            type="checkbox"
+            checked={intraday}
+            onChange={(e) => setIntraday(e.target.checked)}
+            style={{ accentColor: "#2A5A9A" }}
+          />
+          Intraday
+        </label>
         {slippageBps > 0 || commissionBps > 0 ? (
           <span className="text-[9px]" style={{ color: colors.cyan, fontFamily: "var(--font-mono)" }}>
             slip={slippageBps}bps comm={commissionBps}bps
@@ -266,7 +444,7 @@ export function TearSheet() {
       {result && m && (
         <>
           <div className="text-[9px] mb-2.5" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
-            {currentStrat?.name} on {symbol} ({startDate} → {endDate}) • {result.bars_count.toLocaleString()} bars • {result.timeframe_minutes ?? params.bar_agg ?? 1}min TF
+            {currentStrat?.name} on {symbol} ({startDate} → {endDate}) • {result.bars_count.toLocaleString()} bars • {result.timeframe_minutes ?? params.bar_agg ?? 1}min TF{result.intraday ? " • INTRADAY" : ""}
           </div>
           <StatRow>
             <StatCard label="SHARPE" value={(m.sharpe ?? 0).toFixed(2)} color={(m.sharpe ?? 0) > 1 ? colors.green : (m.sharpe ?? 0) > 0 ? colors.gold : colors.red} />
@@ -278,23 +456,132 @@ export function TearSheet() {
           </StatRow>
           <StatRow>
             <StatCard label="TOTAL PnL" value={fmtDollar(totalPnl)} color={pnlColor(totalPnl)} />
-            <StatCard label="B&H PnL" value={fmtDollar(bnhPnl)} color={colors.muted} />
+            <StatCard label={result.intraday ? "Intraday B&H" : "B&H PnL"} value={fmtDollar(bnhPnl)} color={colors.muted} />
             <StatCard label="ALPHA" value={fmtDollar(alpha)} color={pnlColor(alpha)} />
             <StatCard label="AVG WIN" value={(m.avg_win ?? 0).toFixed(1)} color={colors.green} />
             <StatCard label="AVG LOSS" value={(m.avg_loss ?? 0).toFixed(1)} color={colors.red} />
             <StatCard label="MAX DD ($)" value={fmtDollar(-(m.max_drawdown_abs ?? 0))} color={colors.red} />
           </StatRow>
           <ChartErrorBoundary fallbackLabel="Equity Curve">
-            <ChartCard title="EQUITY CURVE vs BUY & HOLD">
+            <ChartCard title={result.intraday ? "EQUITY CURVE vs INTRADAY B&H" : "EQUITY CURVE vs BUY & HOLD"}>
               <EquityCurveChart equity={equity} bnhEquity={result.bnh_equity} startDate={startDate} timeframeMinutes={result.timeframe_minutes ?? (params.bar_agg ?? 1)} timestamps={result.equity_timestamps} />
             </ChartCard>
           </ChartErrorBoundary>
           {ohlcvBars.length > 0 && (
             <ChartErrorBoundary fallbackLabel="Price Chart">
-              <ChartCard title={`${symbol} OHLC — ${chartTfMin >= 60 ? `${chartTfMin / 60}h` : `${chartTfMin}min`} · TRADE SIGNALS`}>
-                <OHLCVChart data={ohlcvBars} signals={result.trade_signals ?? []} height={320} />
+              <ChartCard
+                title={
+                  <div className="flex items-center justify-between">
+                    <span>
+                      {symbol} OHLC · TRADE SIGNALS
+                      {stableSignals.length > 0 && (
+                        <span style={{ color: colors.muted, fontSize: 10 }}>
+                          {" "}({stableSignals.filter(s => s.side === "buy").length} buys, {stableSignals.filter(s => s.side === "sell").length} sells)
+                        </span>
+                      )}
+                    </span>
+                    <div className="flex gap-1">
+                      <button
+                        onClick={handleShowDetail}
+                        disabled={detailLoading}
+                        style={{ ...ZOOM_BTN, color: detailOpen ? colors.cyan : "#8899aa", borderColor: detailOpen ? colors.cyan : "#8899aa" }}
+                      >
+                        {detailLoading ? "…" : "Detail"}
+                      </button>
+                      <button onClick={handleFit} style={ZOOM_BTN}>Fit</button>
+                      <button onClick={handleZoomIn} style={ZOOM_BTN}>+</button>
+                      <button onClick={handleZoomOut} style={ZOOM_BTN}>−</button>
+                    </div>
+                  </div>
+                }
+              >
+                <OHLCVChart
+                  ref={ohlcvRef}
+                  data={ohlcvBars}
+                  signals={stableSignals}
+                  height={320}
+                  timeframeMinutes={overviewTfMin}
+                  overviewCloses={overviewCloses}
+                />
               </ChartCard>
             </ChartErrorBoundary>
+          )}
+          {/* Detail Panel — manually opened, shows native-TF bars with toggleable indicators */}
+          {detailOpen && detailBars && detailBars.length > 0 && (
+            <div
+              className="rounded-b-[5px] mb-2.5"
+              style={{
+                background: colors.card,
+                border: `1px solid ${colors.cardBorder}`,
+                borderTop: "none",
+                marginTop: -12,
+                padding: "8px 12px 12px",
+              }}
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span style={{ color: colors.cyan, fontSize: 10, fontFamily: "var(--font-mono)", fontWeight: 600 }}>
+                    {baseTfMin}m DETAIL
+                  </span>
+                  <span style={{ color: colors.dim, fontSize: 9, fontFamily: "var(--font-mono)", margin: "0 4px" }}>|</span>
+                  {result?.indicator_meta && Object.entries(result.indicator_meta).map(([key, meta]) => {
+                    const active = enabledIndicators.has(key);
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => toggleIndicator(key)}
+                        style={{
+                          fontSize: 9,
+                          fontFamily: "var(--font-mono)",
+                          padding: "1px 8px",
+                          borderRadius: 9999,
+                          border: `1px solid ${active ? meta.color : colors.cardBorder}`,
+                          background: active ? `${meta.color}15` : "transparent",
+                          color: active ? meta.color : colors.dim,
+                          cursor: "pointer",
+                          lineHeight: "16px",
+                          transition: "all 0.15s",
+                        }}
+                      >
+                        {meta.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <button
+                  onClick={() => { setDetailOpen(false); setDetailBars(null); }}
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    color: colors.dim,
+                    fontSize: 14,
+                    cursor: "pointer",
+                    padding: "0 4px",
+                    lineHeight: 1,
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+              <OHLCVChart
+                key={detailBars[0].timestamp}
+                data={detailBars}
+                signals={detailSignals}
+                overlays={detailOverlays}
+                height={320}
+                timeframeMinutes={baseTfMin}
+                onSyncRange={setDetailSyncRange}
+              />
+              {detailSubSeries.length > 0 && (
+                <SubIndicatorChart
+                  series={detailSubSeries}
+                  barCount={detailBars.length}
+                  height={120}
+                  timeframeMinutes={baseTfMin}
+                  syncRange={detailSyncRange}
+                />
+              )}
+            </div>
           )}
           <div className="flex gap-2.5">
             <div className="flex-1">
@@ -337,6 +624,7 @@ export function TearSheet() {
                     <SortHeader label="Symbol" field="symbol" align="left" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
                     <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>Period</th>
                     <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>TF</th>
+                    <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>ID</th>
                     <SortHeader label="Type" field="search_type" align="left" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
                     <th className="text-right py-1 pr-2" style={{ color: colors.dim }}>Capital</th>
                     <SortHeader label="Sharpe" field="sharpe" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
@@ -365,6 +653,7 @@ export function TearSheet() {
                     const period = run.train_start && run.train_end ? `${fmtPeriod(run.train_start)}→${fmtPeriod(run.train_end)}` : "—";
                     const tfMatch = run.notes?.match(/tf=(\d+)min/);
                     const tf = tfMatch ? `${tfMatch[1]}m` : "—";
+                    const isIntraday = run.notes?.includes("|intraday") ?? false;
                     return (
                       <tr
                         key={run.run_id}
@@ -382,7 +671,13 @@ export function TearSheet() {
                         <td className="py-1 pr-2" style={{ color: colors.muted }}>{run.symbol ?? "—"}</td>
                         <td className="py-1 pr-2" style={{ color: colors.dim }}>{period}</td>
                         <td className="py-1 pr-2" style={{ color: colors.cyan }}>{tf}</td>
-                        <td className="py-1 pr-2" style={{ color: colors.muted }}>{run.search_type ?? "grid"}</td>
+                        <td className="py-1 pr-2" style={{ color: isIntraday ? colors.cyan : colors.dim }}>{isIntraday ? "ID" : "—"}</td>
+                        <td className="py-1 pr-2" style={{ color: colors.muted }}>
+                          {run.search_type ?? "grid"}
+                          {run.metrics_source === "full_period" && (
+                            <span style={{ color: "#4ade80", marginLeft: 4, fontSize: 8 }} title="Full-period validated">●</span>
+                          )}
+                        </td>
                         <td className="text-right py-1 pr-2" style={{ color: colors.dim }}>
                           {run.initial_capital != null ? `$${(run.initial_capital / 1_000_000).toFixed(1)}M` : "—"}
                         </td>

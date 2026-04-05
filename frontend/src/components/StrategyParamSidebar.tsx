@@ -32,6 +32,7 @@ export function StrategyParamSidebar() {
   const setInitialCapital = useStrategyStore((s) => s.setInitialCapital);
   const setMaxLoss = useStrategyStore((s) => s.setMaxLoss);
   const loadStrategies = useStrategyStore((s) => s.loadStrategies);
+  const reloadStrategies = useStrategyStore((s) => s.reloadStrategies);
   const storeLoading = useStrategyStore((s) => s.loading);
   const locked = useStrategyStore((s) => s.locked);
   const backtestLoading = useBacktestStore((s) => s.loading);
@@ -46,18 +47,34 @@ export function StrategyParamSidebar() {
     <Sidebar>
       <SectionLabel>STRATEGY</SectionLabel>
       <ParamInput label="Strategy">
-        <select
-          value={strategy}
-          onChange={(e) => setStrategy(e.target.value)}
-          disabled={disabled}
-          className="w-full rounded px-1.5 py-1 text-[11px]"
-          style={inputStyle}
-        >
-          {strategies.length === 0 && <option value="">Loading…</option>}
-          {strategies.map((s) => (
-            <option key={s.slug} value={s.slug}>{s.name}</option>
-          ))}
-        </select>
+        <div className="flex gap-1 items-center w-full">
+          <select
+            value={strategy}
+            onChange={(e) => setStrategy(e.target.value)}
+            disabled={disabled}
+            className="flex-1 min-w-0 rounded px-1.5 py-1 text-[11px]"
+            style={inputStyle}
+          >
+            {strategies.length === 0 && <option value="">Loading…</option>}
+            {strategies.map((s) => (
+              <option key={s.slug} value={s.slug}>{s.name}</option>
+            ))}
+          </select>
+          <button
+            onClick={() => reloadStrategies()}
+            disabled={disabled}
+            title="Reload strategies"
+            className="shrink-0 rounded px-1 py-1 text-[11px] hover:opacity-80"
+            style={{
+              background: "var(--color-qe-input)",
+              border: "1px solid var(--color-qe-input-border)",
+              color: "var(--color-qe-text-muted)",
+              cursor: disabled ? "not-allowed" : "pointer",
+            }}
+          >
+            &#x21bb;
+          </button>
+        </div>
       </ParamInput>
       <ParamInput label="Contract">
         <select

@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createChart, createSeriesMarkers, type IChartApi, type ISeriesApi, type ISeriesMarkersPluginApi, type LineWidth, CandlestickSeries, HistogramSeries, LineSeries, type Time } from "lightweight-charts";
 import type { OHLCVBar, TradeSignal } from "@/lib/api";
 import { aggregateBars, buildSequentialTimes, toProfessionalSessionBars, SEQ_BASE_EPOCH } from "@/lib/sessionChart";
 import { colors } from "@/lib/theme";
+import { RangeSlider } from "./RangeSlider";
 
 export interface IndicatorOverlay {
   label: string;
@@ -21,9 +22,24 @@ interface OHLCVChartProps {
   onRequestOlderData?: () => void;
   /** Optional live tick bar for real-time chart updates */
   lastLiveTick?: OHLCVBar | null;
+  /** Fires when the visible logical range changes (for lazy-load detail) */
+  onVisibleRangeChange?: (from: number, to: number, totalBars: number) => void;
+  /** Always fires on visible range change — used to sync sub-charts */
+  onSyncRange?: (range: { from: number; to: number }) => void;
+  /** Overview close prices for the range slider minimap */
+  overviewCloses?: number[];
+}
+
+export interface OHLCVChartHandle {
+  chart: () => IChartApi | null;
+  totalBars: () => number;
+  /** Returns the bars actually displayed (after aggregation). */
+  displayedBars: () => OHLCVBar[];
 }
 
 const MAX_CHART_POINTS = 4000;
+const EMPTY_OVERLAYS: IndicatorOverlay[] = [];
+const EMPTY_SIGNALS: TradeSignal[] = [];
 
 
 function normalizeTickTime(time: unknown): number {
@@ -77,15 +93,18 @@ function signalsToMarkers(signals: TradeSignal[], bars: OHLCVBar[], seqTimes: nu
     .sort((a, b) => (a.time as number) - (b.time as number));
 }
 
-export const OHLCVChart = React.memo(function OHLCVChart({
+export const OHLCVChart = React.memo(forwardRef<OHLCVChartHandle, OHLCVChartProps>(function OHLCVChart({
   data,
   height = 340,
-  overlays = [],
-  signals = [],
+  overlays = EMPTY_OVERLAYS,
+  signals = EMPTY_SIGNALS,
   timeframeMinutes = 1,
   onRequestOlderData,
   lastLiveTick,
-}: OHLCVChartProps) {
+  onVisibleRangeChange,
+  onSyncRange,
+  overviewCloses,
+}, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -100,15 +119,33 @@ export const OHLCVChart = React.memo(function OHLCVChart({
   const loadMoreCooldownRef = useRef(false);
   const onRequestOlderDataRef = useRef(onRequestOlderData);
   onRequestOlderDataRef.current = onRequestOlderData;
+  const onVisibleRangeChangeRef = useRef(onVisibleRangeChange);
+  onVisibleRangeChangeRef.current = onVisibleRangeChange;
+  const onSyncRangeRef = useRef(onSyncRange);
+  onSyncRangeRef.current = onSyncRange;
   const barsRef = useRef<OHLCVBar[]>([]);
   const stepRef = useRef(60);
   const [hoverBar, setHoverBar] = useState<{
     time: string; o: number; h: number; l: number; c: number; v: number;
   } | null>(null);
+  const [visibleRange, setVisibleRange] = useState<{ from: number; to: number } | null>(null);
+
+  useImperativeHandle(ref, () => ({
+    chart: () => chartRef.current,
+    totalBars: () => barsRef.current.length,
+    displayedBars: () => barsRef.current,
+  }));
 
   const handleVisibleRangeChange = useCallback((range: any) => {
-    if (!range || loadMoreCooldownRef.current) return;
-    if (range.from < 10 && onRequestOlderDataRef.current) {
+    if (!range) return;
+    // Clamp to [0, nBars] to eliminate fitContent margins and keep slider in-bounds
+    const nBars = barsRef.current.length;
+    const from = nBars > 0 ? Math.max(0, range.from) : range.from;
+    const to = nBars > 0 ? Math.min(nBars, range.to) : range.to;
+    setVisibleRange({ from, to });
+    onSyncRangeRef.current?.({ from, to });
+    onVisibleRangeChangeRef.current?.(from, to, nBars);
+    if (!loadMoreCooldownRef.current && range.from < 10 && onRequestOlderDataRef.current) {
       loadMoreCooldownRef.current = true;
       onRequestOlderDataRef.current();
       setTimeout(() => { loadMoreCooldownRef.current = false; }, 3000);
@@ -176,9 +213,11 @@ export const OHLCVChart = React.memo(function OHLCVChart({
       const idx = Math.round((t - SEQ_BASE_EPOCH) / currentStep);
       if (idx < 0 || idx >= barsRef.current.length) { setHoverBar(null); return; }
       const bar = barsRef.current[idx];
-      const displayTime = formatTickRef.current(t);
+      // Always show full date+time in hover tooltip (MM/DD HH:MM)
+      const tsNorm = bar.timestamp.includes("T") ? bar.timestamp : bar.timestamp.replace(" ", "T");
+      const tsClean = tsNorm.slice(0, 16).replace("T", " ").replace(/-/g, "/");
       setHoverBar({
-        time: displayTime || bar.timestamp.slice(5, 16).replace("T", " "),
+        time: tsClean,
         o: bar.open, h: bar.high, l: bar.low, c: bar.close, v: bar.volume,
       });
     });
@@ -198,6 +237,9 @@ export const OHLCVChart = React.memo(function OHLCVChart({
     };
   }, [height, timeframeMinutes, handleVisibleRangeChange]);
 
+  // Main data effect: update candle + volume series when data or timeframe changes.
+  // Overlays and signals are handled in a separate effect to avoid resetting the
+  // visible range when only markers/overlays change.
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart || !candleSeriesRef.current || !volSeriesRef.current || data.length === 0) return;
@@ -233,6 +275,31 @@ export const OHLCVChart = React.memo(function OHLCVChart({
       })),
     );
 
+    lastSeqTimeRef.current = times[times.length - 1];
+    lastRealTsRef.current = ds[ds.length - 1].timestamp;
+    seqStepRef.current = step;
+    prevDataLengthRef.current = data.length;
+
+    if (savedRange && prependedCount > 0) {
+      chart.timeScale().setVisibleLogicalRange({
+        from: savedRange.from + prependedCount,
+        to: savedRange.to + prependedCount,
+      });
+    } else {
+      chart.timeScale().fitContent();
+    }
+  }, [data, timeframeMinutes]);
+
+  // Overlay + signal decoration effect: updates markers and line overlays without
+  // resetting the visible range, so user zoom/pan is preserved.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !candleSeriesRef.current || barsRef.current.length === 0) return;
+
+    const ds = barsRef.current;
+    const step = stepRef.current;
+    const times = ds.map((_, i) => SEQ_BASE_EPOCH + i * step);
+
     if (markersPluginRef.current) {
       markersPluginRef.current.setMarkers([]);
       markersPluginRef.current = null;
@@ -261,19 +328,6 @@ export const OHLCVChart = React.memo(function OHLCVChart({
         .filter(Boolean) as { time: Time; value: number }[];
       s.setData(pts);
       overlaySeriesRef.current.push(s);
-    }
-    lastSeqTimeRef.current = times[times.length - 1];
-    lastRealTsRef.current = ds[ds.length - 1].timestamp;
-    seqStepRef.current = step;
-    prevDataLengthRef.current = data.length;
-
-    if (savedRange && prependedCount > 0) {
-      chart.timeScale().setVisibleLogicalRange({
-        from: savedRange.from + prependedCount,
-        to: savedRange.to + prependedCount,
-      });
-    } else {
-      chart.timeScale().fitContent();
     }
   }, [data, overlays, signals, timeframeMinutes]);
 
@@ -304,6 +358,14 @@ export const OHLCVChart = React.memo(function OHLCVChart({
     lastRealTsRef.current = live.timestamp;
   }, [lastLiveTick, timeframeMinutes]);
 
+  const handleSliderChange = useCallback((from: number, to: number) => {
+    // setVisibleLogicalRange fires handleVisibleRangeChange synchronously,
+    // which updates visibleRange state — no need to call setVisibleRange here.
+    chartRef.current?.timeScale().setVisibleLogicalRange({ from, to });
+  }, []);
+
+  const totalBars = barsRef.current.length;
+
   return (
     <div style={{ position: "relative" }}>
       {hoverBar && (
@@ -333,6 +395,15 @@ export const OHLCVChart = React.memo(function OHLCVChart({
         </div>
       )}
       <div ref={containerRef} />
+      {totalBars > 1 && visibleRange && (
+        <RangeSlider
+          totalBars={totalBars}
+          visibleFrom={visibleRange.from}
+          visibleTo={visibleRange.to}
+          onChange={handleSliderChange}
+          closePrices={overviewCloses}
+        />
+      )}
     </div>
   );
-});
+}));
