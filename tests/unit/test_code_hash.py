@@ -19,7 +19,7 @@ class TestStrategyFilePath:
 
     def test_resolves_alias(self) -> None:
         path = strategy_file_path("pyramid")
-        assert "daily/trend_following/pyramid_wrapper" in str(path)
+        assert "swing/trend_following/pyramid_wrapper" in str(path)
 
     def test_raises_on_missing_file(self) -> None:
         with pytest.raises(FileNotFoundError):
@@ -40,8 +40,8 @@ class TestComputeStrategyHash:
         assert h1 == h2
 
     def test_hash_changes_on_edit(self, tmp_path: Path) -> None:
-        strategies_dir = Path("/home/willy/invest/quant-engine/src/strategies")
-        test_file = strategies_dir / "daily" / "trend_following" / "pyramid_wrapper.py"
+        strategies_dir = Path(__file__).resolve().parents[2] / "src" / "strategies"
+        test_file = strategies_dir / "swing" / "trend_following" / "pyramid_wrapper.py"
         original_content = test_file.read_text()
         try:
             test_file.write_text(original_content + "\n# test comment\n")

@@ -576,17 +576,17 @@ class TestResolveStrategySlug:
         from src.mcp_server.facade import resolve_strategy_slug
 
         assert (
-            resolve_strategy_slug("intraday/trend_following/ema_trend_pullback")
-            == "intraday/trend_following/ema_trend_pullback"
+            resolve_strategy_slug("medium_term/trend_following/ema_trend_pullback")
+            == "medium_term/trend_following/ema_trend_pullback"
         )
 
     def test_module_factory_resolution(self) -> None:
         from src.mcp_server.facade import resolve_strategy_slug
 
         result = resolve_strategy_slug(
-            "src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"
+            "src.strategies.medium_term.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"
         )
-        assert result == "intraday/trend_following/ema_trend_pullback"
+        assert result == "medium_term/trend_following/ema_trend_pullback"
 
     def test_unknown_fallback(self) -> None:
         from src.mcp_server.facade import resolve_strategy_slug
@@ -676,19 +676,19 @@ class TestStrategyNameMigration:
                 activated_at TEXT, notes TEXT
             );
             INSERT INTO param_runs (run_at, strategy, symbol, objective, n_trials, search_type, source)
-            VALUES ('2026-01-01', 'src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine', 'TX', 'sharpe', 1, 'grid', 'mcp');
+            VALUES ('2026-01-01', 'src.strategies.medium_term.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine', 'TX', 'sharpe', 1, 'grid', 'mcp');
             INSERT INTO param_candidates (run_id, strategy, params, label)
-            VALUES (1, 'src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine', '{}', 'best_sharpe');
+            VALUES (1, 'src.strategies.medium_term.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine', '{}', 'best_sharpe');
         """)
         conn.commit()
         conn.close()
         registry = ParamRegistry(db_path=db_path)
         run = registry._conn.execute("SELECT strategy FROM param_runs WHERE id = 1").fetchone()
-        assert run["strategy"] == "intraday/trend_following/ema_trend_pullback"
+        assert run["strategy"] == "medium_term/trend_following/ema_trend_pullback"
         cand = registry._conn.execute(
             "SELECT strategy FROM param_candidates WHERE run_id = 1"
         ).fetchone()
-        assert cand["strategy"] == "intraday/trend_following/ema_trend_pullback"
+        assert cand["strategy"] == "medium_term/trend_following/ema_trend_pullback"
         registry.close()
 
     def test_migration_idempotent(self, db_path: Path) -> None:

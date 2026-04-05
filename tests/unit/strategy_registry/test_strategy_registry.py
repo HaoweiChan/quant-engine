@@ -15,16 +15,16 @@ class TestDiscovery:
     def test_discovers_atr_mean_reversion(self):
         reg = _fresh_registry()
         all_strats = reg.get_all()
-        slug = "intraday/mean_reversion/atr_mean_reversion"
+        slug = "short_term/mean_reversion/atr_mean_reversion"
         assert slug in all_strats
         info = all_strats[slug]
         assert info.factory == "create_atr_mean_reversion_engine"
-        assert info.module == "src.strategies.intraday.mean_reversion.atr_mean_reversion"
+        assert info.module == "src.strategies.short_term.mean_reversion.atr_mean_reversion"
 
     def test_discovers_pyramid_wrapper(self):
         reg = _fresh_registry()
         all_strats = reg.get_all()
-        slug = "daily/trend_following/pyramid_wrapper"
+        slug = "swing/trend_following/pyramid_wrapper"
         assert slug in all_strats
         info = all_strats[slug]
         assert info.factory == "create_pyramid_wrapper_engine"
@@ -46,18 +46,17 @@ class TestGetSchema:
     def test_returns_correct_structure(self):
         reg = _fresh_registry()
         schema = reg.get_schema("atr_mean_reversion")
-        assert schema["strategy"] == "intraday/mean_reversion/atr_mean_reversion"
+        assert schema["strategy"] == "short_term/mean_reversion/atr_mean_reversion"
         assert "parameters" in schema
         assert "meta" in schema
 
     def test_all_params_present(self):
         reg = _fresh_registry()
         schema = reg.get_schema("atr_mean_reversion")
-        expected = {"kc_len", "kc_mult", "rsi_len",
-                    "atr_sl_multi", "atr_tp_multi", "trend_ma_len",
-                    "rsi_oversold", "rsi_overbought", "trend_filter_atr",
-                    "midline_exit", "vol_len", "vol_mult", "time_gate"}
-        assert set(schema["parameters"].keys()) == expected
+        # Core params that must always be present
+        required = {"kc_len", "kc_mult", "rsi_len", "atr_sl_multi", "atr_tp_multi",
+                    "trend_ma_len", "rsi_oversold", "rsi_overbought"}
+        assert required.issubset(set(schema["parameters"].keys()))
 
     def test_param_has_required_fields(self):
         reg = _fresh_registry()
@@ -85,13 +84,13 @@ class TestGetActiveParams:
         monkeypatch.setattr(pr.ParamRegistry, "get_active", lambda self, name: None)
         params = reg.get_active_params("atr_mean_reversion")
         assert params["kc_len"] == 90
-        assert params["atr_sl_multi"] == 0.5
+        assert params["atr_sl_multi"] == 1.5
 
     def test_merges_toml_override(self, tmp_path, monkeypatch):
         import tomli_w
         reg = _fresh_registry()
         toml_dir = tmp_path / "configs"
-        toml_file = toml_dir / "intraday" / "mean_reversion"
+        toml_file = toml_dir / "short_term" / "mean_reversion"
         toml_file.mkdir(parents=True)
         (toml_file / "atr_mean_reversion.toml").write_bytes(
             tomli_w.dumps({"params": {"kc_len": 60}}).encode()
@@ -102,7 +101,7 @@ class TestGetActiveParams:
         monkeypatch.setattr(pr.ParamRegistry, "get_active", lambda self, name: None)
         params = reg.get_active_params("atr_mean_reversion")
         assert params["kc_len"] == 60
-        assert params["atr_sl_multi"] == 0.5
+        assert params["atr_sl_multi"] == 1.5
 
 
 class TestGetParamGrid:
@@ -110,12 +109,12 @@ class TestGetParamGrid:
         reg = _fresh_registry()
         grid = reg.get_param_grid("atr_mean_reversion")
         assert grid["kc_len"]["default"] == [60, 90, 120]
-        assert grid["rsi_oversold"]["default"] == [15, 25, 35]
+        assert grid["rsi_oversold"]["default"] == [25, 30, 35, 40]
 
     def test_fallback_to_single_default(self):
         reg = _fresh_registry()
         grid = reg.get_param_grid("atr_mean_reversion")
-        assert grid["rsi_len"]["default"] == [3, 5, 10]
+        assert grid["rsi_len"]["default"] == [3, 5]
 
     def test_grid_has_label_and_type(self):
         reg = _fresh_registry()

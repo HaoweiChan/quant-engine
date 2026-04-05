@@ -63,7 +63,7 @@ class TestListFiles:
 
 class TestReadWrite:
     def test_read_existing_file(self) -> None:
-        content = read_file("src/strategies/daily/trend_following/pyramid_wrapper.py")
+        content = read_file("src/strategies/swing/trend_following/pyramid_wrapper.py")
         assert "create_pyramid_wrapper_engine" in content
 
     def test_write_and_read_roundtrip(self, tmp_path, monkeypatch) -> None:

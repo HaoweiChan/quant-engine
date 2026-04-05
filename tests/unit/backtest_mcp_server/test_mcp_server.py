@@ -291,7 +291,7 @@ class TestFacade:
     def test_parameter_schema_pyramid(self):
         from src.mcp_server.facade import get_strategy_parameter_schema
         schema = get_strategy_parameter_schema("pyramid")
-        assert schema["strategy"] == "daily/trend_following/pyramid_wrapper"
+        assert schema["strategy"] == "swing/trend_following/pyramid_wrapper"
         assert "parameters" in schema
         assert "stop_atr_mult" in schema["parameters"]
         assert "scenarios" in schema

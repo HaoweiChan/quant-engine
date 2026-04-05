@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from src.core.types import MarketSnapshot
 from src.strategies.registry import validate_and_clamp
 from tests.conftest import make_account, make_engine_state
-from src.strategies.intraday.breakout.structural_orb import StructuralORBEntryPolicy
+from src.strategies.short_term.breakout.structural_orb import StructuralORBEntryPolicy
 
 
 def _snapshot(price: float, ts: datetime, contract_specs, volume: float = 1_000.0) -> MarketSnapshot:
@@ -74,7 +74,7 @@ def test_breakout_entry_long_when_filters_pass(contract_specs) -> None:
 
 def test_structural_orb_param_bounds_clamped() -> None:
     clamped, warnings = validate_and_clamp(
-        "structural_orb",
+        "short_term/breakout/structural_orb",
         {"adx_period": 99, "keltner_mult": 0.2, "vwap_filter": 8},
     )
     assert clamped["adx_period"] == 21

@@ -22,6 +22,7 @@ def test_create_account():
     assert resp.status_code == 201
     data = resp.json()
     assert data["broker"] == "mock"
+    assert data["display_name"] == "Test Mock Account"
     assert "id" in data
 
 
