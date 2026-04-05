@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from typing import Any
 
 import structlog
@@ -111,7 +113,7 @@ class PositionReconciler:
         self._resume_audit.append(
             ResumeAuditRecord(
                 operator_id=operator_id,
-                confirmed_at=datetime.now(),
+                confirmed_at=datetime.now(_TAIPEI_TZ),
                 snapshot_id=self._startup_snapshot_id,
             )
         )
@@ -126,7 +128,7 @@ class PositionReconciler:
         self._startup_frozen = True
         self._startup_safe = False
         self._startup_unsafe_reasons = []
-        self._startup_snapshot_id = datetime.now().isoformat()
+        self._startup_snapshot_id = datetime.now(_TAIPEI_TZ).isoformat()
 
         _, _, _, open_orders, continuity_ok = self._fetch_broker_state()
         if not continuity_ok:

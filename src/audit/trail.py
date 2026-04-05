@@ -6,7 +6,9 @@ import hashlib
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from typing import Any
 
 from src.core.types import AccountState, AuditRecord, AuditConfig
@@ -85,7 +87,7 @@ class AuditTrail:
 
         sequence_id = (latest.sequence_id + 1) if latest else 0
 
-        timestamp = datetime.now()
+        timestamp = datetime.now(_TAIPEI_TZ)
 
         engine_state_hash = hashlib.sha256(
             f"{account.equity}:{account.unrealized_pnl}".encode()

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 import structlog
 
@@ -63,7 +65,7 @@ class SignalCombiner:
         now: datetime | None = None,
     ) -> MarketSignal:
         """Combine sub-model outputs into a MarketSignal."""
-        now = now or datetime.now()
+        now = now or datetime.now(_TAIPEI_TZ)
         confidence_valid = self._check_freshness(direction, regime, volatility, now)
 
         # Suggested parameter hints from vol forecast

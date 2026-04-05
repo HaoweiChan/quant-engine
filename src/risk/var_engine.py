@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 import structlog
 
@@ -66,7 +68,7 @@ class VaREngine:
             expected_shortfall_99=es_99,
             position_var=position_var,
             correlation_matrix=corr,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(_TAIPEI_TZ),
             is_fallback=is_fallback,
         )
 
@@ -305,5 +307,5 @@ class VaREngine:
     def _empty_result() -> VaRResult:
         return VaRResult(
             var_99_1d=0.0, var_95_1d=0.0, var_99_10d=0.0, var_95_10d=0.0,
-            expected_shortfall_99=0.0, timestamp=datetime.now(),
+            expected_shortfall_99=0.0, timestamp=datetime.now(_TAIPEI_TZ),
         )

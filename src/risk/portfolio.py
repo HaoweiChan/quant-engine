@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 import structlog
 
@@ -31,7 +33,7 @@ class RiskSummary:
     portfolio_beta: float
     concentration: dict[str, float]
     stress_results: list[StressResult]
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(_TAIPEI_TZ))
 
 
 class PortfolioRiskEngine:

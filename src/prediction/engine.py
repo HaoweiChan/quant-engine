@@ -1,7 +1,9 @@
 """PredictionEngine facade: orchestrates feature pipeline, sub-models, and combiner."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from typing import Any
 
 import numpy as np
@@ -58,7 +60,7 @@ class PredictionEngine:
         now: datetime | None = None,
     ) -> MarketSignal:
         """Produce a single MarketSignal from the latest feature row."""
-        now = now or datetime.now()
+        now = now or datetime.now(_TAIPEI_TZ)
         cleaned, _ = clean_features(features)
         if cleaned.is_empty():
             return self._fallback_signal(now)
@@ -114,9 +116,9 @@ class PredictionEngine:
             ts: Any = (
                 timestamps[i] if timestamps is not None
                 else cleaned["timestamp"][i] if "timestamp" in cleaned.columns
-                else datetime.now()
+                else datetime.now(_TAIPEI_TZ)
             )
-            now_ts: datetime = ts if isinstance(ts, datetime) else datetime.now()
+            now_ts: datetime = ts if isinstance(ts, datetime) else datetime.now(_TAIPEI_TZ)
             price = float(prices[i])
             atr = float(atr_daily[i]) if atr_daily is not None else None
 
