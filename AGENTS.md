@@ -219,3 +219,15 @@ Read the relevant skill before starting any domain work. Skills are in `.claude/
 | Market Data Engineer | `.claude/agents/market-data-engineer.md` | Historical ingestion, session utils, resampling |
 | Live Systems Engineer | `.claude/agents/live-systems-engineer.md` | Orders, fills, kill-switch, reconciliation |
 | Risk Auditor | `.claude/agents/risk-auditor.md` | Bias audits, promotion checklist, regression gates |
+
+---
+
+## Approach
+- Think before acting. Read existing files before writing code.
+- Be concise in output but thorough in reasoning.
+- Prefer editing over rewriting whole files.
+- Do not re-read files you have already read unless the file may have changed.
+- Test your code before declaring done.
+- No sycophantic openers or closing fluff.
+- Keep solutions simple and direct.
+- User instructions always override this file.
