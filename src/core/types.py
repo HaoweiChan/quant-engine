@@ -1,6 +1,8 @@
 import uuid
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from typing import Any, Literal
 from dataclasses import dataclass, field
 
@@ -47,6 +49,8 @@ class MarketSnapshot:
     min_lot: float
     contract_specs: ContractSpecs
     volume: float = 0.0
+    bar_high: float | None = None
+    bar_low: float | None = None
 
     def __post_init__(self) -> None:
         if self.price <= 0:
@@ -162,15 +166,24 @@ class PyramidConfig:
     entry_conf_threshold: float = 0.65
     max_equity_risk_pct: float = 0.02
     long_only_compat_mode: bool = False
+    # Generic pyramid support (intraday + swing)
+    atr_key: str = "daily"
+    gamma: float | None = None
+    base_lots: float = 1.0
+    internal_atr_len: int = 10
 
     def __post_init__(self) -> None:
         if self.max_loss <= 0:
             raise ValueError("max_loss must be positive")
         if not (0.0 < self.max_equity_risk_pct <= 1.0):
             raise ValueError("max_equity_risk_pct must be in (0.0, 1.0]")
-        if len(self.lot_schedule) != self.max_levels:
-            n = len(self.lot_schedule)
-            raise ValueError(f"lot_schedule length ({n}) must equal max_levels ({self.max_levels})")
+        if self.gamma is None:
+            if len(self.lot_schedule) != self.max_levels:
+                n = len(self.lot_schedule)
+                raise ValueError(f"lot_schedule length ({n}) must equal max_levels ({self.max_levels})")
+        else:
+            if not (0.0 < self.gamma < 1.0):
+                raise ValueError("gamma must be in (0, 1)")
         if len(self.add_trigger_atr) != self.max_levels - 1:
             n = len(self.add_trigger_atr)
             raise ValueError(
@@ -431,7 +444,7 @@ class VaRResult:
     expected_shortfall_99: float
     position_var: dict[str, float] = field(default_factory=dict)
     correlation_matrix: list[list[float]] | None = None
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(_TAIPEI_TZ))
     is_fallback: bool = False
 
 

@@ -141,6 +141,7 @@ class PyramidEntryPolicy(EntryPolicy):
 class PyramidAddPolicy(AddPolicy):
     def __init__(self, config: PyramidConfig) -> None:
         self._config = config
+        self._price_history: deque[float] = deque(maxlen=config.internal_atr_len + 1)
 
     def should_add(
         self,
@@ -156,24 +157,51 @@ class PyramidAddPolicy(AddPolicy):
             return None
 
         entry_price = engine_state.positions[0].entry_price
-        daily_atr = snapshot.atr["daily"]
-        floating_profit = snapshot.price - entry_price
-        trigger_idx = engine_state.pyramid_level - 1
+        direction = engine_state.positions[0].direction
 
+        # Configurable ATR key with internal fallback
+        self._price_history.append(snapshot.price)
+        atr = snapshot.atr.get(self._config.atr_key)
+        if atr is None or atr <= 0:
+            n = len(self._price_history)
+            if n > self._config.internal_atr_len:
+                prices = list(self._price_history)
+                diffs = [abs(prices[i] - prices[i - 1]) for i in range(1, n)]
+                atr = sum(diffs) / len(diffs) * 1.6
+            else:
+                return None
+
+        # Direction-aware floating profit
+        if direction == "long":
+            floating_profit = snapshot.price - entry_price
+        else:
+            floating_profit = entry_price - snapshot.price
+
+        trigger_idx = engine_state.pyramid_level - 1
         if trigger_idx < 0 or trigger_idx >= len(self._config.add_trigger_atr):
             return None
 
-        trigger_threshold = self._config.add_trigger_atr[trigger_idx] * daily_atr
+        trigger_threshold = self._config.add_trigger_atr[trigger_idx] * atr
         if floating_profit < trigger_threshold:
             return None
 
-        lot_spec = self._config.lot_schedule[engine_state.pyramid_level]
-        total_lots = float(sum(lot_spec))
+        # Gamma-based sizing when configured, else lot_schedule
+        if self._config.gamma is not None:
+            level = engine_state.pyramid_level
+            lots = max(self._config.base_lots * (self._config.gamma ** level), 1.0)
+        else:
+            lot_spec = self._config.lot_schedule[engine_state.pyramid_level]
+            lots = float(sum(lot_spec))
+
         return AddDecision(
-            lots=total_lots,
+            lots=lots,
             contract_type="large",
             move_existing_to_breakeven=True,
         )
+
+    def reset(self) -> None:
+        """Clear internal state at session boundary."""
+        self._price_history.clear()
 
 
 class ChandelierStopPolicy(StopPolicy):

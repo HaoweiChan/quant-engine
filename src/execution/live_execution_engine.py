@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from typing import Any, Callable, Literal
 
 import structlog
@@ -113,7 +115,7 @@ class LiveExecutionEngine:
         self, result: ExecutionResult, timestamp: datetime | None = None
     ) -> None:
         position_id = result.order.parent_position_id
-        fill_ts = timestamp or datetime.now()
+        fill_ts = timestamp or datetime.now(_TAIPEI_TZ)
         if position_id and hasattr(self._engine, "close_position_by_disaster_stop"):
             self._engine.close_position_by_disaster_stop(
                 position_id=position_id,

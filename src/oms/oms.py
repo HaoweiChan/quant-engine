@@ -1,7 +1,9 @@
 """Order Management System: TWAP, VWAP, POV execution scheduling."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 from src.core.types import ChildOrder, OMSConfig, Order, SlicedOrder
 from src.oms.volume_profile import VolumeProfile
@@ -68,7 +70,7 @@ class OrderManagementSystem:
     def _twap(self, order: Order, market_data: dict[str, float]) -> SlicedOrder:
         n = self._config.twap_default_slices
         lot_per_slice = order.lots / n
-        now = datetime.now()
+        now = datetime.now(_TAIPEI_TZ)
         window = timedelta(minutes=self._config.max_execution_window_minutes)
         interval = window / n
         children: list[ChildOrder] = []
@@ -90,7 +92,7 @@ class OrderManagementSystem:
         profile = self._profile
         if profile is None or not profile.bucket_weights:
             return self._twap(order, market_data)
-        now = datetime.now()
+        now = datetime.now(_TAIPEI_TZ)
         window = timedelta(minutes=self._config.max_execution_window_minutes)
         n = len(profile.bucket_weights)
         interval = window / n
@@ -117,7 +119,7 @@ class OrderManagementSystem:
         bar_volume = market_data.get("volume", 0.0)
         max_per_slice = rate * bar_volume if bar_volume > 0 else order.lots
         remaining = order.lots
-        now = datetime.now()
+        now = datetime.now(_TAIPEI_TZ)
         interval = timedelta(minutes=5)
         children: list[ChildOrder] = []
         schedule: list[datetime] = []
@@ -142,7 +144,7 @@ class OrderManagementSystem:
         )
 
     def _passthrough(self, order: Order) -> SlicedOrder:
-        now = datetime.now()
+        now = datetime.now(_TAIPEI_TZ)
         child = ChildOrder(order=order, scheduled_time=now, slice_pct=1.0)
         return SlicedOrder(
             parent_order=order, child_orders=[child],
