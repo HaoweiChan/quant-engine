@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 from src.broker_gateway.types import LivePosition
 
@@ -35,7 +37,7 @@ class SessionSnapshot:
         peak = max(peak_equity, equity)
         dd = (peak - equity) / peak * 100 if peak > 0 else 0.0
         return cls(
-            timestamp=datetime.now(),
+            timestamp=datetime.now(_TAIPEI_TZ),
             equity=equity,
             unrealized_pnl=unrealized_pnl,
             realized_pnl=realized_pnl,
@@ -75,7 +77,7 @@ class TradingSession:
             strategy_slug=strategy_slug,
             symbol=symbol,
             status=status,
-            started_at=datetime.now(),
+            started_at=datetime.now(_TAIPEI_TZ),
             initial_equity=initial_equity,
             peak_equity=initial_equity,
         )

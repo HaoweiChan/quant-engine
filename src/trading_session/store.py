@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from pathlib import Path
 
 from src.trading_session.session import SessionSnapshot
@@ -60,7 +62,7 @@ class SnapshotStore:
             )
 
     def get_equity_curve(self, session_id: str, days: int = 30) -> list[tuple[datetime, float]]:
-        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(_TAIPEI_TZ) - timedelta(days=days)).isoformat()
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT timestamp, equity FROM session_snapshots "
@@ -108,14 +110,14 @@ class AccountEquityStore:
             conn.execute(
                 "INSERT INTO account_equity_history (account_id, timestamp, equity, margin_used) "
                 "VALUES (?, ?, ?, ?)",
-                (account_id, datetime.now().isoformat(), equity, margin_used),
+                (account_id, datetime.now(_TAIPEI_TZ).isoformat(), equity, margin_used),
             )
         self._last_write[account_id] = now
 
     def get_equity_curve(
         self, account_id: str, days: int = 30
     ) -> list[tuple[datetime, float]]:
-        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(_TAIPEI_TZ) - timedelta(days=days)).isoformat()
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT timestamp, equity FROM account_equity_history "
@@ -126,7 +128,7 @@ class AccountEquityStore:
 
     def get_today_open(self, account_id: str) -> float | None:
         """Return the first equity value recorded today, for daily PnL calculation."""
-        today = datetime.now().date().isoformat()
+        today = datetime.now(_TAIPEI_TZ).date().isoformat()
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT equity FROM account_equity_history "

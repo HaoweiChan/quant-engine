@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import datetime, timezone, timedelta
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +67,7 @@ class SessionDB:
         self._conn.close()
 
     def save(self, session: TradingSession) -> None:
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(_TAIPEI_TZ).isoformat()
         self._conn.execute(
             """INSERT OR REPLACE INTO sessions
                (session_id, account_id, strategy_slug, symbol, status,
@@ -81,7 +83,7 @@ class SessionDB:
         self._conn.commit()
 
     def update_status(self, session_id: str, status: str) -> None:
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(_TAIPEI_TZ).isoformat()
         self._conn.execute(
             "UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ?",
             (status, now, session_id),
@@ -89,7 +91,7 @@ class SessionDB:
         self._conn.commit()
 
     def update_deployed(self, session_id: str, candidate_id: int) -> None:
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(_TAIPEI_TZ).isoformat()
         self._conn.execute(
             "UPDATE sessions SET deployed_candidate_id = ?, updated_at = ? WHERE session_id = ?",
             (candidate_id, now, session_id),
@@ -142,7 +144,7 @@ class SessionDB:
         params: dict[str, Any],
         source: str = "dashboard",
     ) -> int:
-        now = datetime.now(UTC).isoformat()
+        now = datetime.now(_TAIPEI_TZ).isoformat()
         cur = self._conn.execute(
             """INSERT INTO deployment_log
                (deployed_at, account_id, session_id, strategy, symbol, candidate_id, params, source)
