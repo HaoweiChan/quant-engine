@@ -14,7 +14,9 @@ import structlog
 
 from typing import Any
 from pathlib import Path
-from datetime import UTC, datetime
+from datetime import datetime, timezone, timedelta
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from src.simulator.types import OptimizerResult
 
 logger = structlog.get_logger(__name__)
@@ -211,8 +213,8 @@ class ParamRegistry:
     @staticmethod
     def _resolve_module_to_slug(strategy: str) -> str:
         """Extract slug from module:factory format, e.g.
-        'src.strategies.intraday.trend_following.foo:create_foo_engine'
-        -> 'intraday/trend_following/foo'
+        'src.strategies.medium_term.trend_following.foo:create_foo_engine'
+        -> 'medium_term/trend_following/foo'
         """
         if ":" not in strategy:
             return strategy
@@ -262,7 +264,7 @@ class ParamRegistry:
                 ).fetchone()
                 if existing:
                     return existing[0]
-            now = datetime.now(UTC).isoformat(timespec="seconds")
+            now = datetime.now(_TAIPEI_TZ).isoformat(timespec="seconds")
             run_tag = tag or f"tool:{tool}"
             tf_notes = f"tf={timeframe}" if timeframe else None
             combined_notes = "; ".join(filter(None, [notes, tf_notes]))
@@ -348,7 +350,7 @@ class ParamRegistry:
         """Persist a full OptimizerResult. Returns the run_id."""
         self._validate_strategy_slug(strategy)
         trials_dicts = result.trials.to_dicts() if len(result.trials) > 0 else []
-        now = datetime.now(UTC).isoformat(timespec="seconds")
+        now = datetime.now(_TAIPEI_TZ).isoformat(timespec="seconds")
         cur = self._conn.execute(
             """INSERT INTO param_runs
                (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
@@ -457,6 +459,41 @@ class ParamRegistry:
         self._conn.commit()
         return run_id
 
+    # -- save_fullperiod_trial --------------------------------------------
+
+    def save_fullperiod_trial(
+        self,
+        run_id: int,
+        params: dict[str, Any],
+        metrics: dict[str, Any],
+    ) -> None:
+        """Persist a full-period validation trial (is_oos=2) for the winning params.
+
+        After a production_intent sweep, the winning params are re-run on
+        the full date range (not the IS fraction). This trial stores those
+        metrics so the dashboard can show the headline full-period result.
+        """
+        self._conn.execute(
+            """INSERT INTO param_trials
+               (run_id, params, sharpe, calmar, sortino, profit_factor,
+                win_rate, max_drawdown_pct, trade_count, total_pnl, alpha, is_oos)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2)""",
+            (
+                run_id,
+                json.dumps(params),
+                metrics.get("sharpe"),
+                metrics.get("calmar"),
+                metrics.get("sortino"),
+                metrics.get("profit_factor"),
+                metrics.get("win_rate"),
+                metrics.get("max_drawdown_pct"),
+                int(metrics.get("trade_count", 0)),
+                metrics.get("total_pnl"),
+                metrics.get("alpha"),
+            ),
+        )
+        self._conn.commit()
+
     # -- save_candidate ---------------------------------------------------
 
     def save_candidate(
@@ -503,7 +540,7 @@ class ParamRegistry:
                 "Candidate activation blocked: production-intent run failed promotion gates "
                 f"(run_id={row['run_id']}, gates={gate_results})"
             )
-        now = datetime.now(UTC).isoformat(timespec="seconds")
+        now = datetime.now(_TAIPEI_TZ).isoformat(timespec="seconds")
         self._conn.execute(
             "UPDATE param_candidates SET is_active = 0 WHERE strategy = ?",
             (row["strategy"],),
@@ -713,14 +750,24 @@ class ParamRegistry:
             run_id = r["id"]
             objective_col = _sanitize_objective_column(r["objective"])
             direction = "ASC" if r["objective_direction"] == "minimize" else "DESC"
-            best = self._conn.execute(
-                """SELECT params, sharpe, calmar, sortino, profit_factor,
-                          win_rate, max_drawdown_pct, trade_count, total_pnl, alpha
+            # Prefer full-period validation (is_oos=2), fall back to best IS trial (is_oos=0)
+            _trial_cols = """params, sharpe, calmar, sortino, profit_factor,
+                          win_rate, max_drawdown_pct, trade_count, total_pnl, alpha"""
+            best_full = self._conn.execute(
+                f"""SELECT {_trial_cols}
                    FROM param_trials
-                   WHERE run_id = ? AND is_oos = 0
-                   ORDER BY {} {} LIMIT 1""".format(objective_col, direction),
+                   WHERE run_id = ? AND is_oos = 2
+                   LIMIT 1""",
                 (run_id,),
             ).fetchone()
+            best_is = self._conn.execute(
+                f"""SELECT {_trial_cols}
+                   FROM param_trials
+                   WHERE run_id = ? AND is_oos = 0
+                   ORDER BY {objective_col} {direction} LIMIT 1""",
+                (run_id,),
+            ).fetchone()
+            best = best_full or best_is
             cand_row = self._conn.execute(
                 "SELECT COUNT(*) as cnt, MIN(id) as first_id FROM param_candidates WHERE run_id = ?",
                 (run_id,),
@@ -757,6 +804,7 @@ class ParamRegistry:
                 entry["best_metrics"] = {
                     col: best[col] for col in _METRIC_COLS if best[col] is not None
                 }
+                entry["metrics_source"] = "full_period" if best_full else "is_only"
             result.append(entry)
         return result
 
@@ -774,14 +822,21 @@ class ParamRegistry:
                 continue
             objective_col = _sanitize_objective_column(run["objective"])
             direction = "ASC" if run["objective_direction"] == "minimize" else "DESC"
-            best = self._conn.execute(
-                """SELECT params, sharpe, calmar, sortino, profit_factor,
-                          win_rate, max_drawdown_pct, trade_count, total_pnl, alpha
-                   FROM param_trials
-                   WHERE run_id = ? AND is_oos = 0
-                   ORDER BY {} {} LIMIT 1""".format(objective_col, direction),
+            _trial_cols = """params, sharpe, calmar, sortino, profit_factor,
+                          win_rate, max_drawdown_pct, trade_count, total_pnl, alpha"""
+            best_full = self._conn.execute(
+                f"""SELECT {_trial_cols}
+                   FROM param_trials WHERE run_id = ? AND is_oos = 2
+                   LIMIT 1""",
                 (rid,),
             ).fetchone()
+            best_is = self._conn.execute(
+                f"""SELECT {_trial_cols}
+                   FROM param_trials WHERE run_id = ? AND is_oos = 0
+                   ORDER BY {objective_col} {direction} LIMIT 1""",
+                (rid,),
+            ).fetchone()
+            best = best_full or best_is
             entry: dict[str, Any] = {
                 "run_id": rid,
                 "run_at": run["run_at"],
@@ -795,5 +850,6 @@ class ParamRegistry:
                 entry["best_metrics"] = {
                     col: best[col] for col in _METRIC_COLS if best[col] is not None
                 }
+                entry["metrics_source"] = "full_period" if best_full else "is_only"
             result.append(entry)
         return result
