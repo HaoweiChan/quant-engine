@@ -50,6 +50,8 @@ class BacktestResult:
     monthly_returns: dict[str, float]
     yearly_returns: dict[str, float]
     impact_report: ImpactReport | None = None
+    indicator_series: dict[str, list[float | None]] = field(default_factory=dict)
+    indicator_meta: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass

@@ -58,6 +58,7 @@ class BacktestRunner:
         bars: list[dict[str, Any]],
         signals: list[MarketSignal | None] | None = None,
         timestamps: list[datetime] | None = None,
+        force_flat_indices: set[int] | None = None,
     ) -> BacktestResult:
         engine = self._engine_factory()
         equity = self._initial_equity
@@ -65,7 +66,17 @@ class BacktestRunner:
         trade_log: list[Fill] = []
         ts_list: list[datetime] = []
         realized_pnl = 0.0
+        lots_held: list[float] = []
         open_entries: dict[str, tuple[float, float, str]] = {}
+
+        # Indicator collection — populated if engine has an IndicatorProvider attached
+        _ind_provider = getattr(engine, "indicator_provider", None)
+        _ind_series: dict[str, list[float | None]] = (
+            {k: [] for k in _ind_provider.snapshot()} if _ind_provider is not None else {}
+        )
+        _ind_meta: dict[str, dict] = (
+            _ind_provider.indicator_meta() if _ind_provider is not None else {}
+        )
 
         # Build EventEngine for event dispatch per bar
         ee = EventEngine(config=self._ee_config)
@@ -107,6 +118,12 @@ class BacktestRunner:
             ee.run()
 
             orders = engine.on_snapshot(snapshot, signal, account)
+
+            # Snapshot indicators after on_snapshot so values reflect the current bar
+            if _ind_provider is not None:
+                for k, v in _ind_provider.snapshot().items():
+                    if k in _ind_series:
+                        _ind_series[k].append(v)
 
             for order in orders:
                 # Dispatch OrderEvent
@@ -154,8 +171,33 @@ class BacktestRunner:
                 else:
                     open_entries[sym] = (fill.fill_price, fill.lots, fill.side)
 
+            # Force-close all positions at session end (intraday mode)
+            if force_flat_indices is not None and i in force_flat_indices and open_entries:
+                close_price = bar["close"]
+                for sym, (entry_price, lots, entry_side) in list(open_entries.items()):
+                    if entry_side == "buy":
+                        delta = close_price - entry_price
+                    else:
+                        delta = entry_price - close_price
+                    pnl = delta * lots * snapshot.point_value
+                    realized_pnl += pnl
+                    trade_log.append(Fill(
+                        order_type="market",
+                        side="sell" if entry_side == "buy" else "buy",
+                        symbol=sym,
+                        lots=lots,
+                        fill_price=close_price,
+                        slippage=0.0,
+                        timestamp=ts,
+                        reason="session_close",
+                    ))
+                open_entries.clear()
+                engine = self._engine_factory()
+                _ind_provider = getattr(engine, "indicator_provider", None)
+
             unrealized = self._calc_unrealized(open_entries, snapshot)
             equity = self._initial_equity + realized_pnl + unrealized
+            lots_held.append(sum(lt for _, lt, _ in open_entries.values()))
             equity_curve.append(equity)
 
         dd_series = drawdown_series(equity_curve)
@@ -169,7 +211,7 @@ class BacktestRunner:
         metrics["avg_latency_ms"] = impact_report.avg_latency_ms
         metrics["partial_fill_count"] = float(impact_report.partial_fill_count)
 
-        return BacktestResult(
+        result = BacktestResult(
             equity_curve=equity_curve,
             drawdown_series=dd_series,
             trade_log=trade_log,
@@ -178,6 +220,12 @@ class BacktestRunner:
             yearly_returns=y_returns,
             impact_report=impact_report,
         )
+        # Attach indicator data as instance attributes so older class definitions
+        # (loaded in persistent subprocesses) don't fail on unknown constructor kwargs.
+        result.indicator_series = _ind_series  # type: ignore[attr-defined]
+        result.indicator_meta = _ind_meta  # type: ignore[attr-defined]
+        result.lots_held_per_bar = lots_held  # type: ignore[attr-defined]
+        return result
 
     def _make_account(
         self,

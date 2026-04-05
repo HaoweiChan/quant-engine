@@ -58,6 +58,7 @@ def _run_single_trial(
     adapter_kwargs: dict[str, Any],
     initial_equity: float,
     slippage: float,
+    force_flat_indices: set[int] | None = None,
 ) -> dict[str, Any]:
     """Picklable worker: reconstruct adapter + factory, run one backtest trial."""
     mod = importlib.import_module(factory_module)
@@ -75,7 +76,7 @@ def _run_single_trial(
         fill_model=fill_model,
         initial_equity=initial_equity,
     )
-    result = runner.run(bars, timestamps=timestamps)
+    result = runner.run(bars, timestamps=timestamps, force_flat_indices=force_flat_indices)
     row: dict[str, Any] = dict(params)
     row.update(result.metrics)
     row["_trade_count"] = int(result.metrics.get("trade_count", 0.0))
@@ -122,6 +123,7 @@ class StrategyOptimizer:
         timestamps: list[datetime],
         objective: str = "sortino",
         is_fraction: float = 0.8,
+        force_flat_indices: set[int] | None = None,
     ) -> OptimizerResult:
         """Exhaustive grid search across all param combinations.
 
@@ -146,7 +148,15 @@ class StrategyOptimizer:
         oos_bars = bars[is_end:] if is_fraction < 1.0 else []
         oos_ts = timestamps[is_end:] if is_fraction < 1.0 else []
 
-        rows = self._dispatch(engine_factory, param_list, is_bars, is_ts)
+        # Remap force_flat_indices to IS/OOS slices
+        is_ffi = (
+            {idx for idx in force_flat_indices if idx < is_end} if force_flat_indices else None
+        )
+        oos_ffi = (
+            {idx - is_end for idx in force_flat_indices if idx >= is_end} if force_flat_indices and oos_bars else None
+        )
+
+        rows = self._dispatch(engine_factory, param_list, is_bars, is_ts, force_flat_indices=is_ffi)
 
         # Validate objective; skip error rows from parallel failures
         if rows:
@@ -167,9 +177,9 @@ class StrategyOptimizer:
         )
         best_params = {k: df[k][0] for k in keys}
 
-        best_is = self._run_backtest(engine_factory, best_params, is_bars, is_ts)
+        best_is = self._run_backtest(engine_factory, best_params, is_bars, is_ts, force_flat_indices=is_ffi)
         best_oos = (
-            self._run_backtest(engine_factory, best_params, oos_bars, oos_ts)
+            self._run_backtest(engine_factory, best_params, oos_bars, oos_ts, force_flat_indices=oos_ffi)
             if oos_bars else None
         )
 
@@ -205,6 +215,7 @@ class StrategyOptimizer:
         train_bars: int,
         test_bars: int,
         objective: str = "sortino",
+        force_flat_indices: set[int] | None = None,
     ) -> WalkForwardResult:
         """Rolling walk-forward: optimize on IS, verify on OOS, compute efficiency.
 
@@ -231,14 +242,24 @@ class StrategyOptimizer:
             w_oos_bars = bars[is_end:oos_end]
             w_oos_ts = timestamps[is_end:oos_end]
 
+            # Remap absolute force_flat_indices to window-local indices
+            w_is_ffi = (
+                {idx - is_start for idx in force_flat_indices if is_start <= idx < is_end}
+                if force_flat_indices else None
+            )
+            w_oos_ffi = (
+                {idx - is_end for idx in force_flat_indices if is_end <= idx < oos_end}
+                if force_flat_indices else None
+            )
+
             # Optimize on IS
             is_opt = self.grid_search(
                 engine_factory, param_grid, w_is_bars, w_is_ts,
-                objective=objective, is_fraction=1.0,
+                objective=objective, is_fraction=1.0, force_flat_indices=w_is_ffi,
             )
             best = is_opt.best_params
             is_trades = int(is_opt.best_is_result.metrics.get("trade_count", 0.0))
-            oos_result = self._run_backtest(engine_factory, best, w_oos_bars, w_oos_ts)
+            oos_result = self._run_backtest(engine_factory, best, w_oos_bars, w_oos_ts, force_flat_indices=w_oos_ffi)
 
             windows.append(WindowResult(
                 window_idx=w,
@@ -269,6 +290,7 @@ class StrategyOptimizer:
         objective: str = "sortino",
         is_fraction: float = 0.8,
         seed: int | None = None,
+        force_flat_indices: set[int] | None = None,
     ) -> OptimizerResult:
         """Random search over continuous param bounds.
 
@@ -297,7 +319,15 @@ class StrategyOptimizer:
         oos_bars = bars[is_end:] if is_fraction < 1.0 else []
         oos_ts = timestamps[is_end:] if is_fraction < 1.0 else []
 
-        rows = self._dispatch(engine_factory, param_list, is_bars, is_ts)
+        # Remap force_flat_indices to IS/OOS slices
+        is_ffi = (
+            {idx for idx in force_flat_indices if idx < is_end} if force_flat_indices else None
+        )
+        oos_ffi = (
+            {idx - is_end for idx in force_flat_indices if idx >= is_end} if force_flat_indices and oos_bars else None
+        )
+
+        rows = self._dispatch(engine_factory, param_list, is_bars, is_ts, force_flat_indices=is_ffi)
 
         if rows:
             _validate_objective(objective, rows)
@@ -317,9 +347,9 @@ class StrategyOptimizer:
         )
         best_params = {k: df[k][0] for k in keys}
 
-        best_is = self._run_backtest(engine_factory, best_params, is_bars, is_ts)
+        best_is = self._run_backtest(engine_factory, best_params, is_bars, is_ts, force_flat_indices=is_ffi)
         best_oos = (
-            self._run_backtest(engine_factory, best_params, oos_bars, oos_ts)
+            self._run_backtest(engine_factory, best_params, oos_bars, oos_ts, force_flat_indices=oos_ffi)
             if oos_bars else None
         )
 
@@ -354,6 +384,7 @@ class StrategyOptimizer:
         params: dict[str, Any],
         bars: list[dict[str, Any]],
         timestamps: list[datetime],
+        force_flat_indices: set[int] | None = None,
     ) -> BacktestResult:
         engine = factory(**params)
         runner = BacktestRunner(
@@ -362,7 +393,7 @@ class StrategyOptimizer:
             fill_model=self._fill_model,
             initial_equity=self._initial_equity,
         )
-        return runner.run(bars, timestamps=timestamps)
+        return runner.run(bars, timestamps=timestamps, force_flat_indices=force_flat_indices)
 
     def _dispatch(
         self,
@@ -370,9 +401,13 @@ class StrategyOptimizer:
         param_list: list[dict[str, Any]],
         bars: list[dict[str, Any]],
         timestamps: list[datetime],
+        force_flat_indices: set[int] | None = None,
     ) -> list[dict[str, Any]]:
         if self._n_jobs == 1 or len(param_list) <= 1:
-            return [self._run_trial_serial(factory, p, bars, timestamps) for p in param_list]
+            return [
+                self._run_trial_serial(factory, p, bars, timestamps, force_flat_indices=force_flat_indices)
+                for p in param_list
+            ]
 
         # Parallel path: serialize factory reference
         mod_name = inspect.getmodule(factory).__name__  # type: ignore[union-attr]
@@ -389,6 +424,7 @@ class StrategyOptimizer:
                     mod_name, fn_name, params,
                     a_mod, a_cls, {},
                     self._initial_equity, self._slippage,
+                    force_flat_indices,
                 )
                 futures_map[f] = params
 
@@ -407,8 +443,9 @@ class StrategyOptimizer:
         params: dict[str, Any],
         bars: list[dict[str, Any]],
         timestamps: list[datetime],
+        force_flat_indices: set[int] | None = None,
     ) -> dict[str, Any]:
-        result = self._run_backtest(factory, params, bars, timestamps)
+        result = self._run_backtest(factory, params, bars, timestamps, force_flat_indices=force_flat_indices)
         row: dict[str, Any] = dict(params)
         row.update(result.metrics)
         row["_trade_count"] = int(result.metrics.get("trade_count", 0.0))

@@ -112,9 +112,9 @@ def avg_holding_period(trade_log: list[Fill]) -> float:
     entries: dict[str, datetime] = {}
     durations: list[float] = []
     for fill in trade_log:
-        if fill.reason == "entry" or fill.reason.startswith("add_level"):
+        if fill.reason == "entry":
             entries[fill.symbol] = fill.timestamp
-        elif fill.symbol in entries:
+        elif fill.symbol in entries and not fill.reason.startswith("add_level"):
             dt = (fill.timestamp - entries[fill.symbol]).total_seconds() / 3600
             durations.append(dt)
             del entries[fill.symbol]
@@ -210,22 +210,20 @@ def compute_all_metrics(
 
 def _trade_pnls(trade_log: list[Fill]) -> list[float]:
     pnls: list[float] = []
-    entry_prices: dict[str, float] = {}
-    entry_lots: dict[str, float] = {}
-    entry_sides: dict[str, str] = {}
+    # Track ALL entry/add fills per symbol to correctly handle pyramid positions.
+    open_fills: dict[str, list[tuple[float, float, str]]] = {}  # symbol -> [(price, lots, side)]
     for fill in trade_log:
         if fill.reason == "entry" or fill.reason.startswith("add_level"):
-            entry_prices[fill.symbol] = fill.fill_price
-            entry_lots[fill.symbol] = fill.lots
-            entry_sides[fill.symbol] = fill.side
-        elif fill.symbol in entry_prices:
-            side = entry_sides[fill.symbol]
-            if side == "buy":
-                pnl = (fill.fill_price - entry_prices[fill.symbol]) * entry_lots[fill.symbol]
-            else:
-                pnl = (entry_prices[fill.symbol] - fill.fill_price) * entry_lots[fill.symbol]
-            pnls.append(pnl)
-            del entry_prices[fill.symbol]
-            del entry_lots[fill.symbol]
-            del entry_sides[fill.symbol]
+            open_fills.setdefault(fill.symbol, []).append(
+                (fill.fill_price, fill.lots, fill.side)
+            )
+        elif fill.symbol in open_fills:
+            entries = open_fills.pop(fill.symbol)
+            total_pnl = 0.0
+            for ep, elots, eside in entries:
+                if eside == "buy":
+                    total_pnl += (fill.fill_price - ep) * elots
+                else:
+                    total_pnl += (ep - fill.fill_price) * elots
+            pnls.append(total_pnl)
     return pnls
