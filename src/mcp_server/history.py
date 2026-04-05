@@ -1,7 +1,9 @@
 """Session-scoped optimization history tracking."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone, timedelta
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from typing import Any
 
 
@@ -28,7 +30,7 @@ class OptimizationHistory:
             "metrics": metrics,
             "scenario": scenario,
             "strategy": strategy,
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": datetime.now(_TAIPEI_TZ).isoformat(),
         }
         if data_source is not None:
             run["data_source"] = data_source

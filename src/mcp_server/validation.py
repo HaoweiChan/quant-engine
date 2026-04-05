@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone, timedelta
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from pathlib import Path
 from typing import Any
 
@@ -90,7 +92,7 @@ def list_strategy_files() -> list[dict[str, Any]]:
         results.append({
             "filename": relative_stem,
             "size_bytes": stat.st_size,
-            "modified": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+            "modified": datetime.fromtimestamp(stat.st_mtime, tz=_TAIPEI_TZ).isoformat(),
         })
     return results
 

@@ -63,8 +63,8 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": (
                         "Strategy slug (path-like or legacy alias). "
-                        "Examples: 'daily/trend_following/pyramid_wrapper', "
-                        "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
+                        "Examples: 'swing/trend_following/pyramid_wrapper', "
+                        "'short_term/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
                         "External: 'module:factory'."
                     ),
                     "default": "pyramid",
@@ -115,8 +115,8 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": (
                         "Strategy slug (path-like or legacy alias). "
-                        "Examples: 'daily/trend_following/pyramid_wrapper', "
-                        "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
+                        "Examples: 'swing/trend_following/pyramid_wrapper', "
+                        "'short_term/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
                         "External: 'module:factory'."
                     ),
                     "default": "pyramid",
@@ -124,6 +124,16 @@ TOOLS: list[Tool] = [
                 "strategy_params": {
                     "type": "object",
                     "description": "Override strategy parameters (merged with defaults)",
+                },
+                "intraday": {
+                    "type": "boolean",
+                    "description": (
+                        "Enable intraday mode: force-close all positions at each "
+                        "TAIFEX session end, use intraday buy-and-hold benchmark "
+                        "(buy first bar, sell last bar per session). Required for "
+                        "intraday strategies to get fair benchmark comparison."
+                    ),
+                    "default": False,
                 },
             },
             "required": ["symbol", "start", "end"],
@@ -168,8 +178,8 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": (
                         "Strategy slug (path-like or legacy alias). "
-                        "Examples: 'daily/trend_following/pyramid_wrapper', "
-                        "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
+                        "Examples: 'swing/trend_following/pyramid_wrapper', "
+                        "'short_term/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'. "
                         "External: 'module:factory'."
                     ),
                     "default": "pyramid",
@@ -240,8 +250,8 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": (
                         "Strategy slug (path-like or legacy alias). "
-                        "Examples: 'daily/trend_following/pyramid_wrapper', "
-                        "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'."
+                        "Examples: 'swing/trend_following/pyramid_wrapper', "
+                        "'short_term/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'."
                     ),
                     "default": "pyramid",
                 },
@@ -362,8 +372,8 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": (
                         "Strategy slug (path-like or legacy alias). "
-                        "Examples: 'daily/trend_following/pyramid_wrapper', "
-                        "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'."
+                        "Examples: 'swing/trend_following/pyramid_wrapper', "
+                        "'short_term/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'."
                     ),
                     "default": "pyramid",
                 },
@@ -378,9 +388,9 @@ TOOLS: list[Tool] = [
             "Always read before modifying to understand the current "
             "implementation. "
             "Pass filename='__list__' to see all available strategy files. "
-            "Files use path-like stems: intraday/breakout/ta_orb, "
-            "intraday/mean_reversion/atr_mean_reversion, "
-            "daily/trend_following/pyramid_wrapper. "
+            "Files use path-like stems: short_term/breakout/ta_orb, "
+            "short_term/mean_reversion/atr_mean_reversion, "
+            "swing/trend_following/pyramid_wrapper. "
             "Legacy flat names (ta_orb, atr_mean_reversion) also work."
         ),
         inputSchema={
@@ -390,7 +400,7 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": (
                         "Strategy file path-like stem (without .py), "
-                        "e.g. 'intraday/breakout/ta_orb' or '__list__' to list all files"
+                        "e.g. 'short_term/breakout/ta_orb' or '__list__' to list all files"
                     ),
                 },
             },
@@ -405,7 +415,7 @@ TOOLS: list[Tool] = [
             "(EntryPolicy, AddPolicy, or StopPolicy). "
             "Content is validated before saving: syntax errors, missing ABC methods, and "
             "forbidden imports (os, sys, subprocess, socket, requests, shutil) are rejected. "
-            "Supports path-like filenames (e.g., 'intraday/breakout/new_strat') — "
+            "Supports path-like filenames (e.g., 'short_term/breakout/new_strat') — "
             "parent directories are created automatically. "
             "After writing, the strategy registry is invalidated so the new strategy "
             "is immediately discoverable. "
@@ -426,7 +436,7 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": (
                         "Strategy file path-like stem (without .py), "
-                        "e.g. 'intraday/breakout/ta_orb'"
+                        "e.g. 'short_term/breakout/ta_orb'"
                     ),
                 },
                 "content": {
@@ -457,7 +467,7 @@ TOOLS: list[Tool] = [
             "current values, allowed ranges, and descriptions. "
             "Also includes available scenario presets. "
             "CALL THIS FIRST before any optimization session. "
-            "Strategy slug can be path-like (e.g. 'intraday/breakout/ta_orb') "
+            "Strategy slug can be path-like (e.g. 'short_term/breakout/ta_orb') "
             "or a legacy flat name (e.g. 'ta_orb'). "
             "IMPORTANT: After calling this, classify the strategy type using the typology "
             "in optimize-strategy skill Step 0 before proceeding. Strategy types: "
@@ -472,10 +482,10 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": (
                         "Strategy slug (path-like or legacy alias). "
-                        "Examples: 'daily/trend_following/pyramid_wrapper', "
-                        "'intraday/breakout/ta_orb', 'atr_mean_reversion'."
+                        "Examples: 'swing/trend_following/pyramid_wrapper', "
+                        "'short_term/breakout/ta_orb', 'atr_mean_reversion'."
                     ),
-                    "default": "daily/trend_following/pyramid_wrapper",
+                    "default": "swing/trend_following/pyramid_wrapper",
                 },
             },
         },
@@ -534,8 +544,8 @@ TOOLS: list[Tool] = [
                     "type": "string",
                     "description": (
                         "Strategy slug (path-like or legacy alias). "
-                        "Examples: 'daily/trend_following/pyramid_wrapper', "
-                        "'intraday/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'."
+                        "Examples: 'swing/trend_following/pyramid_wrapper', "
+                        "'short_term/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'."
                     ),
                     "default": "pyramid",
                 },
@@ -562,10 +572,15 @@ TOOLS: list[Tool] = [
                     "enum": ["breakout", "mean_reversion", "trend_following"],
                     "description": "Strategy category",
                 },
-                "timeframe": {
+                "holding_period": {
                     "type": "string",
-                    "enum": ["intraday", "daily", "multi_day"],
-                    "description": "Strategy timeframe",
+                    "enum": ["short_term", "medium_term", "swing"],
+                    "description": "Expected holding period: short_term (<4h), medium_term (4h-5d), swing (1-4wk)",
+                },
+                "signal_timeframe": {
+                    "type": "string",
+                    "enum": ["1min", "5min", "15min", "1hour", "daily"],
+                    "description": "Bar timeframe used for signal generation",
                 },
                 "description": {
                     "type": "string",
@@ -581,7 +596,7 @@ TOOLS: list[Tool] = [
                     "description": "Initial parameter definitions: {name: {type, default, min, max}}",
                 },
             },
-            "required": ["name", "category", "timeframe"],
+            "required": ["name", "category", "holding_period", "signal_timeframe"],
         },
     ),
 ]
@@ -628,6 +643,7 @@ def register_tools(app: Server) -> None:
                     end=arguments["end"],
                     strategy=arguments.get("strategy", "pyramid"),
                     strategy_params=arguments.get("strategy_params"),
+                    intraday=arguments.get("intraday", False),
                 )
                 if "metrics" in result:
                     history.append(
@@ -719,9 +735,9 @@ def register_tools(app: Server) -> None:
                 if filename == "__list__":
                     return _json_response({"files": list_strategy_files()})
                 # Resolve alias for legacy flat names
-                from src.strategies.registry import _SLUG_ALIASES
+                from src.strategies.registry import _resolve_slug
 
-                resolved = _SLUG_ALIASES.get(filename, filename)
+                resolved = _resolve_slug(filename)
                 filepath = _STRATEGIES_DIR / f"{resolved}.py"
                 if not filepath.exists():
                     available = list_strategy_files()
@@ -757,9 +773,13 @@ def register_tools(app: Server) -> None:
                 filepath = _STRATEGIES_DIR / f"{filename}.py"
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 filepath.write_text(content)
+                import sys as _sys
                 from src.strategies.registry import invalidate
 
                 invalidate()
+                # Evict cached module so next import picks up the new file.
+                module_key = "src.strategies." + filename.replace("/", ".")
+                _sys.modules.pop(module_key, None)
                 stale_candidates_deactivated = 0
                 deactivation_warning = None
                 try:
@@ -806,7 +826,7 @@ def register_tools(app: Server) -> None:
                 )
 
             if name == "get_parameter_schema":
-                strategy = arguments.get("strategy", "daily/trend_following/pyramid_wrapper")
+                strategy = arguments.get("strategy", "swing/trend_following/pyramid_wrapper")
                 schema = get_strategy_parameter_schema(strategy)
                 return _json_response(schema)
 
@@ -830,18 +850,20 @@ def register_tools(app: Server) -> None:
                 return _json_response(result)
 
             if name == "scaffold_strategy":
-                from src.strategies import StrategyCategory, StrategyTimeframe
+                from src.strategies import HoldingPeriod, SignalTimeframe, StrategyCategory
                 from src.strategies.scaffold import scaffold_strategy
 
                 try:
                     cat = StrategyCategory(arguments["category"])
-                    tf = StrategyTimeframe(arguments["timeframe"])
+                    hp = HoldingPeriod(arguments["holding_period"])
+                    stf = SignalTimeframe(arguments["signal_timeframe"])
                 except ValueError as e:
                     return _json_response({"error": str(e)})
                 result = scaffold_strategy(
                     name=arguments["name"],
                     category=cat,
-                    timeframe=tf,
+                    holding_period=hp,
+                    signal_timeframe=stf,
                     description=arguments.get("description", ""),
                     policies=arguments.get("policies"),
                     params=arguments.get("params"),

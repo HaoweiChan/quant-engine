@@ -11,6 +11,24 @@ from typing import Any
 from src.simulator.types import PRESETS, PathConfig
 
 
+def _compute_force_flat_indices(timestamps: list) -> set[int]:
+    """Compute the set of bar indices where force-flat (session close) should occur.
+
+    Adds an index whenever the session ID changes between consecutive bars, and
+    always adds the final bar index so the last open position is closed.
+    """
+    from src.data.session_utils import session_id as _session_id
+
+    indices: set[int] = set()
+    for idx in range(len(timestamps) - 1):
+        curr_sid = _session_id(timestamps[idx])
+        next_sid = _session_id(timestamps[idx + 1])
+        if curr_sid != next_sid and curr_sid != "CLOSED":
+            indices.add(idx)
+    indices.add(len(timestamps) - 1)
+    return indices
+
+
 def _compute_code_hash(slug: str) -> tuple[str | None, str | None]:
     """Compute strategy hash and code, returning None on FileNotFoundError."""
     try:
@@ -39,12 +57,14 @@ def resolve_factory(strategy: str) -> Any:
     try:
         info = get_info(strategy)
         mod = importlib.import_module(info.module)
+        importlib.reload(mod)
         return getattr(mod, info.factory)
     except KeyError:
         pass
     if ":" in strategy:
         mod_path, fn_name = strategy.rsplit(":", 1)
         mod = importlib.import_module(mod_path)
+        importlib.reload(mod)
         return getattr(mod, fn_name)
     available = list(get_all().keys())
     raise ValueError(f"Unknown strategy '{strategy}'. Available: {available}")
@@ -365,6 +385,7 @@ def run_backtest_realdata_for_mcp(
     strategy: str = "pyramid",
     strategy_params: dict[str, Any] | None = None,
     initial_equity: float = 2_000_000.0,
+    intraday: bool = False,
 ) -> dict[str, Any]:
     """Run a backtest on real historical data from the DB.
 
@@ -392,13 +413,21 @@ def run_backtest_realdata_for_mcp(
         return {"error": f"No data for {symbol} in {start}–{end}"}
 
     resolved_slug = resolve_strategy_slug(strategy)
+
+    # Auto-detect intraday mode from strategy metadata (slug prefix or StrategyTimeframe)
+    if not intraday:
+        from src.strategies.registry import is_intraday_strategy
+        intraday = is_intraday_strategy(resolved_slug)
+
     clamped_params, param_warnings = ({} if strategy_params is None else strategy_params), []
     if strategy_params:
         from src.strategies.registry import validate_and_clamp
 
         clamped_params, param_warnings = validate_and_clamp(resolved_slug, strategy_params)
 
-    bar_agg = int((strategy_params or {}).get("bar_agg", 1))
+    from src.strategies.registry import get_bar_agg
+    meta_bar_agg = get_bar_agg(resolved_slug)
+    bar_agg = int((strategy_params or {}).get("bar_agg", meta_bar_agg))
 
     # Compute true daily ATR from daily high-low ranges, not 1-min bar ranges
     _daily_hl: dict[str, tuple[float, float]] = {}
@@ -441,14 +470,54 @@ def run_backtest_realdata_for_mcp(
         for b in raw
     ]
     timestamps = [b.timestamp for b in raw]
-    result = runner.run(bars, timestamps=timestamps)
+
+    # Intraday mode: compute session boundaries for force-close
+    force_flat_indices: set[int] | None = None
+    if intraday and len(timestamps) > 1:
+        force_flat_indices = _compute_force_flat_indices(timestamps)
+
+    result = runner.run(bars, timestamps=timestamps, force_flat_indices=force_flat_indices)
 
     eq = np.array(result.equity_curve)
     strat_returns = np.diff(eq) / eq[:-1] if len(eq) > 1 else np.array([0.0])
     strat_returns = strat_returns[np.isfinite(strat_returns)]
-    closes = np.array([b.close for b in raw], dtype=float)
-    bnh_returns = np.diff(closes) / closes[:-1] if len(closes) > 1 else np.array([0.0])
-    bnh_eq = initial_equity * np.cumprod(np.concatenate([[1.0], 1 + bnh_returns]))
+    if intraday:
+        # Intraday B&H at bar-level: within each session track equity as if
+        # buying session open and holding; between sessions equity stays flat.
+        # This produces len(raw)+1 values, matching strategy equity_curve.
+        from src.data.session_utils import session_id as _sid
+
+        bnh_eq_vals: list[float] = [initial_equity]
+        session_start_equity = initial_equity
+        session_open_price: float | None = None
+        prev_sid: str | None = None
+        for b in raw:
+            sid = _sid(b.timestamp)
+            if sid == "CLOSED":
+                bnh_eq_vals.append(bnh_eq_vals[-1])
+                continue
+            if sid != prev_sid:
+                # New session: lock in equity, record new open
+                session_start_equity = bnh_eq_vals[-1]
+                session_open_price = b.open
+                prev_sid = sid
+            if session_open_price and session_open_price > 0:
+                bnh_eq_vals.append(
+                    session_start_equity * (b.close / session_open_price)
+                )
+            else:
+                bnh_eq_vals.append(bnh_eq_vals[-1])
+        bnh_eq = np.array(bnh_eq_vals)
+        bnh_returns = (
+            np.diff(bnh_eq) / bnh_eq[:-1]
+            if len(bnh_eq) > 1
+            else np.array([0.0])
+        )
+        bnh_returns = bnh_returns[np.isfinite(bnh_returns)]
+    else:
+        closes = np.array([b.close for b in raw], dtype=float)
+        bnh_returns = np.diff(closes) / closes[:-1] if len(closes) > 1 else np.array([0.0])
+        bnh_eq = initial_equity * np.cumprod(np.concatenate([[1.0], 1 + bnh_returns]))
 
     # Aggregate per-bar equity to true daily returns (last equity per date)
     daily_eq: dict[str, float] = {}
@@ -477,6 +546,25 @@ def run_backtest_realdata_for_mcp(
     bnh_total_ret = (bnh_eq[-1] - bnh_eq[0]) / bnh_eq[0] if len(bnh_eq) > 1 and bnh_eq[0] > 0 else 0.0
     alpha = float(strat_total_ret - bnh_total_ret)
     base["metrics"]["alpha"] = alpha
+
+    # Leverage-adjusted alpha
+    lots_held = getattr(result, "lots_held_per_bar", None)
+    if lots_held and len(lots_held) > 0:
+        avg_leverage = sum(lots_held) / len(lots_held)
+        alpha_lev = float(strat_total_ret / max(avg_leverage, 1.0) - bnh_total_ret)
+    else:
+        avg_leverage = 1.0
+        alpha_lev = alpha
+    base["metrics"]["alpha_leverage_adjusted"] = alpha_lev
+    base["metrics"]["avg_leverage"] = float(avg_leverage)
+
+    # Benchmark Sortino
+    bnh_downside = bnh_returns[bnh_returns < 0]
+    if len(bnh_downside) > 0 and np.std(bnh_downside) > 0:
+        bnh_sortino = float(np.mean(bnh_returns) / np.std(bnh_downside) * np.sqrt(periods_per_year))
+    else:
+        bnh_sortino = 0.0
+    base["metrics"]["bnh_sortino"] = bnh_sortino
     base["daily_returns"] = true_daily_returns
     base["equity_curve"] = result.equity_curve
     base["bnh_returns"] = bnh_returns
@@ -485,6 +573,10 @@ def run_backtest_realdata_for_mcp(
     base["trade_pnls"] = _extract_trade_pnls(result.trade_log)
     base["trade_signals"] = _serialize_trade_log(result.trade_log)
     base["timeframe_minutes"] = bar_agg
+    _ind_series = getattr(result, "indicator_series", {})
+    if _ind_series:
+        base["indicator_series"] = _ind_series
+        base["indicator_meta"] = getattr(result, "indicator_meta", {})
     ts_epochs = [
         int(ts.timestamp()) if hasattr(ts, "timestamp") else int(ts)
         for ts in timestamps
@@ -494,6 +586,7 @@ def run_backtest_realdata_for_mcp(
         ts_epochs = [ts_epochs[0] - 1] + ts_epochs
     base["equity_timestamps"] = ts_epochs
     base["param_warnings"] = param_warnings
+    base["intraday"] = intraday
     strategy_hash, strategy_code = _compute_code_hash(resolved_slug)
     if strategy_hash is not None:
         base["strategy_hash"] = strategy_hash
@@ -511,7 +604,7 @@ def run_backtest_realdata_for_mcp(
             tool="run_backtest_realdata",
             start=start,
             end=end,
-            timeframe=f"{bar_agg}min",
+            timeframe=f"{bar_agg}min{'|intraday' if intraday else ''}",
             initial_capital=initial_equity,
             strategy_hash=strategy_hash,
             strategy_code=strategy_code,
@@ -720,6 +813,11 @@ def run_sweep_for_mcp(
 
     clamped_base, param_warnings = validate_and_clamp(resolved_slug, base_params)
 
+    from src.strategies.registry import get_bar_agg
+    meta_bar_agg = get_bar_agg(resolved_slug)
+    sweep_bar_agg = int(clamped_base.pop("bar_agg", meta_bar_agg))
+    sweep_params = {k: v for k, v in sweep_params.items() if k != "bar_agg"}
+
     if mode == "production_intent":
         if not (symbol and start and end):
             return {
@@ -751,6 +849,22 @@ def run_sweep_for_mcp(
             }
             for b in raw
         ]
+        if sweep_bar_agg > 1:
+            raw = _aggregate_bars(raw, sweep_bar_agg)
+            bars = [
+                {
+                    "symbol": symbol,
+                    "price": b.close,
+                    "open": b.open,
+                    "high": b.high,
+                    "low": b.low,
+                    "close": b.close,
+                    "volume": float(b.volume),
+                    "daily_atr": daily_atr,
+                    "timestamp": b.timestamp,
+                }
+                for b in raw
+            ]
         timestamps = [b.timestamp for b in raw]
         source_label = f"real:{symbol}:{start}:{end}"
     else:
@@ -758,6 +872,13 @@ def run_sweep_for_mcp(
         paths = generate_paths(1, path_config)
         bars, timestamps = _bars_from_path(paths[0], path_config, timeframe)
         source_label = f"synthetic:{scenario}"
+
+    # Compute force_flat_indices for intraday strategies (real data only)
+    from src.strategies.registry import is_intraday_strategy
+    sweep_force_flat: set[int] | None = None
+    if is_intraday_strategy(resolved_slug) and mode == "production_intent" and len(timestamps) > 1:
+        sweep_force_flat = _compute_force_flat_indices(timestamps)
+
     adapter = _get_adapter()
     factory = resolve_factory(resolved_slug)
     optimizer = StrategyOptimizer(
@@ -785,6 +906,7 @@ def run_sweep_for_mcp(
             n_trials=n_samples,
             objective=metric,
             is_fraction=is_fraction,
+            force_flat_indices=sweep_force_flat,
         )
     else:
         # Grid search
@@ -798,20 +920,24 @@ def run_sweep_for_mcp(
             effective_train = train_bars or max(int(len(bars) * 0.6), 50)
             effective_test = test_bars or max(int(len(bars) * 0.2), 20)
             if effective_train + effective_test <= len(bars):
-                wf = optimizer.walk_forward(
-                    engine_factory=lambda **p: factory(**{**clamped_base, **p}),
-                    param_grid=param_grid,
-                    bars=bars,
-                    timestamps=timestamps,
-                    train_bars=effective_train,
-                    test_bars=effective_test,
-                    objective=metric,
-                )
-                walk_forward_summary = {
-                    "windows": len(wf.windows),
-                    "efficiency": wf.efficiency,
-                    "combined_oos_metrics": wf.combined_oos_metrics,
-                }
+                try:
+                    wf = optimizer.walk_forward(
+                        engine_factory=lambda **p: factory(**{**clamped_base, **p}),
+                        param_grid=param_grid,
+                        bars=bars,
+                        timestamps=timestamps,
+                        train_bars=effective_train,
+                        test_bars=effective_test,
+                        objective=metric,
+                        force_flat_indices=sweep_force_flat,
+                    )
+                    walk_forward_summary = {
+                        "windows": len(wf.windows),
+                        "efficiency": wf.efficiency,
+                        "combined_oos_metrics": wf.combined_oos_metrics,
+                    }
+                except ValueError as _wf_err:
+                    walk_forward_summary = {"error": str(_wf_err)}
         result = optimizer.grid_search(
             engine_factory=lambda **p: factory(**{**clamped_base, **p}),
             param_grid=param_grid,
@@ -819,6 +945,7 @@ def run_sweep_for_mcp(
             timestamps=timestamps,
             objective=metric,
             is_fraction=is_fraction,
+            force_flat_indices=sweep_force_flat,
         )
 
     trials_data = result.trials.to_dicts() if len(result.trials) > 0 else []
@@ -831,13 +958,20 @@ def run_sweep_for_mcp(
 
         registry = ParamRegistry()
         search = "random" if n_samples is not None else "grid"
+        # Build notes with timeframe info (matches run_backtest_realdata format)
+        _is_intra = timeframe in ("intraday", "1m")
+        _sweep_tf_str = f"{sweep_bar_agg}min{'|intraday' if _is_intra else ''}" if mode == "production_intent" and symbol else None
+        _sweep_notes = f"tf={_sweep_tf_str}" if _sweep_tf_str else None
         run_id = registry.save_run(
             result=result,
             strategy=resolved_slug,
-            symbol=source_label,
+            symbol=symbol,
             objective=metric,
             search_type=search,
             source="mcp",
+            train_start=start if mode == "production_intent" else None,
+            train_end=end if mode == "production_intent" else None,
+            notes=_sweep_notes,
             initial_capital=2_000_000.0,
             strategy_hash=strategy_hash,
             strategy_code=strategy_code,
@@ -850,6 +984,47 @@ def run_sweep_for_mcp(
         registry.close()
     except Exception:
         pass
+
+    # Auto-validate: run full-period backtest with winning params
+    full_period_metrics = None
+    if mode == "production_intent" and run_id is not None and result.best_params:
+        try:
+            from src.simulator.monte_carlo import TAIFEX_BARS_PER_DAY as _TBPD
+            _is_intraday = timeframe in ("intraday", "1m")
+            _fp_ppy = _TBPD * 252.0 if _is_intraday else 252.0
+            if not _is_intraday and len(bars) > 10:
+                _trading_days = len({str(b.get("timestamp", ""))[:10] for b in bars})
+                if _trading_days > 0:
+                    _fp_ppy = (len(bars) / _trading_days) * 252.0
+            full_runner = _build_runner(
+                resolved_slug, {**clamped_base, **result.best_params},
+                periods_per_year=_fp_ppy,
+            )
+            full_result = full_runner.run(
+                bars, timestamps=timestamps, force_flat_indices=sweep_force_flat,
+            )
+            full_metrics = dict(full_result.metrics)
+            full_metrics["total_pnl"] = full_result.equity_curve[-1] - full_result.equity_curve[0]
+            # Compute alpha vs buy-and-hold
+            _eq = full_result.equity_curve
+            if len(_eq) > 1 and _eq[0] > 0 and len(bars) > 1:
+                _strat_ret = (_eq[-1] - _eq[0]) / _eq[0]
+                _bnh_ret = (bars[-1]["close"] - bars[0]["close"]) / bars[0]["close"]
+                full_metrics["alpha"] = _strat_ret - _bnh_ret
+            from src.strategies.param_registry import ParamRegistry as _PR2
+            _reg2 = _PR2()
+            _reg2.save_fullperiod_trial(
+                run_id=run_id, params=result.best_params, metrics=full_metrics,
+            )
+            _reg2.close()
+            _fp_keys = [
+                "sharpe", "calmar", "sortino", "profit_factor",
+                "win_rate", "max_drawdown_pct", "trade_count", "total_pnl", "alpha",
+            ]
+            full_period_metrics = {k: full_metrics.get(k) for k in _fp_keys}
+        except Exception:
+            pass
+
     out: dict[str, Any] = {
         "scenario": scenario,
         "strategy": strategy,
@@ -886,6 +1061,8 @@ def run_sweep_for_mcp(
         out["pareto_candidates"] = pareto_candidates
     if walk_forward_summary is not None:
         out["walk_forward"] = walk_forward_summary
+    if full_period_metrics is not None:
+        out["full_period_metrics"] = full_period_metrics
     if mode == "production_intent":
         out["evaluation_data"] = {"symbol": symbol, "start": start, "end": end}
     return out
@@ -970,7 +1147,7 @@ def run_stress_for_mcp(
 
 
 def get_strategy_parameter_schema(
-    strategy: str = "daily/trend_following/pyramid_wrapper",
+    strategy: str = "swing/trend_following/pyramid_wrapper",
 ) -> dict[str, Any]:
     """Return parameter schema with current values, types, and ranges."""
     from src.strategies.registry import get_schema
@@ -1075,11 +1252,10 @@ def get_active_params_for_mcp(strategy: str = "pyramid") -> dict[str, Any]:
     if detail:
         return {**detail, "source": "registry"}
     # Fallback to schema defaults
-    slug = "pyramid_wrapper" if strategy == "pyramid" else strategy
     try:
         from src.strategies.registry import get_defaults
 
-        defaults = get_defaults(slug)
+        defaults = get_defaults(strategy)
         return {
             "params": defaults,
             "source": "defaults",
