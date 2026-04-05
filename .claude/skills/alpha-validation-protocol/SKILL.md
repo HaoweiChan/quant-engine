@@ -66,6 +66,9 @@ Final: report ONLY validation period metrics, never training period metrics
 - N_trades ≥ 30 per validation window (low sample → inconclusive)
 - Strategy must be tested on BOTH day session and night session separately
 - Profit Factor ≥ 1.2 on combined validation periods
+- **Intraday strategies**: must use `intraday=true` in `run_backtest_realdata`
+  to enforce engine-level session-close and use intraday B&H benchmark.
+  Strategy Sharpe must exceed intraday B&H Sharpe (not full-period B&H).
 
 ---
 

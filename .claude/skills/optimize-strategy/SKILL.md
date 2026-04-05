@@ -11,6 +11,19 @@ Strategy optimization orchestration skill. Defines the 5-stage closed loop
 and tells you which reference files to read at each stage. Read this once at
 session start, then follow the stages.
 
+## Default Optimization Goal (for `optimize [strategy]` requests)
+
+Unless the user specifies otherwise, optimize for these criteria:
+
+**Find a parameter set with a maximum of 3 variables that:**
+- Maintains positive expectancy across both In-Sample and Out-of-Sample datasets
+- Achieves OOS/IS Sharpe ratio > **1.0** (robust generalization)
+- Demonstrates stable parameter landscape: variance < 15% in adjacent ±15% shifts
+- **Survives 50% penalty to execution slippage** (e.g., 1.5 ticks/side on TX)
+- **Generates ≥ 200 trades per year** (statistical validity)
+
+This goal ensures strategies are robust to real execution conditions and parameter perturbation while maintaining alpha that isn't driven by overfitting.
+
 ## Step 0: Classify Strategy Type (MANDATORY)
 
 Before ANY diagnosis or optimization, classify the strategy into one of
@@ -95,6 +108,20 @@ Check the schema's `recommended_timeframe` field:
 
 Always pass `timeframe` and `n_bars` to `run_backtest`, `run_monte_carlo`,
 and `run_parameter_sweep` when working with intraday strategies.
+
+### Intraday Mode (`intraday=true`)
+
+When running `run_backtest_realdata` for intraday strategies, **always set
+`intraday=true`**. This enables two critical behaviors:
+
+1. **Engine-level force-close**: All open positions are forcibly liquidated at
+   each TAIFEX session end (day 13:45, night 05:00), regardless of strategy
+   policy. This guarantees no inter-session carry.
+2. **Intraday B&H benchmark**: The buy-and-hold comparison becomes session-scoped
+   (buy first bar open, sell last bar close per session) instead of full-period.
+   This is the only fair benchmark for intraday strategies.
+
+The `intraday` flag is persisted in run history and shown in the dashboard.
 
 **Hard rule:** synthetic outputs (`run_backtest`, `run_monte_carlo`, or
 `run_parameter_sweep` in `research` mode) are exploratory only. They can guide

@@ -17,8 +17,9 @@ quant-engine backtest/MCP/optimization pipeline.
 Before starting, decide:
 - **Strategy slug**: lowercase_snake_case identifier (e.g., `vwap_rubber_band`, `ema_pullback`)
 - **Category**: `breakout`, `mean_reversion`, or `trend_following`
-- **Timeframe**: `intraday` (1min/5min bar) or `daily` (daily bars)
-- **Exit style**: force-close at session end, trailing stop, trend-reversal, or hybrid
+- **Holding period**: `short_term` (<4h), `medium_term` (4h-5d), or `swing` (1-4wk)
+- **Signal timeframe**: `1min`, `5min`, `15min`, `1hour`, or `daily` (bar used for signal generation)
+- **Stop architecture**: `intraday` (flatten at session end) or `swing` (hold overnight)
 
 ## Step 1: Scaffold the Strategy (Recommended)
 
@@ -28,7 +29,8 @@ Use the `scaffold_strategy` MCP tool to generate correct boilerplate:
 scaffold_strategy(
     name="vwap_rubber_band",
     category="mean_reversion",
-    timeframe="intraday",
+    holding_period="short_term",
+    signal_timeframe="1min",
     description="VWAP deviation-based mean reversion scalper",
     params={
         "vwap_dev_mult": {"type": "float", "default": 2.0, "min": 1.0, "max": 4.0},
@@ -38,17 +40,18 @@ scaffold_strategy(
 
 This returns a complete Python file with:
 - `PARAM_SCHEMA` with your params
-- `STRATEGY_META` with enum classification
+- `STRATEGY_META` with enum classification (new taxonomy)
 - Entry/Stop policy class stubs
 - `create_<slug>_engine()` factory with matching signature
 
 The file is placed in the correct subdirectory:
-`src/strategies/<timeframe>/<category>/<name>.py`
+`src/strategies/<holding_period>/<category>/<name>.py`
 
 **CLI alternative:**
 ```bash
 python -m src.strategies.scaffold vwap_rubber_band \
-    --category mean_reversion --timeframe intraday --write
+    --category mean_reversion --holding-period short_term \
+    --signal-timeframe 1min --write
 ```
 
 ## Step 2: Write and Implement
@@ -57,7 +60,7 @@ Use `write_strategy_file` to save the scaffolded content:
 
 ```
 write_strategy_file(
-    filename="intraday/mean_reversion/vwap_rubber_band",
+    filename="short_term/mean_reversion/vwap_rubber_band",
     content=<scaffold content>,
 )
 ```
@@ -72,7 +75,7 @@ The registry uses recursive scanning and finds any module with `PARAM_SCHEMA` + 
 ```python
 from src.strategies.registry import get_info, validate_schemas
 
-info = get_info("intraday/mean_reversion/vwap_rubber_band")
+info = get_info("short_term/mean_reversion/vwap_rubber_band")
 assert info is not None
 
 errors = validate_schemas()
@@ -84,7 +87,7 @@ assert not errors
 ```
 run_backtest(
     scenario="strong_bull",
-    strategy="intraday/mean_reversion/vwap_rubber_band",
+    strategy="short_term/mean_reversion/vwap_rubber_band",
     n_bars=21000,
     timeframe="intraday",
 )
@@ -101,13 +104,16 @@ backtest-engine MCP's 5-stage loop.
 
 ```
 src/strategies/
-├── intraday/
+├── short_term/               # Holding < 4 hours (session-scoped)
 │   ├── breakout/
 │   │   └── ta_orb.py
 │   ├── mean_reversion/
 │   │   └── atr_mean_reversion.py
+│   └── (no trend_following)
+├── medium_term/              # Holding 4h - 5 days
 │   └── trend_following/
-├── daily/
+│       └── ema_trend_pullback.py
+├── swing/                    # Holding 1-4 weeks
 │   └── trend_following/
 │       └── pyramid_wrapper.py
 ├── _session_utils.py       # shared TAIFEX session helpers
