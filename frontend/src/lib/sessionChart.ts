@@ -188,6 +188,8 @@ export function buildSequentialTimes(
     if (idx < 0 || idx >= bars.length) return null;
     return bars[idx].timestamp;
   };
+  // Track last date shown to avoid repeating the same date on every tick
+  let lastDateLabel = "";
   const formatTick = (time: number): string => {
     const ts = resolveTimestamp(time);
     if (!ts) return "";
@@ -195,23 +197,24 @@ export function buildSequentialTimes(
     if (!parts) return "";
     const minuteOfDay = parts.hour * 60 + parts.minute;
     const hhmm = `${parts.hour.toString().padStart(2, "0")}:${parts.minute.toString().padStart(2, "0")}`;
+    const dateStr = `${parts.month}/${parts.day}`;
     const isSessionOpen = minuteOfDay === DAY_START_MIN || minuteOfDay === NIGHT_START_MIN;
     const isSessionClose = minuteOfDay === DAY_END_MIN || minuteOfDay === nightCloseBucketMin;
     if (stepSeconds >= 86400) {
-      return `${parts.month}/${parts.day}`;
+      return dateStr;
     }
-    if (isSessionOpen) {
-      return `${parts.month}/${parts.day} ${hhmm}`;
+    // Day transition: show date only (no time)
+    if (dateStr !== lastDateLabel) {
+      lastDateLabel = dateStr;
+      return dateStr;
     }
-    if (isSessionClose) {
-      return hhmm;
+    // Same day: show HH:MM at appropriate intervals
+    if (isSessionOpen || isSessionClose) return hhmm;
+    if (stepSeconds > 15 * 60) {
+      return parts.minute === 0 ? hhmm : "";
     }
-    if (stepSeconds <= 15 * 60 && parts.minute === 0) {
-      return hhmm;
-    }
-    if (stepSeconds <= 5 * 60 && parts.minute % 30 === 0) {
-      return hhmm;
-    }
+    if (stepSeconds <= 15 * 60 && parts.minute === 0) return hhmm;
+    if (stepSeconds <= 5 * 60 && parts.minute % 30 === 0) return hhmm;
     return "";
   };
   return { times, formatTick };

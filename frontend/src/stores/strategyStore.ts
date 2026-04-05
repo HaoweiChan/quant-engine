@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { StrategyInfo } from "@/lib/api";
-import { fetchStrategies, fetchActiveParams } from "@/lib/api";
+import { fetchStrategies, fetchActiveParams, reloadStrategies } from "@/lib/api";
 
 
 interface StrategyState {
@@ -14,8 +14,10 @@ interface StrategyState {
   initialCapital: number;
   maxLoss: number;
   params: Record<string, number>;
+  intraday: boolean;
   loading: boolean;
   locked: boolean;
+  setIntraday: (v: boolean) => void;
   setStrategy: (slug: string) => void;
   setSymbol: (s: string) => void;
   setDates: (start: string, end: string) => void;
@@ -28,6 +30,7 @@ interface StrategyState {
   setLoading: (v: boolean) => void;
   setLocked: (v: boolean) => void;
   loadStrategies: () => Promise<void>;
+  reloadStrategies: () => Promise<void>;
 }
 
 export const useStrategyStore = create<StrategyState>((set, get) => ({
@@ -41,8 +44,11 @@ export const useStrategyStore = create<StrategyState>((set, get) => ({
   initialCapital: 2_000_000,
   maxLoss: 500_000,
   params: {},
+  intraday: false,
   loading: false,
   locked: false,
+
+  setIntraday: (intraday) => set({ intraday }),
 
   setStrategy: (slug) => {
     set({ strategy: slug });
@@ -89,6 +95,14 @@ export const useStrategyStore = create<StrategyState>((set, get) => ({
 
   loadStrategies: async () => {
     const strategies = await fetchStrategies();
+    set({ strategies });
+    if (strategies.length > 0 && !get().strategy) {
+      get().setStrategy(strategies[0].slug);
+    }
+  },
+
+  reloadStrategies: async () => {
+    const strategies = await reloadStrategies();
     set({ strategies });
     if (strategies.length > 0 && !get().strategy) {
       get().setStrategy(strategies[0].slug);

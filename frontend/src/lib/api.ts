@@ -29,10 +29,19 @@ export interface CoverageEntry {
   to: string;
 }
 
+export type HoldingPeriod = "short_term" | "medium_term" | "swing";
+export type SignalTimeframe = "1min" | "5min" | "15min" | "1hour" | "daily";
+export type StopArchitecture = "intraday" | "swing";
+
 export interface StrategyInfo {
   slug: string;
   name: string;
   param_grid: Record<string, { label: string; type: string; default: number[]; value?: number }>;
+  holding_period?: HoldingPeriod;
+  signal_timeframe?: SignalTimeframe;
+  stop_architecture?: StopArchitecture;
+  category?: string;
+  tradeable_sessions?: string[];
 }
 
 export interface TradeSignal {
@@ -57,6 +66,9 @@ export interface BacktestResult {
   symbol?: string;
   start?: string;
   end?: string;
+  intraday?: boolean;
+  indicator_series?: Record<string, (number | null)[]>;
+  indicator_meta?: Record<string, { panel: string; color: string; label: string }>;
 }
 
 export interface MCSimulationResult {
@@ -126,6 +138,11 @@ export async function fetchStrategies(): Promise<StrategyInfo[]> {
   return fetchJSON("/api/strategies");
 }
 
+export async function reloadStrategies(): Promise<StrategyInfo[]> {
+  await fetchJSON("/api/strategies/reload", { method: "POST" });
+  return fetchStrategies();
+}
+
 export async function runBacktest(params: {
   strategy: string;
   symbol: string;
@@ -137,6 +154,7 @@ export async function runBacktest(params: {
   slippage_bps?: number;
   commission_bps?: number;
   provenance?: Record<string, unknown>;
+  intraday?: boolean;
 }): Promise<BacktestResult> {
   return fetchJSON("/api/backtest/run", {
     method: "POST",
@@ -338,6 +356,7 @@ export interface ParamRun {
   notes?: string | null;
   initial_capital?: number | null;
   strategy_hash?: string | null;
+  metrics_source?: "full_period" | "is_only";
 }
 
 export async function fetchActiveParams(strategy: string): Promise<ActiveParams> {
