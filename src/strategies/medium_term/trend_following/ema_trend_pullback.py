@@ -1,19 +1,19 @@
-"""EMA Trend Pullback Strategy (intraday bars, TAIFEX TX/MTX).
+"""EMA Trend Pullback Strategy — Multi-Timeframe (1h trend, 15m entry).
 
 Strategy class: Trend-following / pullback
-Timeframe     : Intraday (1-min bars from backtest engine)
+Entry TF      : 15m bars (received from facade via signal_timeframe metadata)
+Signal TF     : 1h bars (internally aggregated: 4 × 15m via bar_agg_trend)
 
 Entry logic
 -----------
 Long:
-  1. EMA(trend) is rising  (large-trend filter)
-  2. Price pulled back into EMA(fast)/EMA(slow) zone  -> price <= EMA(slow)
+  1. EMA(trend) rising on 1h bars      (trend direction filter)
+  2. Price pulled back into EMA zone on 15m bars (price <= EMA(slow))
   3. Pullback depth >= min_pullback_pts below EMA(fast)
-  4. RSI(short) < oversold threshold (structural stress)
-  5. ADX >= adx_min  (market is trending, not chopping)
-  6. VWAP alignment: price below VWAP (discount) for long
+  4. RSI(short) < oversold threshold   (structural stress, 15m bars)
+  5. ADX >= adx_min                    (market is trending, 15m smoothed)
+  6. VWAP alignment: price below VWAP  (discount)
   7. Volume confirmation: bar volume above rolling average
-  8. Not in force-close window
 
 Short: mirror image.
 
@@ -22,10 +22,10 @@ Exit logic (StopPolicy)
   Initial stop  : entry +/- atr_sl_mult x ATR
   T1 target     : entry +/- atr_t1_mult x ATR  ->  move stop to breakeven
   EMA(slow) trail : once at breakeven, trail stop at EMA(slow) +/- trail_buf.
-  Max hold bars : time-exit after N bars to prevent bleed.
-  Force close   : 13:25-13:45 day / 04:50-05:00 night  ->  stop = price.
+  Max hold bars : time-exit after N 15m bars to prevent bleed.
+  No forced session close — medium-term, holds overnight.
 
-ATR approximation: SMA(|delta-close|, atr_len) x 1.6
+ATR approximation: SMA(|delta-close|, atr_len) x 1.6  (computed on 15m bars)
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ from src.core.types import (
     Position,
 )
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
-from src.strategies._session_utils import in_day_session, in_force_close, in_night_session
+from src.strategies._session_utils import in_day_session, in_night_session
 
 if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
@@ -55,24 +55,25 @@ def _mean(vals: list[float]) -> float:
 
 
 PARAM_SCHEMA: dict[str, dict] = {
-    "bar_agg": {
-        "type": "int", "default": 3, "min": 1, "max": 15,
-        "description": "Aggregate N raw bars into one before indicator update.",
-        "grid": [1, 3, 5],
+    "bar_agg_trend": {
+        "type": "int", "default": 4, "min": 1, "max": 16,
+        "description": "Aggregate N incoming bars for trend EMA (4 = 1h on 15m feed). 0=no aggregation.",
+        "grid": [2, 4, 8],
     },
     "ema_fast": {
-        "type": "int", "default": 5, "min": 3, "max": 50,
-        "description": "Fast EMA period (pullback zone upper).",
-        "grid": [5, 8, 13],
+        "type": "int", "default": 5, "min": 3, "max": 30,
+        "description": "Fast EMA period on entry TF bars (pullback zone upper).",
+        "grid": [3, 5, 8, 13],
     },
     "ema_slow": {
-        "type": "int", "default": 34, "min": 10, "max": 80,
-        "description": "Slow EMA period (pullback zone lower).",
-        "grid": [15, 21, 34],
+        "type": "int", "default": 13, "min": 5, "max": 50,
+        "description": "Slow EMA period on entry TF bars (pullback zone lower).",
+        "grid": [8, 13, 21, 34],
     },
     "ema_trend": {
-        "type": "int", "default": 144, "min": 30, "max": 300,
-        "description": "Trend EMA period (direction filter).",
+        "type": "int", "default": 8, "min": 4, "max": 48,
+        "description": "Trend EMA period on signal TF bars (direction filter). 8 bars at 1h = 8h.",
+        "grid": [4, 6, 8, 12, 16, 24],
     },
     "ema_align": {
         "type": "int", "default": 1, "min": 0, "max": 1,
@@ -81,52 +82,52 @@ PARAM_SCHEMA: dict[str, dict] = {
     },
     "rsi_len": {
         "type": "int", "default": 3, "min": 2, "max": 7,
-        "description": "Short RSI period for structural stress confirmation.",
-        "grid": [3, 5],
+        "description": "Short RSI period for structural stress confirmation (on entry TF).",
+        "grid": [2, 3, 5],
     },
     "rsi_oversold": {
-        "type": "float", "default": 35.0, "min": 10.0, "max": 50.0,
+        "type": "float", "default": 40.0, "min": 10.0, "max": 55.0,
         "description": "RSI oversold threshold for long pullback entries.",
-        "grid": [25.0, 30.0, 35.0, 40.0, 45.0],
+        "grid": [30.0, 35.0, 40.0, 45.0, 50.0],
     },
     "rsi_overbought": {
-        "type": "float", "default": 65.0, "min": 55.0, "max": 90.0,
+        "type": "float", "default": 60.0, "min": 50.0, "max": 90.0,
         "description": "RSI overbought threshold for short pullback entries.",
-        "grid": [60.0, 65.0, 70.0, 75.0],
+        "grid": [55.0, 60.0, 65.0, 70.0],
     },
     "vol_len": {
-        "type": "int", "default": 20, "min": 5, "max": 100,
-        "description": "Rolling window for volume average.",
+        "type": "int", "default": 20, "min": 5, "max": 60,
+        "description": "Rolling window for volume average (on entry TF).",
         "grid": [10, 20],
     },
     "vol_mult": {
-        "type": "float", "default": 0.8, "min": 0.5, "max": 2.0,
-        "description": "Min volume spike vs rolling average for entry.",
-        "grid": [0.8, 1.0, 1.2],
+        "type": "float", "default": 0.8, "min": 0.3, "max": 2.0,
+        "description": "Min volume vs rolling average for entry.",
+        "grid": [0.5, 0.8, 1.0, 1.2],
     },
     "vwap_filter": {
-        "type": "int", "default": 1, "min": 0, "max": 1,
+        "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Require VWAP directional alignment (1=on, 0=off).",
         "grid": [0, 1],
     },
     "min_pullback_pts": {
-        "type": "float", "default": 3.0, "min": 2.0, "max": 30.0,
+        "type": "float", "default": 5.0, "min": 2.0, "max": 40.0,
         "description": "Min pullback depth in points to filter wick touches.",
-        "grid": [3.0, 5.0, 8.0, 12.0],
+        "grid": [3.0, 5.0, 8.0, 12.0, 20.0],
     },
     "atr_len": {
-        "type": "int", "default": 10, "min": 5, "max": 50,
-        "description": "ATR calculation period.",
+        "type": "int", "default": 10, "min": 5, "max": 30,
+        "description": "ATR calculation period (on entry TF bars).",
     },
     "atr_sl_mult": {
-        "type": "float", "default": 2.0, "min": 0.5, "max": 3.0,
+        "type": "float", "default": 1.6, "min": 0.5, "max": 3.0,
         "description": "ATR multiplier for initial stop loss.",
-        "grid": [1.5, 2.0, 2.5, 3.0],
+        "grid": [1.0, 1.5, 1.6, 2.0, 2.5, 3.0],
     },
     "atr_t1_mult": {
-        "type": "float", "default": 5.0, "min": 1.5, "max": 8.0,
+        "type": "float", "default": 6.0, "min": 1.5, "max": 10.0,
         "description": "ATR multiplier for T1 target (breakeven trigger).",
-        "grid": [3.0, 4.0, 5.0],
+        "grid": [4.0, 5.0, 6.0, 7.0, 8.0],
     },
     "atr_ceil": {
         "type": "float", "default": 0.0, "min": 0.0, "max": 5.0,
@@ -135,47 +136,62 @@ PARAM_SCHEMA: dict[str, dict] = {
     },
     "adx_len": {
         "type": "int", "default": 14, "min": 7, "max": 30,
-        "description": "ADX calculation period.",
+        "description": "ADX calculation period (1-min smoothed).",
     },
     "adx_min": {
-        "type": "float", "default": 30.0, "min": 10.0, "max": 40.0,
+        "type": "float", "default": 25.0, "min": 10.0, "max": 40.0,
         "description": "Minimum ADX for entry (trend strength filter).",
-        "grid": [20.0, 25.0, 30.0],
+        "grid": [15.0, 20.0, 25.0, 30.0],
     },
     "ema_trail_buffer_pts": {
-        "type": "float", "default": 5.0, "min": 0.0, "max": 20.0,
+        "type": "float", "default": 12.0, "min": 0.0, "max": 30.0,
         "description": "Points buffer for EMA trail stop after breakeven.",
-        "grid": [2.0, 5.0, 8.0],
+        "grid": [5.0, 8.0, 10.0, 12.0, 15.0],
     },
     "max_hold_bars": {
-        "type": "int", "default": 120, "min": 10, "max": 300,
-        "description": "Max bars to hold before time-exit.",
-        "grid": [60, 90, 120, 180],
+        "type": "int", "default": 200, "min": 4, "max": 300,
+        "description": "Max entry-TF bars to hold before time-exit (200 bars at 15m = 50h ~2 days).",
+        "grid": [96, 144, 200, 240, 300],
     },
     "allow_night": {
         "type": "int", "default": 1, "min": 0, "max": 1,
         "description": "Allow entries during night session (0=no, 1=yes).",
     },
+    "max_pyramid_levels": {
+        "type": "int", "default": 4, "min": 1, "max": 4,
+        "description": "Max pyramid levels (1=no adds, 4=entry + 3 adds with gamma decay).",
+        "grid": [1, 2, 3, 4],
+    },
+    "pyramid_gamma": {
+        "type": "float", "default": 0.7, "min": 0.3, "max": 1.0,
+        "description": "Anti-martingale decay: Size_k = base_lots * gamma^k.",
+        "grid": [0.5, 0.7, 0.85],
+    },
+    "pyramid_trigger_atr": {
+        "type": "float", "default": 1.5, "min": 0.5, "max": 5.0,
+        "description": "ATR multiple for first add trigger. Level N triggers at N * this value.",
+        "grid": [1.0, 1.5, 2.0, 3.0],
+    },
 }
 
 STRATEGY_META: dict = {
     "category": StrategyCategory.TREND_FOLLOWING,
-    "signal_timeframe": SignalTimeframe.ONE_MIN,
+    "signal_timeframe": SignalTimeframe.FIFTEEN_MIN,
     "holding_period": HoldingPeriod.MEDIUM_TERM,
-    "stop_architecture": StopArchitecture.INTRADAY,
-    "expected_duration_minutes": (180, 720),
+    "stop_architecture": StopArchitecture.SWING,
+    "expected_duration_minutes": (120, 720),
     "tradeable_sessions": ["day", "night"],
-    "bars_per_day": 1050,
+    "bars_per_day": 70,
     "presets": {
-        "quick": {"n_bars": 21000, "note": "~1 month (20 trading days)"},
-        "standard": {"n_bars": 63000, "note": "~3 months (60 trading days)"},
-        "full_year": {"n_bars": 264600, "note": "~1 year (252 trading days)"},
+        "quick": {"n_bars": 1400, "note": "~1 month (20 trading days × 70 bars)"},
+        "standard": {"n_bars": 4200, "note": "~3 months (60 trading days × 70 bars)"},
+        "full_year": {"n_bars": 17640, "note": "~1 year (252 trading days × 70 bars)"},
     },
     "description": (
-        "EMA Trend Pullback is an intraday trend-following strategy. "
-        "Enters on pullbacks to EMA zone confirmed by RSI-3 stress, "
-        "ADX >= 30 trend filter, and VWAP alignment. "
-        "Exits via ATR T1 -> breakeven, then EMA trail. Max hold 120 bars."
+        "EMA Trend Pullback multi-timeframe: receives 15m bars from facade, "
+        "internally aggregates to 1h for trend direction. Pullback entry on "
+        "15m bars confirmed by RSI-3 stress, ADX >= 25, and VWAP alignment. "
+        "Exits via ATR T1 -> breakeven, then EMA trail. Holds overnight."
     ),
 }
 
@@ -183,7 +199,7 @@ _ATR_SCALE = 1.6
 
 
 class _Indicators:
-    """Rolling indicators with EMA-smoothed ADX, VWAP, volume, and bar aggregation."""
+    """Rolling indicators with separate trend TF (1h) and entry TF (15m)."""
 
     def __init__(
         self,
@@ -194,7 +210,7 @@ class _Indicators:
         atr_len: int,
         adx_len: int,
         vol_len: int = 20,
-        bar_agg: int = 1,
+        bar_agg_trend: int = 4,
     ) -> None:
         self._n_fast = ema_fast
         self._n_slow = ema_slow
@@ -203,17 +219,24 @@ class _Indicators:
         self._atr_len = atr_len
         self._adx_len = adx_len
         self._vol_len = vol_len
-        self._bar_agg = max(bar_agg, 1)
+        # Entry TF: no aggregation (facade delivers 15m bars directly)
+        self._bar_agg = 1
         self._agg_count = 0
-        max_buf = max(ema_trend + 2, rsi_len + 2, atr_len + 2, adx_len * 3)
+        # Trend TF aggregation (e.g., 4 × 15m = 1h)
+        self._bar_agg_trend = max(bar_agg_trend, 1) if bar_agg_trend > 0 else 1
+        self._agg_count_trend = 0
+
+        max_buf = max(ema_fast + 2, ema_slow + 2, rsi_len + 2, atr_len + 2)
         self._closes: deque[float] = deque(maxlen=max_buf + 1)
         self._volumes: deque[float] = deque(maxlen=max(vol_len, 1) + 1)
+        self._trend_closes: deque[float] = deque(maxlen=ema_trend + 2)
+
         self._last_ts: datetime | None = None
-        self._last_vol: float = 0.0
         self._ema_fast_v: float | None = None
         self._ema_slow_v: float | None = None
         self._ema_trend_v: float | None = None
         self._ema_trend_prev: float | None = None
+
         self.ema_fast: float | None = None
         self.ema_slow: float | None = None
         self.ema_trend: float | None = None
@@ -223,7 +246,7 @@ class _Indicators:
         self.atr_avg: float | None = None
         self._atr_history: deque[float] = deque(maxlen=50)
         self.vol_ratio: float | None = None
-        # EMA-smoothed ADX (responsive, like keltner_vwap_breakout)
+
         self.adx: float = 0.0
         self._prev_price: float | None = None
         self._adx_alpha = 2.0 / (adx_len + 1)
@@ -231,7 +254,7 @@ class _Indicators:
         self._minus_dm_ema: float | None = None
         self._atr_dm_ema: float | None = None
         self._adx_ema: float | None = None
-        # VWAP (daily reset)
+
         self.vwap: float | None = None
         self._vwap_date = None
         self._cum_pv = 0.0
@@ -241,16 +264,22 @@ class _Indicators:
         if ts == self._last_ts:
             return
         self._last_ts = ts
-        self._last_vol = volume
+
         self._update_vwap(ts, price, volume)
         self._update_adx(price)
+
         self._agg_count += 1
-        if self._agg_count < self._bar_agg:
-            return
-        self._agg_count = 0
-        self._closes.append(price)
-        self._volumes.append(volume)
-        self._compute(price)
+        if self._agg_count >= self._bar_agg:
+            self._agg_count = 0
+            self._closes.append(price)
+            self._volumes.append(volume)
+            self._compute_entry(price)
+
+        self._agg_count_trend += 1
+        if self._agg_count_trend >= self._bar_agg_trend:
+            self._agg_count_trend = 0
+            self._trend_closes.append(price)
+            self._compute_trend(price)
 
     def _update_vwap(self, ts: datetime, price: float, volume: float) -> None:
         d = ts.date()
@@ -263,7 +292,6 @@ class _Indicators:
         self.vwap = self._cum_pv / self._cum_vol if self._cum_vol > 0 else None
 
     def _update_adx(self, price: float) -> None:
-        """EMA-smoothed ADX — same responsive method as keltner_vwap_breakout."""
         if self._prev_price is None:
             self._prev_price = price
             return
@@ -303,21 +331,17 @@ class _Indicators:
         k = 2.0 / (n + 1)
         return price * k + prev * (1.0 - k)
 
-    def _compute(self, price: float) -> None:
+    def _compute_entry(self, price: float) -> None:
         closes = list(self._closes)
         n = len(closes)
-        self._ema_trend_prev = self._ema_trend_v
+
         self._ema_fast_v = self._ema_step(self._ema_fast_v, price, self._n_fast, closes)
         self._ema_slow_v = self._ema_step(self._ema_slow_v, price, self._n_slow, closes)
-        self._ema_trend_v = self._ema_step(self._ema_trend_v, price, self._n_trend, closes)
         if n >= self._n_fast:
             self.ema_fast = self._ema_fast_v
         if n >= self._n_slow:
             self.ema_slow = self._ema_slow_v
-        if n >= self._n_trend:
-            self.ema_trend = self._ema_trend_v
-            if self._ema_trend_prev is not None and self._ema_trend_v is not None:
-                self.ema_trend_rising = self._ema_trend_v > self._ema_trend_prev
+
         if n >= self._atr_len + 1:
             diffs = [abs(closes[i] - closes[i - 1])
                      for i in range(n - self._atr_len, n)]
@@ -325,7 +349,7 @@ class _Indicators:
             self._atr_history.append(self.atr)
             if len(self._atr_history) >= 10:
                 self.atr_avg = _mean(list(self._atr_history))
-        # RSI (simple, short-period structural stress)
+
         if n >= self._rsi_len + 1:
             changes = [closes[i] - closes[i - 1] for i in range(n - self._rsi_len, n)]
             gains = [c for c in changes if c > 0]
@@ -333,7 +357,7 @@ class _Indicators:
             ag = _mean(gains) if gains else 0.0
             al = _mean(losses) if losses else 0.0
             self.rsi = 100.0 if al == 0 else 100.0 - 100.0 / (1.0 + ag / al)
-        # Volume ratio
+
         vols = list(self._volumes)
         nv = len(vols)
         if nv >= self._vol_len and self._vol_len > 0:
@@ -344,6 +368,37 @@ class _Indicators:
         else:
             self.vol_ratio = None
 
+    def snapshot(self) -> dict[str, float | None]:
+        """Return current indicator values for chart visualization (IndicatorProvider)."""
+        return {
+            "ema_fast": self.ema_fast,
+            "ema_slow": self.ema_slow,
+            "ema_trend": self.ema_trend,
+            "vwap": self.vwap,
+            "rsi": self.rsi,
+            "adx": self.adx if self.adx else None,
+        }
+
+    def indicator_meta(self) -> dict[str, dict]:
+        """Return rendering metadata for each indicator (IndicatorProvider)."""
+        return {
+            "ema_fast":  {"panel": "price", "color": "#FF6B6B", "label": "EMA Fast"},
+            "ema_slow":  {"panel": "price", "color": "#4ECDC4", "label": "EMA Slow"},
+            "ema_trend": {"panel": "price", "color": "#FFE66D", "label": "EMA Trend (1h)"},
+            "vwap":      {"panel": "price", "color": "#95E1D3", "label": "VWAP"},
+            "rsi":       {"panel": "sub",   "color": "#A8D8EA", "label": "RSI"},
+            "adx":       {"panel": "sub",   "color": "#F38181", "label": "ADX"},
+        }
+
+    def _compute_trend(self, price: float) -> None:
+        closes = list(self._trend_closes)
+        self._ema_trend_prev = self._ema_trend_v
+        self._ema_trend_v = self._ema_step(self._ema_trend_v, price, self._n_trend, closes)
+        if len(closes) >= self._n_trend:
+            self.ema_trend = self._ema_trend_v
+            if self._ema_trend_prev is not None and self._ema_trend_v is not None:
+                self.ema_trend_rising = self._ema_trend_v > self._ema_trend_prev
+
 
 class EMATrendPullbackEntry(EntryPolicy):
     """Enter on EMA pullback with RSI stress, ADX trend, and VWAP alignment."""
@@ -352,27 +407,27 @@ class EMATrendPullbackEntry(EntryPolicy):
         self,
         lots: float = 1.0,
         contract_type: str = "large",
-        bar_agg: int = 3,
+        bar_agg_trend: int = 4,
         ema_fast: int = 5,
-        ema_slow: int = 21,
-        ema_trend: int = 89,
+        ema_slow: int = 13,
+        ema_trend: int = 8,
         ema_align: int = 1,
         rsi_len: int = 3,
-        rsi_oversold: float = 35.0,
-        rsi_overbought: float = 65.0,
+        rsi_oversold: float = 40.0,
+        rsi_overbought: float = 60.0,
         vol_len: int = 20,
         vol_mult: float = 0.8,
-        vwap_filter: int = 1,
-        min_pullback_pts: float = 3.0,
+        vwap_filter: int = 0,
+        min_pullback_pts: float = 5.0,
         atr_len: int = 10,
-        atr_sl_mult: float = 2.0,
-        atr_t1_mult: float = 5.0,
+        atr_sl_mult: float = 1.6,
+        atr_t1_mult: float = 6.0,
         atr_ceil: float = 0.0,
         adx_len: int = 14,
-        adx_min: float = 30.0,
-        ema_trail_buffer_pts: float = 5.0,
+        adx_min: float = 25.0,
+        ema_trail_buffer_pts: float = 12.0,
         allow_night: int = 1,
-        max_hold_bars: int = 120,
+        max_hold_bars: int = 200,
     ) -> None:
         self._lots = lots
         self._contract_type = contract_type
@@ -390,7 +445,7 @@ class EMATrendPullbackEntry(EntryPolicy):
         self.ind = _Indicators(
             ema_fast=ema_fast, ema_slow=ema_slow, ema_trend=ema_trend,
             rsi_len=rsi_len, atr_len=atr_len, adx_len=adx_len,
-            vol_len=vol_len, bar_agg=bar_agg,
+            vol_len=vol_len, bar_agg_trend=bar_agg_trend,
         )
 
     def should_enter(
@@ -406,8 +461,6 @@ class EMATrendPullbackEntry(EntryPolicy):
         day_ok = in_day_session(t)
         night_ok = self._allow_night and in_night_session(t)
         if not (day_ok or night_ok):
-            return None
-        if in_force_close(t):
             return None
         price = snapshot.price
         self.ind.update(price, snapshot.timestamp, snapshot.volume)
@@ -425,10 +478,8 @@ class EMATrendPullbackEntry(EntryPolicy):
         if self._atr_ceil > 0 and ind.atr_avg is not None and ind.atr_avg > 0:
             if atr > self._atr_ceil * ind.atr_avg:
                 return None
-        # Volume confirmation
         if ind.vol_ratio is not None and ind.vol_ratio < self._vol_mult:
             return None
-        # Long: trend up, pullback into EMA zone, RSI oversold, VWAP discount
         if ind.ema_trend_rising is True:
             if self._ema_align and ind.ema_fast <= ind.ema_slow:
                 pass
@@ -452,7 +503,6 @@ class EMATrendPullbackEntry(EntryPolicy):
                             "strategy": "ema_trend_pullback",
                         },
                     )
-        # Short: trend down, pullback up, RSI overbought, VWAP premium
         if ind.ema_trend_rising is False:
             if self._ema_align and ind.ema_fast >= ind.ema_slow:
                 pass
@@ -485,10 +535,10 @@ class EMATrendPullbackStop(StopPolicy):
     def __init__(
         self,
         indicators: _Indicators,
-        atr_sl_mult: float = 2.0,
-        atr_t1_mult: float = 5.0,
-        ema_trail_buffer_pts: float = 5.0,
-        max_hold_bars: int = 120,
+        atr_sl_mult: float = 1.6,
+        atr_t1_mult: float = 6.0,
+        ema_trail_buffer_pts: float = 12.0,
+        max_hold_bars: int = 200,
     ) -> None:
         self._ind = indicators
         self._atr_sl_mult = atr_sl_mult
@@ -520,13 +570,12 @@ class EMATrendPullbackStop(StopPolicy):
     ) -> float:
         self._ind.update(snapshot.price, snapshot.timestamp, snapshot.volume)
         price = snapshot.price
-        t = snapshot.timestamp.time()
         stop = position.stop_level
         entry = position.entry_price
         pid = position.position_id
         self._bar_counts[pid] = self._bar_counts.get(pid, 0) + 1
-        # Force close: session end or max hold
-        if in_force_close(t) or self._bar_counts[pid] >= self._max_hold:
+        max_raw = self._max_hold * self._ind._bar_agg
+        if self._bar_counts[pid] >= max_raw:
             self._bar_counts.pop(pid, None)
             return price
         if position.direction == "long":
@@ -556,33 +605,36 @@ def create_ema_trend_pullback_engine(
     max_loss: float = 500_000,
     lots: float = 1.0,
     contract_type: str = "large",
-    bar_agg: int = 3,
+    bar_agg_trend: int = 4,
     ema_fast: int = 5,
-    ema_slow: int = 21,
-    ema_trend: int = 89,
+    ema_slow: int = 13,
+    ema_trend: int = 8,
     ema_align: int = 1,
     rsi_len: int = 3,
-    rsi_oversold: float = 35.0,
-    rsi_overbought: float = 65.0,
+    rsi_oversold: float = 40.0,
+    rsi_overbought: float = 60.0,
     vol_len: int = 20,
     vol_mult: float = 0.8,
-    vwap_filter: int = 1,
-    min_pullback_pts: float = 3.0,
+    vwap_filter: int = 0,
+    min_pullback_pts: float = 5.0,
     atr_len: int = 10,
-    atr_sl_mult: float = 2.0,
-    atr_t1_mult: float = 5.0,
+    atr_sl_mult: float = 1.6,
+    atr_t1_mult: float = 6.0,
     atr_ceil: float = 0.0,
     adx_len: int = 14,
-    adx_min: float = 30.0,
-    ema_trail_buffer_pts: float = 5.0,
-    max_hold_bars: int = 120,
+    adx_min: float = 25.0,
+    ema_trail_buffer_pts: float = 12.0,
+    max_hold_bars: int = 200,
     allow_night: int = 1,
+    max_pyramid_levels: int = 4,
+    pyramid_gamma: float = 0.7,
+    pyramid_trigger_atr: float = 1.5,
 ) -> "PositionEngine":
-    """Build a PositionEngine wired with the EMA Trend Pullback strategy."""
     from src.core.position_engine import PositionEngine
 
     entry = EMATrendPullbackEntry(
-        lots=lots, contract_type=contract_type, bar_agg=bar_agg,
+        lots=lots, contract_type=contract_type,
+        bar_agg_trend=bar_agg_trend,
         ema_fast=ema_fast, ema_slow=ema_slow, ema_trend=ema_trend,
         ema_align=ema_align,
         rsi_len=rsi_len, rsi_oversold=rsi_oversold, rsi_overbought=rsi_overbought,
@@ -602,9 +654,28 @@ def create_ema_trend_pullback_engine(
         ema_trail_buffer_pts=ema_trail_buffer_pts,
         max_hold_bars=max_hold_bars,
     )
-    return PositionEngine(
+    if max_pyramid_levels > 1:
+        from src.core.policies import PyramidAddPolicy
+        from src.core.types import PyramidConfig
+
+        triggers = [pyramid_trigger_atr * (i + 1) for i in range(max_pyramid_levels - 1)]
+        pyramid_config = PyramidConfig(
+            max_loss=max_loss,
+            max_levels=max_pyramid_levels,
+            add_trigger_atr=triggers,
+            atr_key="entry_tf",
+            gamma=pyramid_gamma,
+            base_lots=lots,
+            internal_atr_len=10,
+        )
+        add_policy = PyramidAddPolicy(pyramid_config)
+    else:
+        add_policy = NoAddPolicy()
+    engine = PositionEngine(
         entry_policy=entry,
-        add_policy=NoAddPolicy(),
+        add_policy=add_policy,
         stop_policy=stop,
         config=EngineConfig(max_loss=max_loss),
     )
+    engine.indicator_provider = entry.ind  # type: ignore[attr-defined]
+    return engine
