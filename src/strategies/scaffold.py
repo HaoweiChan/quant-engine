@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from src.strategies import StrategyCategory, StrategyTimeframe
+from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
 
 _STRATEGIES_DIR = Path(__file__).resolve().parent
 
@@ -23,11 +23,14 @@ _DEFAULT_PARAMS: dict[str, dict] = {
 def scaffold_strategy(
     name: str,
     category: StrategyCategory,
-    timeframe: StrategyTimeframe,
+    holding_period: HoldingPeriod,
+    signal_timeframe: SignalTimeframe,
+    stop_architecture: StopArchitecture | None = None,
     description: str = "",
     policies: list[str] | None = None,
     params: dict[str, dict] | None = None,
-    session: str = "both",
+    tradeable_sessions: list[str] | None = None,
+    expected_duration_minutes: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     """Generate a complete strategy file.
 
@@ -39,7 +42,22 @@ def scaffold_strategy(
     """
     pol = policies or ["entry", "stop"]
     par = params or _DEFAULT_PARAMS
-    subdir = f"{timeframe.value}/{category.value}"
+    sessions = tradeable_sessions or ["day", "night"]
+    # Default stop_architecture based on holding period
+    if stop_architecture is None:
+        stop_architecture = (
+            StopArchitecture.SWING if holding_period == HoldingPeriod.SWING
+            else StopArchitecture.INTRADAY
+        )
+    # Default expected duration based on holding period
+    if expected_duration_minutes is None:
+        _defaults = {
+            HoldingPeriod.SHORT_TERM: (20, 240),
+            HoldingPeriod.MEDIUM_TERM: (240, 7200),
+            HoldingPeriod.SWING: (10080, 40320),
+        }
+        expected_duration_minutes = _defaults[holding_period]
+    subdir = f"{holding_period.value}/{category.value}"
     slug = f"{subdir}/{name}"
     filepath = _STRATEGIES_DIR / subdir / f"{name}.py"
     if filepath.exists():
@@ -52,11 +70,14 @@ def scaffold_strategy(
         name=name,
         class_prefix=class_prefix,
         category=category,
-        timeframe=timeframe,
+        holding_period=holding_period,
+        signal_timeframe=signal_timeframe,
+        stop_architecture=stop_architecture,
         description=description,
         policies=pol,
         params=par,
-        session=session,
+        tradeable_sessions=sessions,
+        expected_duration_minutes=expected_duration_minutes,
     )
     return {
         "slug": slug,
@@ -71,11 +92,14 @@ def _generate_content(
     name: str,
     class_prefix: str,
     category: StrategyCategory,
-    timeframe: StrategyTimeframe,
+    holding_period: HoldingPeriod,
+    signal_timeframe: SignalTimeframe,
+    stop_architecture: StopArchitecture,
     description: str,
     policies: list[str],
     params: dict[str, dict],
-    session: str,
+    tradeable_sessions: list[str],
+    expected_duration_minutes: tuple[int, int],
 ) -> str:
     lines: list[str] = []
     desc = description or f"{class_prefix} strategy."
@@ -104,8 +128,8 @@ def _generate_content(
     if "stop" in policies:
         type_imports.append("Position")
     lines.append(f"from src.core.types import ({', '.join(sorted(type_imports))})")
-    lines.append("from src.strategies import StrategyCategory, StrategyTimeframe")
-    if timeframe == StrategyTimeframe.INTRADAY:
+    lines.append("from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory")
+    if holding_period in (HoldingPeriod.SHORT_TERM, HoldingPeriod.MEDIUM_TERM):
         lines.append("from src.strategies._session_utils import in_day_session, in_force_close, in_night_session")
     lines.append("")
     lines.append("if TYPE_CHECKING:")
@@ -127,10 +151,15 @@ def _generate_content(
     lines.append("}")
     lines.append("")
     # STRATEGY_META
+    sessions_repr = repr(tradeable_sessions)
+    dur_repr = repr(expected_duration_minutes)
     lines.append("STRATEGY_META: dict = {")
     lines.append(f'    "category": StrategyCategory.{category.name},')
-    lines.append(f'    "timeframe": StrategyTimeframe.{timeframe.name},')
-    lines.append(f'    "session": "{session}",')
+    lines.append(f'    "signal_timeframe": SignalTimeframe.{signal_timeframe.name},')
+    lines.append(f'    "holding_period": HoldingPeriod.{holding_period.name},')
+    lines.append(f'    "stop_architecture": StopArchitecture.{stop_architecture.name},')
+    lines.append(f'    "expected_duration_minutes": {dur_repr},')
+    lines.append(f'    "tradeable_sessions": {sessions_repr},')
     lines.append(f'    "description": "{desc}",')
     lines.append("}")
     lines.append("")
@@ -237,7 +266,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("name", help="Strategy name in snake_case")
     parser.add_argument("--category", required=True, choices=[c.value for c in StrategyCategory])
-    parser.add_argument("--timeframe", required=True, choices=[t.value for t in StrategyTimeframe])
+    parser.add_argument("--holding-period", required=True, choices=[h.value for h in HoldingPeriod])
+    parser.add_argument("--signal-timeframe", required=True, choices=[t.value for t in SignalTimeframe])
     parser.add_argument("--description", default="", help="One-line description")
     parser.add_argument("--write", action="store_true", help="Write the file (default: print to stdout)")
     args = parser.parse_args()
@@ -245,7 +275,8 @@ if __name__ == "__main__":
     result = scaffold_strategy(
         name=args.name,
         category=StrategyCategory(args.category),
-        timeframe=StrategyTimeframe(args.timeframe),
+        holding_period=HoldingPeriod(args.holding_period),
+        signal_timeframe=SignalTimeframe(args.signal_timeframe),
         description=args.description,
     )
     if "error" in result:

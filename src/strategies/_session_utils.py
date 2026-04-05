@@ -21,6 +21,11 @@ def in_or_window(t: time) -> bool:
     return time(8, 45) <= t < time(9, 0)
 
 
+def in_night_or_window(t: time) -> bool:
+    """15:15 <= t < 15:30 — the 15-minute night session Opening Range window."""
+    return time(15, 15) <= t < time(15, 30)
+
+
 def in_force_close(t: time, mode: str = "default") -> bool:
     """Check if the bar falls in a force-close window.
 

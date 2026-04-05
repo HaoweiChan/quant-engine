@@ -14,7 +14,7 @@ import importlib
 from typing import Any
 from pathlib import Path
 from dataclasses import dataclass, field
-from src.strategies import StrategyCategory, StrategyTimeframe
+from src.strategies import StrategyCategory, HoldingPeriod, SignalTimeframe, StopArchitecture
 
 logger = structlog.get_logger(__name__)
 
@@ -22,14 +22,46 @@ _STRATEGIES_DIR = Path(__file__).resolve().parent
 
 _INFRA_MODULES = frozenset({"registry", "param_registry", "param_loader", "scaffold"})
 
-_SLUG_ALIASES: dict[str, str] = {
-    "ta_orb": "intraday/breakout/ta_orb",
-    "structural_orb": "intraday/breakout/structural_orb",
-    "atr_mean_reversion": "intraday/mean_reversion/atr_mean_reversion",
-    "ema_trend_pullback": "intraday/trend_following/ema_trend_pullback",
-    "pyramid": "daily/trend_following/pyramid_wrapper",
-    "pyramid_wrapper": "daily/trend_following/pyramid_wrapper",
+_TIER_PREFIX: dict[str, str] = {
+    "short_term": "st",
+    "medium_term": "mt",
+    "swing": "sw",
 }
+
+_slug_aliases: dict[str, str] = {}
+
+
+def _build_aliases(registry: dict[str, StrategyInfo]) -> dict[str, str]:
+    """Auto-generate flat-name aliases from discovered strategy slugs.
+
+    For each strategy at 'tier/category/name', generates:
+      - 'name' -> 'tier/category/name'  (only if unambiguous across tiers)
+      - '{prefix}_{name}' -> 'tier/category/name'  (always, for disambiguation)
+
+    Tier prefixes: short_term -> st, medium_term -> mt, swing -> sw.
+    """
+    aliases: dict[str, str] = {}
+    bare_counts: dict[str, list[str]] = {}
+    for slug in registry:
+        parts = slug.split("/")
+        if len(parts) >= 3:
+            bare_counts.setdefault(parts[-1], []).append(slug)
+
+    for slug in registry:
+        parts = slug.split("/")
+        if len(parts) < 3:
+            continue
+        tier, bare = parts[0], parts[-1]
+        prefix = _TIER_PREFIX.get(tier, tier[:2])
+        aliases[f"{prefix}_{bare}"] = slug
+        if len(bare_counts.get(bare, [])) == 1:
+            aliases[bare] = slug
+
+    # Legacy alias
+    if "swing/trend_following/pyramid_wrapper" in registry:
+        aliases["pyramid"] = "swing/trend_following/pyramid_wrapper"
+
+    return aliases
 
 
 @dataclass
@@ -41,7 +73,9 @@ class StrategyInfo:
     param_schema: dict[str, dict] = field(default_factory=dict)
     meta: dict = field(default_factory=dict)
     category: StrategyCategory | None = None
-    timeframe: StrategyTimeframe | None = None
+    holding_period: HoldingPeriod | None = None
+    signal_timeframe: SignalTimeframe | None = None
+    stop_architecture: StopArchitecture | None = None
 
 
 _registry: dict[str, StrategyInfo] | None = None
@@ -77,7 +111,9 @@ def _discover() -> dict[str, StrategyInfo]:
         label = py.stem.replace("_", " ").title()
         meta = getattr(mod, "STRATEGY_META", {}) or {}
         cat = meta.get("category")
-        tf = meta.get("timeframe")
+        hp = meta.get("holding_period")
+        stf = meta.get("signal_timeframe")
+        sa = meta.get("stop_architecture")
         result[slug] = StrategyInfo(
             name=label,
             slug=slug,
@@ -86,28 +122,33 @@ def _discover() -> dict[str, StrategyInfo]:
             param_schema=schema,
             meta=meta,
             category=cat if isinstance(cat, StrategyCategory) else None,
-            timeframe=tf if isinstance(tf, StrategyTimeframe) else None,
+            holding_period=hp if isinstance(hp, HoldingPeriod) else None,
+            signal_timeframe=stf if isinstance(stf, SignalTimeframe) else None,
+            stop_architecture=sa if isinstance(sa, StopArchitecture) else None,
         )
         logger.debug("registry_discovered", slug=slug)
     return result
 
 
 def _ensure_loaded() -> dict[str, StrategyInfo]:
-    global _registry
+    global _registry, _slug_aliases
     if _registry is None:
         _registry = _discover()
+        _slug_aliases = _build_aliases(_registry)
     return _registry
 
 
 def _resolve_slug(slug: str) -> str:
     """Resolve a slug, following aliases if needed."""
-    return _SLUG_ALIASES.get(slug, slug)
+    _ensure_loaded()
+    return _slug_aliases.get(slug, slug)
 
 
 def invalidate() -> None:
     """Clear the registry cache. Next access triggers re-discovery."""
-    global _registry
+    global _registry, _slug_aliases
     _registry = None
+    _slug_aliases = {}
 
 
 def register(
@@ -122,7 +163,9 @@ def register(
     label = slug.replace("_", " ").title()
     m = meta or {}
     cat = m.get("category")
-    tf = m.get("timeframe")
+    hp = m.get("holding_period")
+    stf = m.get("signal_timeframe")
+    sa = m.get("stop_architecture")
     reg[slug] = StrategyInfo(
         name=label,
         slug=slug,
@@ -131,7 +174,9 @@ def register(
         param_schema=param_schema,
         meta=m,
         category=cat if isinstance(cat, StrategyCategory) else None,
-        timeframe=tf if isinstance(tf, StrategyTimeframe) else None,
+        holding_period=hp if isinstance(hp, HoldingPeriod) else None,
+        signal_timeframe=stf if isinstance(stf, SignalTimeframe) else None,
+        stop_architecture=sa if isinstance(sa, StopArchitecture) else None,
     )
 
 
@@ -147,6 +192,44 @@ def get_info(slug: str) -> StrategyInfo:
     if resolved not in reg:
         raise KeyError(f"Unknown strategy '{slug}'. Available: {list(reg.keys())}")
     return reg[resolved]
+
+
+def is_intraday_strategy(slug: str) -> bool:
+    """Return True if the strategy requires intraday session-close liquidation.
+
+    Checks StopArchitecture metadata first, then falls back to slug prefix.
+    """
+    resolved = _resolve_slug(slug)
+    try:
+        info = get_info(resolved)
+        if info.stop_architecture == StopArchitecture.INTRADAY:
+            return True
+        if info.stop_architecture is not None:
+            return False
+    except KeyError:
+        pass
+    return resolved.startswith(("short_term/", "medium_term/"))
+
+
+_SIGNAL_TF_TO_BAR_AGG: dict[str, int] = {
+    "1min": 1,
+    "5min": 5,
+    "15min": 15,
+    "1hour": 60,
+    "daily": 1,
+}
+
+
+def get_bar_agg(slug: str) -> int:
+    """Derive bar aggregation factor from strategy's signal_timeframe metadata."""
+    resolved = _resolve_slug(slug)
+    try:
+        info = get_info(resolved)
+        if info.signal_timeframe is not None:
+            return _SIGNAL_TF_TO_BAR_AGG.get(info.signal_timeframe.value, 1)
+    except KeyError:
+        pass
+    return 1
 
 
 def get_schema(slug: str) -> dict[str, Any]:
@@ -214,9 +297,24 @@ def get_by_category(category: StrategyCategory) -> dict[str, StrategyInfo]:
     return {s: i for s, i in _ensure_loaded().items() if i.category == category}
 
 
-def get_by_timeframe(timeframe: StrategyTimeframe) -> dict[str, StrategyInfo]:
-    """Return strategies matching the given timeframe."""
-    return {s: i for s, i in _ensure_loaded().items() if i.timeframe == timeframe}
+def get_by_holding_period(period: HoldingPeriod) -> dict[str, StrategyInfo]:
+    """Return strategies with the given holding period."""
+    return {s: i for s, i in _ensure_loaded().items() if i.holding_period == period}
+
+
+def get_by_signal_timeframe(tf: SignalTimeframe) -> dict[str, StrategyInfo]:
+    """Return strategies that use the given signal timeframe bar."""
+    return {s: i for s, i in _ensure_loaded().items() if i.signal_timeframe == tf}
+
+
+def get_by_session(session: str) -> dict[str, StrategyInfo]:
+    """Return strategies tradeable in the given session ('day' or 'night')."""
+    result: dict[str, StrategyInfo] = {}
+    for slug, info in _ensure_loaded().items():
+        sessions = info.meta.get("tradeable_sessions", [])
+        if session in sessions:
+            result[slug] = info
+    return result
 
 
 def validate_and_clamp(

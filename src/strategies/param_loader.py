@@ -6,7 +6,9 @@ backward-compatible fallback and for human readability.
 from __future__ import annotations
 
 import structlog
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from pathlib import Path
 from typing import Any
 
@@ -72,7 +74,7 @@ def save_strategy_params(
     _CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
     doc: dict[str, Any] = {"params": params}
     meta = metadata or {}
-    meta.setdefault("saved_at", datetime.now().isoformat(timespec="seconds"))
+    meta.setdefault("saved_at", datetime.now(_TAIPEI_TZ).isoformat(timespec="seconds"))
     doc["metadata"] = meta
     path = _CONFIGS_DIR / f"{name}.toml"
     path.write_bytes(tomli_w.dumps(doc).encode())
@@ -81,6 +83,12 @@ def save_strategy_params(
 
 def load_strategy_params(name: str) -> dict[str, Any] | None:
     """Load active params from registry DB, falling back to TOML if no DB entry."""
+    # Resolve old slug aliases to canonical new slugs
+    try:
+        from src.strategies.registry import _resolve_slug
+        name = _resolve_slug(name)
+    except Exception:
+        pass
     try:
         from src.strategies.param_registry import ParamRegistry
         registry = ParamRegistry()
