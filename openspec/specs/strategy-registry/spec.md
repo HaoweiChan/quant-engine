@@ -7,7 +7,7 @@ Central registry for discovering and exposing strategy metadata (parameter schem
 ### Requirement: Strategy registry auto-discovery
 The system SHALL provide a `src/strategies/registry.py` module that lazily discovers all strategy modules in `src/strategies/` by recursively scanning subdirectories for Python files that export both a `create_*_engine` factory function and a `PARAM_SCHEMA` dict at module level.
 
-The discovery SHALL use `rglob("*.py")` instead of `glob("*.py")`, generating path-like slugs from the relative directory path (e.g., `"intraday/breakout/ta_orb"`).
+The discovery SHALL use `rglob("*.py")` instead of `glob("*.py")`, generating path-like slugs from the relative directory path (e.g., `"short_term/breakout/ta_orb"`).
 
 The discovery SHALL exclude:
 - Files starting with `_` (e.g., `_session_utils.py`)
@@ -16,12 +16,12 @@ The discovery SHALL exclude:
 - Files in the `examples/` directory
 
 #### Scenario: Discovery finds ta_orb in nested directory
-- **WHEN** the registry is first accessed and `src/strategies/intraday/breakout/ta_orb.py` exists with `PARAM_SCHEMA` and `create_ta_orb_engine`
-- **THEN** it SHALL discover it with slug `"intraday/breakout/ta_orb"` and module `"src.strategies.intraday.breakout.ta_orb"`
+- **WHEN** the registry is first accessed and `src/strategies/short_term/breakout/ta_orb.py` exists with `PARAM_SCHEMA` and `create_ta_orb_engine`
+- **THEN** it SHALL discover it with slug `"short_term/breakout/ta_orb"` and module `"src.strategies.short_term.breakout.ta_orb"`
 
 #### Scenario: Discovery finds atr_mean_reversion in nested directory
-- **WHEN** the registry is first accessed and `src/strategies/intraday/mean_reversion/atr_mean_reversion.py` exists
-- **THEN** it SHALL discover it with slug `"intraday/mean_reversion/atr_mean_reversion"` and factory `"create_atr_mean_reversion_engine"`
+- **WHEN** the registry is first accessed and `src/strategies/short_term/mean_reversion/atr_mean_reversion.py` exists
+- **THEN** it SHALL discover it with slug `"short_term/mean_reversion/atr_mean_reversion"` and factory `"create_atr_mean_reversion_engine"`
 
 #### Scenario: Infrastructure files at root are excluded
 - **WHEN** `src/strategies/registry.py` exists
@@ -40,19 +40,19 @@ The registry SHALL support resolving legacy flat slugs (e.g., `"ta_orb"`) to the
 
 ```python
 _SLUG_ALIASES: dict[str, str] = {
-    "ta_orb": "intraday/breakout/ta_orb",
-    "atr_mean_reversion": "intraday/mean_reversion/atr_mean_reversion",
-    "pyramid": "daily/trend_following/pyramid_wrapper",
-    "pyramid_wrapper": "daily/trend_following/pyramid_wrapper",
+    "ta_orb": "short_term/breakout/ta_orb",
+    "atr_mean_reversion": "short_term/mean_reversion/atr_mean_reversion",
+    "pyramid": "swing/trend_following/pyramid_wrapper",
+    "pyramid_wrapper": "swing/trend_following/pyramid_wrapper",
 }
 ```
 
 #### Scenario: Alias resolves to new slug
 - **WHEN** `get_info("ta_orb")` is called
-- **THEN** it SHALL resolve to the `StrategyInfo` for `"intraday/breakout/ta_orb"`
+- **THEN** it SHALL resolve to the `StrategyInfo` for `"short_term/breakout/ta_orb"`
 
 #### Scenario: New slug works directly
-- **WHEN** `get_info("intraday/breakout/ta_orb")` is called
+- **WHEN** `get_info("short_term/breakout/ta_orb")` is called
 - **THEN** it SHALL return the `StrategyInfo` directly without alias lookup
 
 #### Scenario: Unknown slug raises KeyError

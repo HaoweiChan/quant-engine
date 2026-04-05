@@ -31,8 +31,8 @@ def scaffold_strategy(
 
 #### Scenario: Scaffold a mean reversion intraday strategy
 - **WHEN** `scaffold_strategy(name="vwap_rubber_band", category=StrategyCategory.MEAN_REVERSION, timeframe=StrategyTimeframe.INTRADAY)` is called
-- **THEN** the returned `slug` SHALL be `"intraday/mean_reversion/vwap_rubber_band"`
-- **AND** the returned `path` SHALL be `"src/strategies/intraday/mean_reversion/vwap_rubber_band.py"`
+- **THEN** the returned `slug` SHALL be `"short_term/mean_reversion/vwap_rubber_band"`
+- **AND** the returned `path` SHALL be `"src/strategies/short_term/mean_reversion/vwap_rubber_band.py"`
 - **AND** the returned `content` SHALL contain a class `VwapRubberBandEntry` extending `EntryPolicy` with a `should_enter` method stub
 - **AND** the content SHALL contain a class `VwapRubberBandStop` extending `StopPolicy` with `initial_stop` and `update_stop` method stubs
 - **AND** the content SHALL contain a `create_vwap_rubber_band_engine` factory function
@@ -85,7 +85,7 @@ Tool(
 
 #### Scenario: MCP tool returns scaffold content
 - **WHEN** the agent calls `scaffold_strategy` via MCP with `name="ema_pullback"`, `category="trend_following"`, `timeframe="intraday"`
-- **THEN** the tool SHALL return `{"slug": "intraday/trend_following/ema_pullback", "path": "...", "content": "...", "next_steps": ["write_strategy_file", "run_monte_carlo"]}`
+- **THEN** the tool SHALL return `{"slug": "medium_term/trend_following/ema_pullback", "path": "...", "content": "...", "next_steps": ["write_strategy_file", "run_monte_carlo"]}`
 
 #### Scenario: MCP tool rejects invalid category
 - **WHEN** the agent calls `scaffold_strategy` with `category="invalid"`
@@ -108,7 +108,7 @@ python -m src.strategies.scaffold <name> --category <cat> --timeframe <tf> [--de
 
 #### Scenario: CLI writes file with --write flag
 - **WHEN** `python -m src.strategies.scaffold ema_pullback --category trend_following --timeframe intraday --write` is run
-- **THEN** it SHALL create the file at `src/strategies/intraday/trend_following/ema_pullback.py` and print the path
+- **THEN** it SHALL create the file at `src/strategies/medium_term/trend_following/ema_pullback.py` and print the path
 
 #### Scenario: CLI refuses to overwrite existing file
 - **WHEN** `--write` is used and the target file already exists

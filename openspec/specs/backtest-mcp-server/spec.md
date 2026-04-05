@@ -23,16 +23,16 @@ app = Server("backtest-engine")
 The facade module SHALL provide a `resolve_strategy_slug(strategy: str) -> str` function that converts any strategy identifier to its canonical registry slug. All facade functions that persist results to `param_registry.db` SHALL call this function before writing.
 
 #### Scenario: Slug passes through unchanged
-- **WHEN** `resolve_strategy_slug("intraday/trend_following/ema_trend_pullback")` is called
-- **THEN** it SHALL return `"intraday/trend_following/ema_trend_pullback"`
+- **WHEN** `resolve_strategy_slug("medium_term/trend_following/ema_trend_pullback")` is called
+- **THEN** it SHALL return `"medium_term/trend_following/ema_trend_pullback"`
 
 #### Scenario: Legacy alias resolved
 - **WHEN** `resolve_strategy_slug("ta_orb")` is called
-- **THEN** it SHALL return `"intraday/breakout/ta_orb"`
+- **THEN** it SHALL return `"short_term/breakout/ta_orb"`
 
 #### Scenario: Module:factory format resolved
-- **WHEN** `resolve_strategy_slug("src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine")` is called
-- **THEN** it SHALL return `"intraday/trend_following/ema_trend_pullback"`
+- **WHEN** `resolve_strategy_slug("src.strategies.medium_term.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine")` is called
+- **THEN** it SHALL return `"medium_term/trend_following/ema_trend_pullback"`
 
 #### Scenario: Unknown strategy falls back
 - **WHEN** `resolve_strategy_slug("unknown_strategy")` is called and no registry entry exists
@@ -78,13 +78,13 @@ The server SHALL expose a `run_backtest` tool that runs a single backtest on syn
 The server SHALL expose a `run_backtest_realdata` tool that runs a backtest on real historical data from the database. The result SHALL be persisted to `param_registry.db` via `ParamRegistry.save_backtest_run()` with `source="mcp"` and the strategy identifier normalized to a slug. The `symbol` field SHALL record the actual market symbol (e.g., `"TX"`), not a synthetic label. The response SHALL include `param_warnings` and `strategy_hash`.
 
 #### Scenario: Real-data backtest persisted
-- **WHEN** `run_backtest_realdata` is called with `symbol="TX"`, `start="2025-08-01"`, `end="2026-03-14"`, `strategy="intraday/trend_following/ema_trend_pullback"`, and `strategy_params={"lots": 5}`
-- **THEN** the result SHALL be persisted to `param_registry.db` with `strategy="intraday/trend_following/ema_trend_pullback"`, `symbol="TX"`, and the run metrics
+- **WHEN** `run_backtest_realdata` is called with `symbol="TX"`, `start="2025-08-01"`, `end="2026-03-14"`, `strategy="medium_term/trend_following/ema_trend_pullback"`, and `strategy_params={"lots": 5}`
+- **THEN** the result SHALL be persisted to `param_registry.db` with `strategy="medium_term/trend_following/ema_trend_pullback"`, `symbol="TX"`, and the run metrics
 - **AND** the response SHALL include the `run_id`
 
 #### Scenario: Persistence uses normalized slug
-- **WHEN** `run_backtest_realdata` is called with `strategy="src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"`
-- **THEN** the `strategy` stored in `param_registry.db` SHALL be `"intraday/trend_following/ema_trend_pullback"`
+- **WHEN** `run_backtest_realdata` is called with `strategy="src.strategies.medium_term.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"`
+- **THEN** the `strategy` stored in `param_registry.db` SHALL be `"medium_term/trend_following/ema_trend_pullback"`
 
 #### Scenario: param_warnings included in response
 - **WHEN** `run_backtest_realdata` is called with out-of-range strategy params
@@ -149,8 +149,8 @@ The `run_parameter_sweep` tool SHALL automatically persist its results to the pa
 - **THEN** the response SHALL include the best candidate and any Pareto-optimal candidates with their labels
 
 #### Scenario: Sweep uses normalized strategy slug
-- **WHEN** `run_parameter_sweep` is called with `strategy="src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"`
-- **THEN** the `strategy` column in `param_registry.db` SHALL contain `"intraday/trend_following/ema_trend_pullback"`, not the module:factory string
+- **WHEN** `run_parameter_sweep` is called with `strategy="src.strategies.medium_term.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"`
+- **THEN** the `strategy` column in `param_registry.db` SHALL contain `"medium_term/trend_following/ema_trend_pullback"`, not the module:factory string
 
 ### Requirement: run_stress_test tool
 The server SHALL expose a `run_stress_test` tool that tests strategy behavior under extreme scenarios. The response SHALL include `param_warnings` from parameter clamping.
@@ -172,11 +172,11 @@ The server SHALL expose a `run_stress_test` tool that tests strategy behavior un
 - **THEN** the response SHALL include `"param_warnings"` listing each clamping action taken
 
 ### Requirement: read_strategy_file tool
-The server SHALL expose a `read_strategy_file` tool that returns the content of a strategy policy file. The tool SHALL support path-like filenames for nested directory structures (e.g., `"intraday/breakout/ta_orb"`).
+The server SHALL expose a `read_strategy_file` tool that returns the content of a strategy policy file. The tool SHALL support path-like filenames for nested directory structures (e.g., `"short_term/breakout/ta_orb"`).
 
 #### Scenario: Read nested strategy file
-- **WHEN** `read_strategy_file` is called with `filename="intraday/breakout/ta_orb"`
-- **THEN** it SHALL return the full content of `src/strategies/intraday/breakout/ta_orb.py` along with the filename and last-modified timestamp
+- **WHEN** `read_strategy_file` is called with `filename="short_term/breakout/ta_orb"`
+- **THEN** it SHALL return the full content of `src/strategies/short_term/breakout/ta_orb.py` along with the filename and last-modified timestamp
 
 #### Scenario: Read with legacy flat filename (backward compat)
 - **WHEN** `read_strategy_file` is called with `filename="ta_orb"` and a slug alias exists
@@ -194,8 +194,8 @@ The server SHALL expose a `read_strategy_file` tool that returns the content of 
 The server SHALL expose a `write_strategy_file` tool that validates and writes a strategy policy file. After a successful write, it SHALL compute the new strategy hash, call `deactivate_stale_candidates()` on the param registry, and report any deactivated candidates in the response.
 
 #### Scenario: Write to nested path
-- **WHEN** `write_strategy_file` is called with `filename="intraday/trend_following/ema_pullback"` and valid content
-- **THEN** it SHALL create `src/strategies/intraday/trend_following/` if needed, write the file, and invalidate the registry cache
+- **WHEN** `write_strategy_file` is called with `filename="medium_term/trend_following/ema_pullback"` and valid content
+- **THEN** it SHALL create `src/strategies/medium_term/trend_following/` if needed, write the file, and invalidate the registry cache
 
 #### Scenario: Valid strategy write
 - **WHEN** `write_strategy_file` is called with syntactically valid Python containing a class implementing a policy ABC
@@ -358,12 +358,12 @@ Each MCP tool description SHALL include guidance on when to use the tool, precon
 The facade module SHALL resolve strategy factories exclusively through the strategy registry, eliminating the hardcoded `_BUILTIN_FACTORIES` dict.
 
 #### Scenario: Resolve by new path-like slug
-- **WHEN** `resolve_factory("intraday/breakout/ta_orb")` is called
-- **THEN** it SHALL import `src.strategies.intraday.breakout.ta_orb` and return `create_ta_orb_engine`
+- **WHEN** `resolve_factory("short_term/breakout/ta_orb")` is called
+- **THEN** it SHALL import `src.strategies.short_term.breakout.ta_orb` and return `create_ta_orb_engine`
 
 #### Scenario: Resolve by legacy flat slug via alias
 - **WHEN** `resolve_factory("ta_orb")` is called
-- **THEN** it SHALL resolve the alias to `"intraday/breakout/ta_orb"` and return the factory
+- **THEN** it SHALL resolve the alias to `"short_term/breakout/ta_orb"` and return the factory
 
 #### Scenario: Resolve by module:factory format
 - **WHEN** `resolve_factory("my_module:my_factory")` is called

@@ -9,7 +9,7 @@ The project SHALL maintain a `src/strategies/` directory organized into a nested
 
 ```
 src/strategies/
-├── intraday/
+├── short_term/
 │   ├── breakout/
 │   ├── mean_reversion/
 │   └── trend_following/
@@ -58,8 +58,8 @@ STRATEGY_META: dict = {
 ```
 
 #### Scenario: Strategy files in nested directories are discovered
-- **WHEN** a `.py` file exists at `src/strategies/intraday/breakout/ta_orb.py` with `PARAM_SCHEMA` and `create_ta_orb_engine`
-- **THEN** the strategy registry SHALL discover it with slug `"intraday/breakout/ta_orb"` and module `"src.strategies.intraday.breakout.ta_orb"`
+- **WHEN** a `.py` file exists at `src/strategies/short_term/breakout/ta_orb.py` with `PARAM_SCHEMA` and `create_ta_orb_engine`
+- **THEN** the strategy registry SHALL discover it with slug `"short_term/breakout/ta_orb"` and module `"src.strategies.short_term.breakout.ta_orb"`
 
 #### Scenario: Infrastructure files at root level are excluded
 - **WHEN** `src/strategies/registry.py`, `param_registry.py`, `param_loader.py`, or `scaffold.py` exist at root level
@@ -236,8 +236,8 @@ def backup_strategy_file(filename: str) -> str | None: ...
 - **THEN** it SHALL copy the current file to `src/strategies/.backup/<filename>.<ISO-timestamp>.py` and return the backup path
 
 #### Scenario: Backup nested strategy file
-- **WHEN** `backup_strategy_file("intraday/breakout/ta_orb")` is called
-- **THEN** it SHALL save to `src/strategies/.backup/intraday/breakout/ta_orb.<timestamp>.py`
+- **WHEN** `backup_strategy_file("short_term/breakout/ta_orb")` is called
+- **THEN** it SHALL save to `src/strategies/.backup/short_term/breakout/ta_orb.<timestamp>.py`
 
 #### Scenario: Backup directory creation
 - **WHEN** `src/strategies/.backup/` does not exist
@@ -255,8 +255,8 @@ def list_strategy_files() -> list[dict[str, Any]]: ...
 ```
 
 #### Scenario: Nested files included in listing
-- **WHEN** `list_strategy_files()` is called and `src/strategies/intraday/breakout/ta_orb.py` exists
-- **THEN** the result SHALL include `{"filename": "intraday/breakout/ta_orb", "size_bytes": ..., "modified": ...}`
+- **WHEN** `list_strategy_files()` is called and `src/strategies/short_term/breakout/ta_orb.py` exists
+- **THEN** the result SHALL include `{"filename": "short_term/breakout/ta_orb", "size_bytes": ..., "modified": ...}`
 
 #### Scenario: Infrastructure and private files excluded
 - **WHEN** `list_strategy_files()` is called
@@ -270,9 +270,9 @@ def list_strategy_files() -> list[dict[str, Any]]: ...
 The `write_strategy_file` workflow SHALL support path-like filenames that create parent directories as needed.
 
 #### Scenario: Write to nested path
-- **WHEN** `write_strategy_file(filename="intraday/trend_following/ema_pullback", content=...)` is called
-- **THEN** it SHALL create directories `src/strategies/intraday/trend_following/` if they don't exist
-- **AND** write the content to `src/strategies/intraday/trend_following/ema_pullback.py`
+- **WHEN** `write_strategy_file(filename="medium_term/trend_following/ema_pullback", content=...)` is called
+- **THEN** it SHALL create directories `src/strategies/medium_term/trend_following/` if they don't exist
+- **AND** write the content to `src/strategies/medium_term/trend_following/ema_pullback.py`
 
 #### Scenario: Registry cache invalidated after write
 - **WHEN** `write_strategy_file` completes successfully

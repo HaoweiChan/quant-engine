@@ -28,7 +28,7 @@
 
 ## 5. Phase 2 - Structural Intraday Seed
 
-- [ ] 5.1 Add a structural intraday seed strategy module under `src/strategies/intraday/breakout/` implementing ORB + Keltner + ADX with optional VWAP alignment. Acceptance: strategy builds through existing factory/registry discovery path.
+- [ ] 5.1 Add a structural intraday seed strategy module under `src/strategies/short_term/breakout/` implementing ORB + Keltner + ADX with optional VWAP alignment. Acceptance: strategy builds through existing factory/registry discovery path.
 - [ ] 5.2 Define bounded `PARAM_SCHEMA` for the new seed strategy with optimizer-safe ranges. Acceptance: `get_parameter_schema` returns bounded defaults and grid values for all exposed parameters.
 - [ ] 5.3 Add strategy-level tests for regime filter, breakout logic, and bounded parameter behavior. Acceptance: unit tests validate long/short trigger conditions and parameter guardrails.
 

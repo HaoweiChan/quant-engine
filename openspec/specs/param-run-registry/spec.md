@@ -164,7 +164,7 @@ def save_backtest_run(
 ```
 
 #### Scenario: Single backtest persisted
-- **WHEN** `save_backtest_run()` is called with `strategy="intraday/trend_following/ema_trend_pullback"`, params `{"lots": 4}`, and metrics `{"sharpe": 1.559, "total_pnl": 1520000}`
+- **WHEN** `save_backtest_run()` is called with `strategy="medium_term/trend_following/ema_trend_pullback"`, params `{"lots": 4}`, and metrics `{"sharpe": 1.559, "total_pnl": 1520000}`
 - **THEN** 1 row SHALL be inserted into `param_runs` with `search_type="single"`, `n_trials=1`, `source="mcp"`
 - **AND** 1 row SHALL be inserted into `param_trials` with the given metrics and `is_oos=0`
 - **AND** the return value SHALL be the integer `run_id`
@@ -182,14 +182,14 @@ def save_backtest_run(
 - **THEN** it SHALL log the error via structlog and return `-1` instead of raising an exception
 
 ### Requirement: Strategy name normalization on write
-All `ParamRegistry` write methods (`save_run`, `save_backtest_run`, `save_candidate`) SHALL accept only normalized strategy slugs (e.g., `intraday/trend_following/ema_trend_pullback`). Callers are responsible for normalizing before calling. The registry SHALL validate that the strategy string does not contain `:` or start with `src.` and SHALL raise `ValueError` if it does.
+All `ParamRegistry` write methods (`save_run`, `save_backtest_run`, `save_candidate`) SHALL accept only normalized strategy slugs (e.g., `medium_term/trend_following/ema_trend_pullback`). Callers are responsible for normalizing before calling. The registry SHALL validate that the strategy string does not contain `:` or start with `src.` and SHALL raise `ValueError` if it does.
 
 #### Scenario: Reject module:factory format
-- **WHEN** `save_run()` is called with `strategy="src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"`
+- **WHEN** `save_run()` is called with `strategy="src.strategies.medium_term.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"`
 - **THEN** it SHALL raise `ValueError` with a message indicating the strategy must be a normalized slug
 
 #### Scenario: Accept valid slug
-- **WHEN** `save_run()` is called with `strategy="intraday/trend_following/ema_trend_pullback"`
+- **WHEN** `save_run()` is called with `strategy="medium_term/trend_following/ema_trend_pullback"`
 - **THEN** it SHALL proceed normally without error
 
 #### Scenario: Accept legacy alias
@@ -200,8 +200,8 @@ All `ParamRegistry` write methods (`save_run`, `save_backtest_run`, `save_candid
 `ParamRegistry.__init__()` SHALL check for rows in `param_runs` and `param_candidates` where the `strategy` column contains `:` (module:factory format). For each such row, it SHALL attempt to resolve the strategy to a canonical slug and update the column. The migration SHALL be idempotent and logged via structlog.
 
 #### Scenario: Module:factory names migrated
-- **WHEN** `ParamRegistry()` is instantiated and `param_runs` contains a row with `strategy="src.strategies.intraday.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"`
-- **THEN** the `strategy` column SHALL be updated to `"intraday/trend_following/ema_trend_pullback"`
+- **WHEN** `ParamRegistry()` is instantiated and `param_runs` contains a row with `strategy="src.strategies.medium_term.trend_following.ema_trend_pullback:create_ema_trend_pullback_engine"`
+- **THEN** the `strategy` column SHALL be updated to `"medium_term/trend_following/ema_trend_pullback"`
 - **AND** the corresponding `param_candidates` rows SHALL also be updated
 
 #### Scenario: Already-normalized rows unchanged

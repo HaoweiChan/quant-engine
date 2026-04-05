@@ -26,8 +26,8 @@ def compute_strategy_hash(slug: str) -> tuple[str, str]:
 - **THEN** the returned hash SHALL differ from the pre-edit hash
 
 #### Scenario: Slug alias resolved
-- **WHEN** `strategy_file_path("pyramid")` is called and `pyramid` is an alias for `daily/trend_following/pyramid_wrapper`
-- **THEN** the returned Path SHALL point to `src/strategies/daily/trend_following/pyramid_wrapper.py`
+- **WHEN** `strategy_file_path("pyramid")` is called and `pyramid` is an alias for `swing/trend_following/pyramid_wrapper`
+- **THEN** the returned Path SHALL point to `src/strategies/swing/trend_following/pyramid_wrapper.py`
 
 #### Scenario: Missing file raises FileNotFoundError
 - **WHEN** `compute_strategy_hash("nonexistent_slug")` is called and no corresponding `.py` file exists

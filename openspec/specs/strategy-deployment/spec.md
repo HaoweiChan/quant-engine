@@ -26,7 +26,7 @@ class DeployResponse:
 ```
 
 #### Scenario: Deploy to existing session
-- **WHEN** `POST /api/deploy/sinopac-main` is called with `strategy_slug="intraday/trend_following/ema_trend_pullback"`, `symbol="TX"`, `candidate_id=5`
+- **WHEN** `POST /api/deploy/sinopac-main` is called with `strategy_slug="medium_term/trend_following/ema_trend_pullback"`, `symbol="TX"`, `candidate_id=5`
 - **AND** a session for that account+strategy+symbol already exists
 - **THEN** the session's `deployed_candidate_id` SHALL be updated to 5
 - **AND** a `deployment_log` entry SHALL be recorded
