@@ -10,7 +10,9 @@ import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +89,7 @@ def get_crawl_state() -> dict:
 
 
 def _crawl_log(msg: str) -> None:
-    ts = datetime.now().strftime("%H:%M:%S")
+    ts = datetime.now(_TAIPEI_TZ).strftime("%H:%M:%S")
     with _crawl_lock:
         _crawl_state.log_lines.append(f"[{ts}] {msg}")
 
@@ -230,9 +232,14 @@ GRID_PARAMS: dict[str, dict[str, float]] = {
 @dataclass
 class StrategyInfo:
     name: str          # human-readable: "ATR Mean Reversion"
-    module: str        # e.g. "src.strategies.atr_mean_reversion"
+    module: str        # e.g. "src.strategies.short_term.mean_reversion.atr_mean_reversion"
     factory: str       # e.g. "create_atr_mean_reversion_engine"
     param_grid: dict[str, dict] | None = None
+    holding_period: str | None = None
+    signal_timeframe: str | None = None
+    stop_architecture: str | None = None
+    category: str | None = None
+    tradeable_sessions: list[str] | None = None
 
 
 def discover_strategies() -> dict[str, StrategyInfo]:
@@ -241,14 +248,26 @@ def discover_strategies() -> dict[str, StrategyInfo]:
     result: dict[str, StrategyInfo] = {}
     for slug, reg_info in get_all().items():
         grid = get_param_grid(slug)
+        meta = reg_info.meta or {}
         result[slug] = StrategyInfo(
             name=reg_info.name, module=reg_info.module,
             factory=reg_info.factory, param_grid=grid or None,
+            holding_period=reg_info.holding_period.value if reg_info.holding_period else None,
+            signal_timeframe=reg_info.signal_timeframe.value if reg_info.signal_timeframe else None,
+            stop_architecture=reg_info.stop_architecture.value if reg_info.stop_architecture else None,
+            category=reg_info.category.value if reg_info.category else None,
+            tradeable_sessions=meta.get("tradeable_sessions"),
         )
     return result
 
 
-STRATEGY_REGISTRY: dict[str, StrategyInfo] = discover_strategies()
+def get_strategy_registry() -> dict[str, StrategyInfo]:
+    """Return the current strategy registry, re-discovering if invalidated."""
+    return discover_strategies()
+
+
+# Backward compat — prefer get_strategy_registry() for live data
+STRATEGY_REGISTRY: dict[str, StrategyInfo] = get_strategy_registry()
 
 
 def get_param_grid_for_strategy(slug: str) -> dict[str, dict]:
@@ -257,7 +276,7 @@ def get_param_grid_for_strategy(slug: str) -> dict[str, dict]:
     try:
         return get_param_grid(slug)
     except KeyError:
-        info = STRATEGY_REGISTRY.get(slug)
+        info = get_strategy_registry().get(slug)
         return info.param_grid or {} if info else {}
 
 # Objectives available in the optimizer (maps display label → metric key)
@@ -589,6 +608,7 @@ def run_strategy_backtest(
     slippage_bps: float = 0.0,
     commission_bps: float = 0.0,
     provenance: dict | None = None,
+    intraday: bool = False,
 ) -> dict:
     """Run a backtest on real DB data via the MCP facade.
 
@@ -600,7 +620,7 @@ def run_strategy_backtest(
     """
     from src.mcp_server.facade import run_backtest_realdata_for_mcp
 
-    info = STRATEGY_REGISTRY.get(strategy_slug)
+    info = get_strategy_registry().get(strategy_slug)
     if not info:
         raise ValueError(f"Unknown strategy: {strategy_slug}")
     facade_name = strategy_slug
@@ -619,6 +639,7 @@ def run_strategy_backtest(
         strategy=facade_name,
         strategy_params=merged_params,
         initial_equity=initial_equity,
+        intraday=intraday,
     )
     if "error" in result:
         raise ValueError(result["error"])

@@ -26,11 +26,10 @@ async def get_active_params(strategy: str) -> dict:
             code_changed = None
         return {**detail, "source": "registry", "code_changed": code_changed}
     # Fallback to schema defaults
-    slug = "pyramid_wrapper" if strategy == "pyramid" else strategy
     try:
         from src.strategies.registry import get_defaults
 
-        defaults = get_defaults(slug)
+        defaults = get_defaults(strategy)
         return {"params": defaults, "source": "defaults"}
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown strategy '{strategy}'")

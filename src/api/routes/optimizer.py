@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.api.helpers import (
-    STRATEGY_REGISTRY,
+    get_strategy_registry,
     get_optimizer_state,
     get_param_grid_for_strategy,
     start_optimizer_run,
@@ -29,7 +29,7 @@ class OptimizerRequest(BaseModel):
 
 @router.post("/optimizer/run", status_code=202)
 async def run_optimizer(req: OptimizerRequest) -> dict:
-    info = STRATEGY_REGISTRY.get(req.strategy)
+    info = get_strategy_registry().get(req.strategy)
     if not info:
         raise HTTPException(status_code=400, detail=f"Unknown strategy: {req.strategy}")
     started = start_optimizer_run(

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 from fastapi import APIRouter
 
@@ -79,7 +81,7 @@ def _resolve_deployment_info(session) -> dict:
 
 @router.get("/war-room")
 async def war_room() -> dict:
-    fetched_at = datetime.now(timezone.utc).isoformat()
+    fetched_at = datetime.now(_TAIPEI_TZ).isoformat()
     try:
         data = get_war_room_data()
     except Exception as exc:

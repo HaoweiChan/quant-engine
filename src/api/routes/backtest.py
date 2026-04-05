@@ -20,6 +20,7 @@ class BacktestRequest(BaseModel):
     slippage_bps: float = 0.0
     commission_bps: float = 0.0
     provenance: dict | None = None
+    intraday: bool = False
 
 
 @router.post("/backtest/run")
@@ -36,6 +37,7 @@ async def run_backtest(req: BacktestRequest) -> dict:
             slippage_bps=req.slippage_bps,
             commission_bps=req.commission_bps,
             provenance=req.provenance,
+            intraday=req.intraday,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

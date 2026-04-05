@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -22,7 +24,7 @@ async def push_risk_alert(severity: str, trigger: str, details: str) -> None:
         "severity": severity,
         "trigger": trigger,
         "details": details,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(_TAIPEI_TZ).isoformat(),
     }
     async with _lock:
         dead: list[WebSocket] = []
@@ -53,7 +55,7 @@ async def risk_alerts_ws(ws: WebSocket) -> None:
             except asyncio.TimeoutError:
                 await ws.send_json({
                     "type": "heartbeat",
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now(_TAIPEI_TZ).isoformat(),
                 })
     except WebSocketDisconnect:
         pass
