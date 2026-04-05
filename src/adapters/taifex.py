@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import tomllib
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from pathlib import Path
 from typing import Any
 
@@ -50,12 +52,14 @@ class TaifexAdapter(BaseAdapter):
         return MarketSnapshot(
             price=float(data["price"]),
             atr=atr,
-            timestamp=data.get("timestamp", datetime.now()),
+            timestamp=data.get("timestamp", datetime.now(_TAIPEI_TZ)),
             margin_per_unit=specs.margin_initial,
             point_value=specs.point_value,
             min_lot=1.0,
             contract_specs=specs,
             volume=float(data.get("volume", 0.0)),
+            bar_high=float(data["high"]) if "high" in data else None,
+            bar_low=float(data["low"]) if "low" in data else None,
         )
 
     def calc_margin(self, contract_type: str, lots: float) -> float:

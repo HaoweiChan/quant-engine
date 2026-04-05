@@ -7,7 +7,9 @@ import structlog
 import threading
 from typing import Any
 from zoneinfo import ZoneInfo
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 from src.broker_gateway.abc import BrokerGateway
 from src.broker_gateway.live_bar_store import LiveMinuteBarStore
@@ -285,7 +287,7 @@ class SinopacGateway(BrokerGateway):
 
         return AccountSnapshot(
             connected=True,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(_TAIPEI_TZ),
             equity=equity,
             cash=equity - margin_used,
             unrealized_pnl=unrealized,
@@ -339,7 +341,7 @@ class SinopacGateway(BrokerGateway):
             if not order:
                 continue
             result.append(Fill(
-                timestamp=datetime.now(),
+                timestamp=datetime.now(_TAIPEI_TZ),
                 symbol=getattr(order, "code", ""),
                 side="buy" if getattr(order, "action", "") == "Buy" else "sell",
                 price=float(getattr(status, "deal_price", 0) if status else 0),
@@ -375,7 +377,7 @@ class SinopacGateway(BrokerGateway):
                     remaining_quantity=remaining,
                     limit_price=float(getattr(order, "price", 0.0) or 0.0),
                     status=status_value,
-                    updated_at=datetime.now(),
+                    updated_at=datetime.now(_TAIPEI_TZ),
                 )
             )
         return result
@@ -414,7 +416,7 @@ class SinopacGateway(BrokerGateway):
                     event_type=status_text.lower(),
                     price=float(getattr(status, "deal_price", 0.0) or 0.0) if status else None,
                     quantity=float(getattr(order, "quantity", 0.0)),
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(_TAIPEI_TZ),
                 )
             )
         events.sort(key=lambda item: item.timestamp)

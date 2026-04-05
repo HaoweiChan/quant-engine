@@ -1,7 +1,9 @@
 """MockGateway — synthetic account data for dashboard development."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 import numpy as np
 
@@ -56,7 +58,7 @@ class MockGateway(BrokerGateway):
         unrealized = sum(p.unrealized_pnl for p in positions)
         margin_used = sum(p.margin_required for p in positions)
         fills = [
-            Fill(datetime.now() - timedelta(minutes=int(self._rng.integers(5, 120))),
+            Fill(datetime.now(_TAIPEI_TZ) - timedelta(minutes=int(self._rng.integers(5, 120))),
                  "TX", "buy", 20100.0 + self._rng.normal(0, 50), 1.0, f"mock-{self._step}", 25.0),
         ]
         open_orders = [
@@ -68,7 +70,7 @@ class MockGateway(BrokerGateway):
                 remaining_quantity=1.0,
                 limit_price=20000.0,
                 status="submitted",
-                updated_at=datetime.now(),
+                updated_at=datetime.now(_TAIPEI_TZ),
             ),
         ]
         self._cursor += 1
@@ -79,12 +81,12 @@ class MockGateway(BrokerGateway):
                 event_type="ack",
                 price=None,
                 quantity=1.0,
-                timestamp=datetime.now(),
+                timestamp=datetime.now(_TAIPEI_TZ),
             )
         )
         return AccountSnapshot(
             connected=True,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(_TAIPEI_TZ),
             equity=new_eq,
             cash=new_eq - margin_used,
             unrealized_pnl=unrealized,
@@ -101,7 +103,7 @@ class MockGateway(BrokerGateway):
         rng = np.random.default_rng(99)
         eq = self._initial
         result: list[tuple[datetime, float]] = []
-        now = datetime.now()
+        now = datetime.now(_TAIPEI_TZ)
         for i in range(days):
             eq *= 1 + rng.normal(0.0003, 0.012)
             result.append((now - timedelta(days=days - i), eq))

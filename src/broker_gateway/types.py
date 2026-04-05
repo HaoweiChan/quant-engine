@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 from dataclasses import dataclass, field
 
 
@@ -70,7 +72,7 @@ class AccountSnapshot:
         """Return a sentinel snapshot for when the broker is unreachable."""
         return cls(
             connected=False,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(_TAIPEI_TZ),
             equity=0.0,
             cash=0.0,
             unrealized_pnl=0.0,
