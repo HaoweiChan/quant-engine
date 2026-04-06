@@ -23,6 +23,7 @@ class MonteCarloRequest(BaseModel):
     initial_capital: float = 2_000_000.0
     slippage_bps: float = 0.0
     commission_bps: float = 0.0
+    commission_fixed_per_contract: float = 0.0
     n_paths: int = Field(500, ge=10, le=5000)
     n_days: int = Field(252, ge=20, le=1000)
     method: Literal["stationary", "circular", "garch"] = "stationary"
@@ -44,6 +45,7 @@ async def run_monte_carlo(req: MonteCarloRequest) -> dict:
             strategy_params=req.params,
             slippage_bps=req.slippage_bps,
             commission_bps=req.commission_bps,
+            commission_fixed_per_contract=req.commission_fixed_per_contract,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

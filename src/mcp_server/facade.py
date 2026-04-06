@@ -6,9 +6,15 @@ All functions accept flat dicts and return JSON-serializable dicts.
 from __future__ import annotations
 
 import importlib
+import os
 from typing import Any
 
 from src.simulator.types import PRESETS, PathConfig
+
+# Factory cache: avoids importlib.reload() on every MC worker / sweep trial.
+# Set QUANT_RELOAD_STRATEGY=1 to force reload (useful during dev).
+_factory_cache: dict[str, Any] = {}
+_RELOAD_STRATEGY = os.environ.get("QUANT_RELOAD_STRATEGY", "0") == "1"
 
 
 def _compute_force_flat_indices(timestamps: list) -> set[int]:
@@ -51,23 +57,35 @@ def resolve_factory(strategy: str) -> Any:
     1. Strategy registry (slug or alias)
     2. "module:factory" format (external strategies)
     3. Raise ValueError
+
+    Results are cached per-process to avoid expensive importlib.reload()
+    on every MC path / sweep trial.  Set QUANT_RELOAD_STRATEGY=1 to bypass.
     """
+    if strategy in _factory_cache and not _RELOAD_STRATEGY:
+        return _factory_cache[strategy]
+
     from src.strategies.registry import get_all, get_info
 
+    result = None
     try:
         info = get_info(strategy)
         mod = importlib.import_module(info.module)
-        importlib.reload(mod)
-        return getattr(mod, info.factory)
+        if _RELOAD_STRATEGY:
+            importlib.reload(mod)
+        result = getattr(mod, info.factory)
     except KeyError:
         pass
-    if ":" in strategy:
+    if result is None and ":" in strategy:
         mod_path, fn_name = strategy.rsplit(":", 1)
         mod = importlib.import_module(mod_path)
-        importlib.reload(mod)
-        return getattr(mod, fn_name)
-    available = list(get_all().keys())
-    raise ValueError(f"Unknown strategy '{strategy}'. Available: {available}")
+        if _RELOAD_STRATEGY:
+            importlib.reload(mod)
+        result = getattr(mod, fn_name)
+    if result is None:
+        available = list(get_all().keys())
+        raise ValueError(f"Unknown strategy '{strategy}'. Available: {available}")
+    _factory_cache[strategy] = result
+    return result
 
 
 def resolve_strategy_slug(strategy: str) -> str:
@@ -216,18 +234,26 @@ def _build_runner(
     periods_per_year: float = 252.0,
     fill_model=None,
     initial_equity: float = 2_000_000.0,
+    instrument: str = "TX",
 ):
     """Build a BacktestRunner for any strategy. Single source of truth."""
     from src.simulator.backtester import BacktestRunner
-    from src.core.types import ImpactParams
+    from src.core.types import ImpactParams, get_instrument_cost_config
     from src.simulator.fill_model import MarketImpactFillModel
 
+    cost_config = get_instrument_cost_config(instrument)
     factory = resolve_factory(strategy)
     adapter = _get_adapter()
     merged = dict(strategy_params or {})
-    slippage_bps = float(merged.pop("slippage_bps", 0.0))
-    commission_bps = float(merged.pop("commission_bps", 0.0))
-    commission_fixed = float(merged.pop("commission_fixed_per_contract", 0.0))
+    # Use instrument defaults when caller doesn't provide explicit cost params
+    has_explicit_slippage = "slippage_bps" in merged
+    has_explicit_commission_bps = "commission_bps" in merged
+    has_explicit_commission_fixed = "commission_fixed_per_contract" in merged
+    slippage_bps = float(merged.pop("slippage_bps", cost_config.slippage_bps))
+    commission_bps = float(merged.pop("commission_bps", cost_config.commission_bps))
+    commission_fixed = float(merged.pop(
+        "commission_fixed_per_contract", cost_config.commission_per_contract
+    ))
     if fill_model is None:
         impact_params = ImpactParams(
             spread_bps=slippage_bps,
@@ -595,6 +621,16 @@ def run_backtest_realdata_for_mcp(
 
         registry = ParamRegistry()
         save_metrics = {**base.get("metrics", {}), "total_pnl": base.get("total_pnl"), "alpha": alpha}
+        # Build notes with cost setup and params fingerprint for dedup
+        _sp = strategy_params or {}
+        _slip_bps = _sp.get("slippage_bps", 0)
+        _comm_fixed = _sp.get("commission_fixed_per_contract", 0)
+        cost_note = f"sbps={_slip_bps}|cfix={_comm_fixed}" if (_slip_bps or _comm_fixed) else None
+        # Include a short hash of params so different params = different runs
+        import hashlib, json as _json
+        _p_str = _json.dumps(_sp, sort_keys=True)
+        _p_hash = hashlib.md5(_p_str.encode()).hexdigest()[:8]
+        cost_note = f"p={_p_hash}" + (f"|{cost_note}" if cost_note else "")
         run_id = registry.save_backtest_run(
             strategy=resolved_slug,
             symbol=symbol,
@@ -605,6 +641,7 @@ def run_backtest_realdata_for_mcp(
             start=start,
             end=end,
             timeframe=f"{bar_agg}min{'|intraday' if intraday else ''}",
+            notes=cost_note,
             initial_capital=initial_equity,
             strategy_hash=strategy_hash,
             strategy_code=strategy_code,
@@ -675,10 +712,28 @@ def run_monte_carlo_for_mcp(
 
 
 def _mc_single_path(args: tuple) -> tuple[float, float, float]:
-    """Worker function for parallel MC. Must be at module level for pickling."""
-    strategy_name, strategy_params, path_array, path_config, timeframe = args
+    """Worker function for parallel MC. Must be at module level for pickling.
+
+    Accepts a seed index instead of a pre-generated path array so that each
+    worker generates its own path — avoids serializing large numpy arrays
+    through the multiprocessing boundary.
+    """
+    strategy_name, strategy_params, seed_idx, path_config, timeframe = args
     from src.simulator.backtester import BacktestRunner
     from src.simulator.metrics import max_drawdown_pct, sharpe_ratio
+    from src.simulator.price_gen import generate_path
+
+    per_path_config = PathConfig(
+        drift=path_config.drift, volatility=path_config.volatility,
+        garch_omega=path_config.garch_omega, garch_alpha=path_config.garch_alpha,
+        garch_beta=path_config.garch_beta, student_t_df=path_config.student_t_df,
+        jump_intensity=path_config.jump_intensity, jump_mean=path_config.jump_mean,
+        jump_std=path_config.jump_std, ou_theta=path_config.ou_theta,
+        ou_mu=path_config.ou_mu, ou_sigma=path_config.ou_sigma,
+        n_bars=path_config.n_bars, start_price=path_config.start_price,
+        seed=path_config.seed + seed_idx if path_config.seed is not None else None,
+    )
+    path_array = generate_path(per_path_config)
 
     factory = resolve_factory(strategy_name)
     engine_factory = lambda: factory(**strategy_params)  # noqa: E731
@@ -690,6 +745,32 @@ def _mc_single_path(args: tuple) -> tuple[float, float, float]:
     return (pnl, max_drawdown_pct(result.equity_curve), sharpe_ratio(result.equity_curve))
 
 
+def _check_memory(min_available_gb: float = 1.0) -> None:
+    """Raise if available memory is below threshold."""
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        avail_gb = mem.available / (1024**3)
+        if avail_gb < min_available_gb:
+            raise MemoryError(
+                f"Only {avail_gb:.1f} GB available (need {min_available_gb}). "
+                f"Reduce n_paths or wait for other sessions to finish."
+            )
+    except ImportError:
+        pass  # psutil not installed — skip check
+
+
+# Per-session MC worker cap.  Divides CPU budget by 3 (assumes up to 3
+# concurrent sessions).  Override via QUANT_MC_WORKERS env var.
+import os as _os
+_MAX_MC_WORKERS = int(
+    _os.environ.get(
+        "QUANT_MC_WORKERS",
+        max(1, (_os.cpu_count() or 4) // 3),
+    )
+)
+
+
 def _run_mc_with_runner(
     strategy_name: str,
     strategy_params: dict[str, Any],
@@ -697,22 +778,29 @@ def _run_mc_with_runner(
     path_config: PathConfig,
     timeframe: str = "daily",
 ) -> Any:
-    """Run MC for non-pyramid strategies, using multiprocessing for intraday."""
+    """Run MC for non-pyramid strategies, using multiprocessing for intraday.
+
+    Generates paths one-at-a-time (streaming) to keep peak memory at O(n_bars)
+    instead of O(n_paths * n_bars).  Workers generate their own paths to avoid
+    serializing large numpy arrays through IPC.
+    """
     import os
 
     import numpy as np
 
-    from src.simulator.price_gen import generate_paths
+    from src.simulator.price_gen import generate_path
     from src.simulator.types import MonteCarloResult
 
-    paths = generate_paths(n_paths, path_config)
+    _check_memory(min_available_gb=1.0)
+
     use_mp = timeframe in ("intraday", "1m") and n_paths > 1
     if use_mp:
         from concurrent.futures import ProcessPoolExecutor
 
-        workers = min(n_paths, os.cpu_count() or 4)
+        workers = min(n_paths, _MAX_MC_WORKERS)
         work_items = [
-            (strategy_name, strategy_params, path, path_config, timeframe) for path in paths
+            (strategy_name, strategy_params, i, path_config, timeframe)
+            for i in range(n_paths)
         ]
         with ProcessPoolExecutor(max_workers=workers) as pool:
             results_list = list(pool.map(_mc_single_path, work_items))
@@ -725,7 +813,18 @@ def _run_mc_with_runner(
         adapter = _get_adapter()
         runner = BacktestRunner(engine_factory, adapter)
         results_list = []
-        for path in paths:
+        for i in range(n_paths):
+            cfg = PathConfig(
+                drift=path_config.drift, volatility=path_config.volatility,
+                garch_omega=path_config.garch_omega, garch_alpha=path_config.garch_alpha,
+                garch_beta=path_config.garch_beta, student_t_df=path_config.student_t_df,
+                jump_intensity=path_config.jump_intensity, jump_mean=path_config.jump_mean,
+                jump_std=path_config.jump_std, ou_theta=path_config.ou_theta,
+                ou_mu=path_config.ou_mu, ou_sigma=path_config.ou_sigma,
+                n_bars=path_config.n_bars, start_price=path_config.start_price,
+                seed=path_config.seed + i if path_config.seed is not None else None,
+            )
+            path = generate_path(cfg)
             bars, timestamps = _bars_from_path(path, path_config, timeframe)
             result = runner.run(bars, timestamps=timestamps)
             pnl = result.equity_curve[-1] - result.equity_curve[0]
@@ -798,6 +897,8 @@ def run_sweep_for_mcp(
                 "Fix the most important 1-2 parameters and sweep the rest."
             )
         }
+
+    _check_memory(min_available_gb=1.0)
 
     from datetime import datetime
     from pathlib import Path
@@ -948,7 +1049,10 @@ def run_sweep_for_mcp(
             force_flat_indices=sweep_force_flat,
         )
 
-    trials_data = result.trials.to_dicts() if len(result.trials) > 0 else []
+    # Only materialize top 5 trials — avoids converting the full DataFrame to
+    # a list of dicts (which can be hundreds of rows for large sweeps).
+    n_trials = len(result.trials)
+    trials_data = result.trials.head(5).to_dicts() if n_trials > 0 else []
     # Persist to param registry
     run_id = None
     pareto_candidates = []
@@ -975,6 +1079,7 @@ def run_sweep_for_mcp(
             initial_capital=2_000_000.0,
             strategy_hash=strategy_hash,
             strategy_code=strategy_code,
+            base_params=clamped_base,
         )
         pareto = registry.get_pareto_frontier(run_id)
         pareto_candidates = [
@@ -1014,7 +1119,9 @@ def run_sweep_for_mcp(
             from src.strategies.param_registry import ParamRegistry as _PR2
             _reg2 = _PR2()
             _reg2.save_fullperiod_trial(
-                run_id=run_id, params=result.best_params, metrics=full_metrics,
+                run_id=run_id,
+                params={**clamped_base, **result.best_params},
+                metrics=full_metrics,
             )
             _reg2.close()
             _fp_keys = [
@@ -1046,7 +1153,7 @@ def run_sweep_for_mcp(
         "best_params": result.best_params,
         "best_is_metrics": result.best_is_result.metrics,
         "best_oos_metrics": result.best_oos_result.metrics if result.best_oos_result else None,
-        "n_trials": len(trials_data),
+        "n_trials": n_trials,
         "top_5": trials_data[:5],
         "warnings": result.warnings,
         "param_warnings": param_warnings,
@@ -1068,6 +1175,15 @@ def run_sweep_for_mcp(
     return out
 
 
+def _get_stress_bar_agg(slug: str) -> int:
+    """Get bar aggregation factor for a strategy, defaulting to 1 (daily)."""
+    try:
+        from src.strategies.registry import get_bar_agg
+        return get_bar_agg(slug)
+    except Exception:
+        return 1
+
+
 def run_stress_for_mcp(
     scenarios: list[str] | None = None,
     strategy_params: dict[str, Any] | None = None,
@@ -1077,6 +1193,7 @@ def run_stress_for_mcp(
     from src.simulator.stress import (
         _generate_scenario_prices,
         _prices_to_bars,
+        _prices_to_intraday_bars,
         flash_crash_scenario,
         gap_down_scenario,
         liquidity_crisis_scenario,
@@ -1119,7 +1236,12 @@ def run_stress_for_mcp(
         engine_factory = lambda: factory(**merged)  # noqa: E731
         runner = BacktestRunner(engine_factory, adapter)
         prices = _generate_scenario_prices(scenario_obj, 20000.0)
-        bars, timestamps = _prices_to_bars(prices)
+        bar_agg = _get_stress_bar_agg(resolved_slug)
+        if bar_agg > 1:
+            bars_per_day = 1065 // bar_agg
+            bars, timestamps = _prices_to_intraday_bars(prices, bars_per_day)
+        else:
+            bars, timestamps = _prices_to_bars(prices)
         result = runner.run(bars, timestamps=timestamps)
         cb_triggered = any(f.reason == "circuit_breaker" for f in result.trade_log)
         stops = [f.reason for f in result.trade_log if "stop" in f.reason.lower()]
@@ -1263,3 +1385,530 @@ def get_active_params_for_mcp(strategy: str = "pyramid") -> dict[str, Any]:
         }
     except KeyError:
         return {"error": f"Unknown strategy '{strategy}'"}
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward validation
+# ---------------------------------------------------------------------------
+
+
+def run_walk_forward_for_mcp(
+    strategy: str = "pyramid",
+    n_folds: int = 3,
+    oos_fraction: float = 0.2,
+    session: str = "all",
+    max_sweep_combinations: int = 50,
+    strategy_params: dict[str, Any] | None = None,
+    symbol: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    initial_equity: float = 2_000_000.0,
+) -> dict[str, Any]:
+    """Run expanding-window walk-forward validation."""
+    from datetime import datetime as _dt
+    from pathlib import Path
+
+    from src.simulator.walk_forward import (
+        WalkForwardConfig,
+        FoldResult,
+        build_walk_forward_result,
+        compute_expanding_folds,
+        compute_overfit_ratio,
+        filter_bars_by_session,
+    )
+
+    resolved_slug = resolve_strategy_slug(strategy)
+
+    if not (symbol and start and end):
+        return {
+            "error": "Walk-forward requires symbol, start, and end for real-data evaluation"
+        }
+
+    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "taifex_data.db"
+    if not db_path.exists():
+        return {"error": f"Database not found at {db_path}"}
+
+    from src.data.db import Database
+
+    db = Database(f"sqlite:///{db_path}")
+    start_dt = _dt.fromisoformat(start)
+    end_dt = _dt.fromisoformat(end)
+    raw = db.get_ohlcv(symbol, start_dt, end_dt)
+    if not raw:
+        return {"error": f"No data for {symbol} in {start}–{end}"}
+
+    from src.strategies.registry import get_bar_agg
+    meta_bar_agg = get_bar_agg(resolved_slug)
+    bar_agg = int((strategy_params or {}).get("bar_agg", meta_bar_agg))
+    if bar_agg > 1:
+        raw = _aggregate_bars(raw, bar_agg)
+
+    from statistics import mean as _mean
+    daily_ranges = [b.high - b.low for b in raw]
+    daily_atr = _mean(daily_ranges) if daily_ranges else 0.0
+
+    bars = [
+        {
+            "symbol": symbol,
+            "price": b.close,
+            "open": b.open,
+            "high": b.high,
+            "low": b.low,
+            "close": b.close,
+            "volume": float(b.volume),
+            "daily_atr": daily_atr,
+            "timestamp": b.timestamp,
+        }
+        for b in raw
+    ]
+    timestamps = [b.timestamp for b in raw]
+
+    # Filter by session if needed
+    bars, timestamps, _ = filter_bars_by_session(bars, timestamps, session)
+
+    # Compute folds
+    folds_splits = compute_expanding_folds(timestamps, n_folds, oos_fraction)
+
+    from src.strategies.registry import is_intraday_strategy
+    is_intraday = is_intraday_strategy(resolved_slug)
+    bars_per_day = len(bars) / max(len(set(str(t)[:10] for t in timestamps)), 1)
+    ppy = bars_per_day * 252 if bars_per_day > 10 else 252.0
+
+    fold_results: list[FoldResult] = []
+    for fold_idx, (is_indices, oos_indices) in enumerate(folds_splits):
+        is_bars = [bars[i] for i in is_indices]
+        is_ts = [timestamps[i] for i in is_indices]
+        oos_bars = [bars[i] for i in oos_indices]
+        oos_ts = [timestamps[i] for i in oos_indices]
+
+        # IS: run a backtest with current params to get IS Sharpe
+        is_runner = _build_runner(
+            resolved_slug, strategy_params, periods_per_year=ppy,
+            initial_equity=initial_equity, instrument=symbol,
+        )
+        is_force_flat: set[int] | None = None
+        if is_intraday:
+            is_force_flat = _compute_force_flat_indices(is_ts)
+        is_result = is_runner.run(is_bars, timestamps=is_ts, force_flat_indices=is_force_flat)
+        is_sharpe = is_result.metrics.get("sharpe", 0.0)
+
+        # OOS: run backtest on OOS window with same params
+        oos_runner = _build_runner(
+            resolved_slug, strategy_params, periods_per_year=ppy,
+            initial_equity=initial_equity, instrument=symbol,
+        )
+        oos_force_flat: set[int] | None = None
+        if is_intraday:
+            oos_force_flat = _compute_force_flat_indices(oos_ts)
+        oos_result = oos_runner.run(oos_bars, timestamps=oos_ts, force_flat_indices=oos_force_flat)
+        oos_sharpe = oos_result.metrics.get("sharpe", 0.0)
+        oos_mdd = oos_result.metrics.get("max_drawdown_pct", 0.0)
+        oos_win = oos_result.metrics.get("win_rate", 0.0)
+        oos_trades = int(oos_result.metrics.get("trade_count", 0))
+        oos_pf = oos_result.metrics.get("profit_factor", 0.0)
+
+        fold_results.append(FoldResult(
+            fold_index=fold_idx,
+            is_start=is_ts[0] if is_ts else _dt(2020, 1, 1),
+            is_end=is_ts[-1] if is_ts else _dt(2020, 1, 1),
+            oos_start=oos_ts[0] if oos_ts else _dt(2020, 1, 1),
+            oos_end=oos_ts[-1] if oos_ts else _dt(2020, 1, 1),
+            is_best_params=strategy_params or {},
+            is_sharpe=is_sharpe,
+            oos_sharpe=oos_sharpe,
+            oos_mdd_pct=oos_mdd,
+            oos_win_rate=oos_win,
+            oos_n_trades=oos_trades,
+            oos_profit_factor=oos_pf,
+            overfit_ratio=compute_overfit_ratio(is_sharpe, oos_sharpe),
+        ))
+
+    wf_result = build_walk_forward_result(fold_results)
+
+    return {
+        "strategy": strategy,
+        "n_folds": n_folds,
+        "session": session,
+        "aggregate_oos_sharpe": wf_result.aggregate_oos_sharpe,
+        "mean_overfit_ratio": wf_result.mean_overfit_ratio,
+        "overfit_flag": wf_result.overfit_flag,
+        "passed": wf_result.passed,
+        "failure_reasons": wf_result.failure_reasons,
+        "folds": [
+            {
+                "fold_index": f.fold_index,
+                "is_start": f.is_start.isoformat() if hasattr(f.is_start, "isoformat") else str(f.is_start),
+                "is_end": f.is_end.isoformat() if hasattr(f.is_end, "isoformat") else str(f.is_end),
+                "oos_start": f.oos_start.isoformat() if hasattr(f.oos_start, "isoformat") else str(f.oos_start),
+                "oos_end": f.oos_end.isoformat() if hasattr(f.oos_end, "isoformat") else str(f.oos_end),
+                "is_sharpe": f.is_sharpe,
+                "oos_sharpe": f.oos_sharpe,
+                "oos_mdd_pct": f.oos_mdd_pct,
+                "oos_win_rate": f.oos_win_rate,
+                "oos_n_trades": f.oos_n_trades,
+                "oos_profit_factor": f.oos_profit_factor,
+                "overfit_ratio": f.overfit_ratio,
+            }
+            for f in wf_result.folds
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Parameter sensitivity check (±20% perturbation)
+# ---------------------------------------------------------------------------
+
+
+def run_sensitivity_check_for_mcp(
+    strategy: str,
+    best_params: dict[str, Any] | None = None,
+    perturbation_pct: float = 20.0,
+    n_steps: int = 5,
+    instrument: str = "TX",
+) -> dict[str, Any]:
+    """Run a ±N% parameter sensitivity sweep on a strategy.
+
+    Tests robustness by perturbing each parameter and checking if performance
+    degrades sharply (cliff), indicating overfitting.
+
+    Returns:
+    - per_param: list of sensitivity results per parameter
+    - passed: bool, True if all params stable (no cliffs, CV < 0.20 for all)
+    - max_degradation_pct: maximum Sharpe drop across all params
+    - likely_overfit: bool, True if >50% of params show cliff or instability
+    """
+    from src.simulator.param_sensitivity import (
+        analyze_param_sensitivity,
+        aggregate_sensitivity,
+        generate_perturbation_grid,
+    )
+
+    resolved_slug = resolve_strategy_slug(strategy)
+
+    # Step 1: Get parameter schema and active/provided best params
+    schema = get_strategy_parameter_schema(resolved_slug)
+    param_defs = schema.get("PARAM_SCHEMA", {})
+
+    if best_params is None:
+        active = get_active_params_for_mcp(strategy=resolved_slug)
+        best_params = active.get("params", {})
+
+    if not best_params:
+        return {
+            "error": "No parameters provided and no active candidate found",
+            "passed": False,
+            "per_param": [],
+        }
+
+    # Step 2: For each parameter, generate perturbation grid and run backtests
+    sensitivity_results = []
+    pct_range = perturbation_pct / 100.0
+
+    for param_name, param_value in best_params.items():
+        if param_name not in param_defs:
+            continue  # Skip unknown params
+
+        param_def = param_defs[param_name]
+        is_integer = param_def.get("type") == "int"
+        min_bound = param_def.get("min")
+        max_bound = param_def.get("max")
+
+        # Generate grid
+        grid = generate_perturbation_grid(
+            current_value=float(param_value),
+            pct_range=pct_range,
+            n_steps=n_steps,
+            is_integer=is_integer,
+            min_bound=float(min_bound) if min_bound is not None else None,
+            max_bound=float(max_bound) if max_bound is not None else None,
+        )
+
+        # Run backtest for each grid point (using a quick synthetic test)
+        sharpe_values = []
+        baseline_sharpe = None
+
+        for grid_val in grid:
+            test_params = {**best_params, param_name: grid_val}
+            result = run_backtest_for_mcp(
+                scenario="strong_bull",
+                strategy=resolved_slug,
+                strategy_params=test_params,
+                n_bars=252,
+                timeframe="daily",
+            )
+            sharpe = result.get("metrics", {}).get("sharpe", 0.0)
+            sharpe_values.append(float(sharpe))
+
+            # Capture baseline (the original value)
+            if abs(grid_val - float(param_value)) < 1e-6:
+                baseline_sharpe = float(sharpe)
+
+        if baseline_sharpe is None:
+            baseline_sharpe = float(best_params[param_name])
+
+        # Analyze this parameter
+        sen_result = analyze_param_sensitivity(
+            param_name=param_name,
+            grid_values=grid,
+            sharpe_values=sharpe_values,
+            baseline_sharpe=baseline_sharpe,
+        )
+        sensitivity_results.append(sen_result)
+
+    # Step 3: Aggregate across all parameters
+    agg = aggregate_sensitivity(sensitivity_results)
+
+    # Step 4: Format output
+    per_param_out = []
+    for sr in agg.per_param:
+        per_param_out.append({
+            "param_name": sr.param_name,
+            "grid_values": sr.grid_values,
+            "sharpe_values": sr.sharpe_values,
+            "baseline_sharpe": sr.baseline_sharpe,
+            "max_sharpe_drop_pct": sr.max_sharpe_drop_pct,
+            "cliff_detected": sr.cliff_detected,
+            "stability_cv": sr.stability_cv,
+            "stable": sr.stable,
+            "optimal_at_boundary": sr.optimal_at_boundary,
+        })
+
+    return {
+        "strategy": strategy,
+        "perturbation_pct": perturbation_pct,
+        "n_steps": n_steps,
+        "passed": agg.robust,
+        "likely_overfit": agg.likely_overfit,
+        "per_param": per_param_out,
+        "max_degradation_pct": max(
+            (r.max_sharpe_drop_pct for r in agg.per_param), default=0.0
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Risk report
+# ---------------------------------------------------------------------------
+
+
+def run_risk_report_for_mcp(
+    strategy: str = "pyramid",
+    instrument: str = "TX",
+    symbol: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    n_folds: int = 3,
+) -> dict[str, Any]:
+    """Generate a unified risk report by orchestrating all 5 evaluation layers.
+
+    Layers:
+    - L1 (Cost): Always computed from strategy metrics
+    - L2 (Sensitivity): Computed via run_sensitivity_check
+    - L3 (Regime): Computed via run_monte_carlo across scenarios
+    - L4 (Adversarial): Computed via run_stress_test
+    - L5 (Walk-forward): Only computed if symbol, start, end provided (real data)
+    """
+    from src.simulator.risk_report import build_risk_report
+    from src.simulator.param_sensitivity import AggregatedSensitivity, SensitivityResult
+    from src.simulator.regime import RegimeMetrics
+    from src.simulator.adversarial import AdversarialResult
+    from src.simulator.walk_forward import WalkForwardResult, compute_overfit_ratio
+    from src.core.types import get_instrument_cost_config
+
+    resolved_slug = resolve_strategy_slug(strategy)
+    cost_config = get_instrument_cost_config(instrument)
+
+    # Get active params for the strategy (used in L2 and L3)
+    active_params_info = get_active_params_for_mcp(strategy=resolved_slug)
+    best_params = active_params_info.get("params", {})
+
+    # ===== L1: Cost Model =====
+    # Run a quick baseline backtest to get cost metrics
+    l1_result = run_backtest_for_mcp(
+        scenario="strong_bull",
+        strategy=resolved_slug,
+        strategy_params=best_params,
+        n_bars=252,
+    )
+    l1_net_sharpe = l1_result.get("metrics", {}).get("sharpe", 0.0)
+    l1_cost_drag = 0.0
+    if "impact_report" in l1_result:
+        ir = l1_result["impact_report"]
+        if ir.get("naive_pnl", 0) != 0:
+            l1_cost_drag = (
+                (ir.get("naive_pnl", 0) - ir.get("realistic_pnl", 0))
+                / ir.get("naive_pnl", 1.0) * 100.0
+            )
+
+    # ===== L2: Parameter Sensitivity =====
+    l2_sensitivity = None
+    try:
+        l2_result = run_sensitivity_check_for_mcp(
+            strategy=resolved_slug,
+            best_params=best_params,
+            perturbation_pct=20.0,
+            n_steps=5,
+            instrument=instrument,
+        )
+        # Convert to AggregatedSensitivity
+        if l2_result.get("per_param"):
+            per_param_results = []
+            for pp in l2_result["per_param"]:
+                sr = SensitivityResult(
+                    param_name=pp["param_name"],
+                    grid_values=pp["grid_values"],
+                    sharpe_values=pp["sharpe_values"],
+                    baseline_sharpe=pp["baseline_sharpe"],
+                    max_sharpe_drop_pct=pp["max_sharpe_drop_pct"],
+                    cliff_detected=pp["cliff_detected"],
+                    stability_cv=pp["stability_cv"],
+                    optimal_at_boundary=pp["optimal_at_boundary"],
+                    unstable=pp["stability_cv"] > 0.30,
+                )
+                per_param_results.append(sr)
+            l2_sensitivity = AggregatedSensitivity(
+                per_param=per_param_results,
+                likely_overfit=l2_result["likely_overfit"],
+                robust=l2_result["passed"],
+            )
+    except Exception:
+        l2_sensitivity = None
+
+    # ===== L3: Regime Monte Carlo =====
+    l3_regime_metrics = None
+    try:
+        regime_labels = ["strong_bull", "sideways", "bear"]
+        regime_metrics_list = []
+        for regime_label in regime_labels:
+            mc_result = run_monte_carlo_for_mcp(
+                scenario=regime_label,
+                strategy=resolved_slug,
+                strategy_params=best_params,
+                n_paths=100,
+                n_bars=252,
+            )
+            mc_metrics = mc_result.get("metrics", {})
+            regime_metrics_list.append(
+                RegimeMetrics(
+                    regime_label=regime_label,
+                    n_sessions=int(mc_result.get("n_paths", 1)),
+                    sharpe=float(mc_metrics.get("sharpe_p50", 0.0)),
+                    mdd_pct=float(mc_metrics.get("max_drawdown_p50", 0.0)),
+                    win_rate=float(mc_metrics.get("win_rate_p50", 0.0)),
+                    avg_return=float(mc_metrics.get("mean_daily_return_p50", 0.0)),
+                    total_pnl=float(mc_result.get("metrics", {}).get("total_pnl_p50", 0.0)),
+                )
+            )
+        l3_regime_metrics = regime_metrics_list if regime_metrics_list else None
+    except Exception:
+        l3_regime_metrics = None
+
+    # ===== L4: Adversarial Injection (via stress test proxy) =====
+    l4_adversarial = None
+    try:
+        stress_result = run_stress_for_mcp(
+            scenarios=["flash_crash", "gap_down", "slow_bleed"],
+            strategy=resolved_slug,
+            strategy_params=best_params,
+        )
+        # Use worst-case scenario as adversarial proxy
+        worst_equity = float("inf")
+        if stress_result.get("results"):
+            for scenario_name, res in stress_result["results"].items():
+                final_eq = res.get("metrics", {}).get("total_pnl", 0.0)
+                if final_eq < worst_equity:
+                    worst_equity = final_eq
+        if worst_equity != float("inf"):
+            l4_adversarial = AdversarialResult(
+                clean_paths=None,
+                injected_paths=None,
+                injection_metadata=[],
+                clean_var_95=0.0,
+                clean_var_99=0.0,
+                clean_median_final=0.0,
+                clean_prob_ruin=0.0,
+                injected_var_95=0.0,
+                injected_var_99=0.0,
+                injected_median_final=worst_equity,
+                injected_prob_ruin=0.0,
+                worst_case_terminal_equity=worst_equity,
+                median_impact_pct=0.0,
+            )
+    except Exception:
+        l4_adversarial = None
+
+    # ===== L5: Walk-Forward Validation (only if real data provided) =====
+    l5_walk_forward = None
+    if symbol and start and end:
+        try:
+            wf_result = run_walk_forward_for_mcp(
+                strategy=resolved_slug,
+                symbol=symbol,
+                start=start,
+                end=end,
+                n_folds=n_folds,
+                session="all",
+                strategy_params=best_params,
+            )
+            # Convert dict result to WalkForwardResult-like object
+            folds = []
+            if "folds" in wf_result:
+                from src.simulator.walk_forward import FoldResult
+                from datetime import datetime as _dt
+
+                for fold_dict in wf_result["folds"]:
+                    fold = FoldResult(
+                        fold_index=fold_dict.get("fold_index", 0),
+                        is_start=_dt.fromisoformat(fold_dict.get("is_start", "2020-01-01")),
+                        is_end=_dt.fromisoformat(fold_dict.get("is_end", "2020-01-01")),
+                        oos_start=_dt.fromisoformat(fold_dict.get("oos_start", "2020-01-01")),
+                        oos_end=_dt.fromisoformat(fold_dict.get("oos_end", "2020-01-01")),
+                        is_best_params=best_params,
+                        is_sharpe=fold_dict.get("is_sharpe", 0.0),
+                        oos_sharpe=fold_dict.get("oos_sharpe", 0.0),
+                        oos_mdd_pct=fold_dict.get("oos_mdd_pct", 0.0),
+                        oos_win_rate=fold_dict.get("oos_win_rate", 0.0),
+                        oos_n_trades=fold_dict.get("oos_n_trades", 0),
+                        oos_profit_factor=fold_dict.get("oos_profit_factor", 0.0),
+                        overfit_ratio=fold_dict.get("overfit_ratio", 0.0),
+                    )
+                    folds.append(fold)
+
+            # Build WalkForwardResult manually
+            mean_oos_sharpe = (
+                sum(f.oos_sharpe for f in folds) / len(folds)
+                if folds
+                else 0.0
+            )
+            mean_overfit = (
+                sum(f.overfit_ratio for f in folds) / len(folds)
+                if folds
+                else 0.0
+            )
+
+            from src.simulator.walk_forward import classify_overfit
+
+            l5_walk_forward = WalkForwardResult(
+                folds=folds,
+                aggregate_oos_sharpe=mean_oos_sharpe,
+                mean_overfit_ratio=mean_overfit,
+                overfit_flag=classify_overfit(mean_overfit),
+                passed=wf_result.get("passed", False),
+                failure_reasons=wf_result.get("failure_reasons", []),
+            )
+        except Exception:
+            l5_walk_forward = None
+
+    # ===== Build unified report =====
+    report = build_risk_report(
+        strategy_name=resolved_slug,
+        instrument=instrument,
+        cost_config=cost_config,
+        net_sharpe=l1_net_sharpe,
+        cost_drag_pct=l1_cost_drag,
+        sensitivity=l2_sensitivity,
+        regime_metrics=l3_regime_metrics,
+        adversarial_result=l4_adversarial,
+        walk_forward_result=l5_walk_forward,
+    )
+    return report.to_dict()

@@ -130,6 +130,19 @@ async def war_room() -> dict:
             ],
             "equity_curve": [{"timestamp": t.isoformat(), "equity": e} for t, e in equity_curve],
         }
+    # Get session equity curves from SnapshotStore
+    session_equity_curves: dict[str, list] = {}
+    try:
+        from src.trading_session.store import SnapshotStore
+        snap_store = SnapshotStore()
+        for s in data.get("all_sessions", []):
+            curve = snap_store.get_equity_curve(s.session_id, days=7)
+            session_equity_curves[s.session_id] = [
+                {"timestamp": t.isoformat(), "equity": e} for t, e in curve
+            ]
+    except Exception:
+        pass
+
     sessions = []
     for s in data.get("all_sessions", []):
         snap = s.current_snapshot
@@ -145,6 +158,7 @@ async def war_room() -> dict:
                 "snapshot": {
                     "equity": snap.equity,
                     "unrealized_pnl": snap.unrealized_pnl,
+                    "realized_pnl": snap.realized_pnl,
                     "drawdown_pct": snap.drawdown_pct,
                     "trade_count": snap.trade_count,
                     "positions": [
@@ -160,6 +174,7 @@ async def war_room() -> dict:
                 }
                 if snap
                 else None,
+                "equity_curve": session_equity_curves.get(s.session_id, []),
             }
         )
     return {

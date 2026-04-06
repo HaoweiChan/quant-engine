@@ -368,6 +368,7 @@ def start_optimizer_run(
     factory_name: str = "create_atr_mean_reversion_engine",
     slippage_bps: float = 0.0,
     commission_bps: float = 0.0,
+    commission_fixed_per_contract: float = 0.0,
 ) -> bool:
     """Spawn the optimizer as a subprocess. Returns False if already running."""
     with _opt_lock:
@@ -386,6 +387,7 @@ def start_optimizer_run(
             "factory_name": factory_name,
             "slippage_bps": slippage_bps,
             "commission_bps": commission_bps,
+            "commission_fixed_per_contract": commission_fixed_per_contract,
         }
         tmpdir = tempfile.mkdtemp(prefix="qe_opt_")
         config_path = os.path.join(tmpdir, "config.json")
@@ -607,6 +609,7 @@ def run_strategy_backtest(
     max_loss: float = 500_000.0,
     slippage_bps: float = 0.0,
     commission_bps: float = 0.0,
+    commission_fixed_per_contract: float = 0.0,
     provenance: dict | None = None,
     intraday: bool = False,
 ) -> dict:
@@ -620,10 +623,12 @@ def run_strategy_backtest(
     """
     from src.mcp_server.facade import run_backtest_realdata_for_mcp
 
-    info = get_strategy_registry().get(strategy_slug)
-    if not info:
+    from src.strategies.registry import get_info as _get_info
+    try:
+        resolved_info = _get_info(strategy_slug)
+        facade_name = resolved_info.slug
+    except KeyError:
         raise ValueError(f"Unknown strategy: {strategy_slug}")
-    facade_name = strategy_slug
 
     merged_params = dict(strategy_params or {})
     merged_params["max_loss"] = max_loss
@@ -631,6 +636,8 @@ def run_strategy_backtest(
         merged_params["slippage_bps"] = slippage_bps
     if commission_bps:
         merged_params["commission_bps"] = commission_bps
+    if commission_fixed_per_contract:
+        merged_params["commission_fixed_per_contract"] = commission_fixed_per_contract
 
     result = run_backtest_realdata_for_mcp(
         symbol=symbol,

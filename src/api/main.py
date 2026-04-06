@@ -25,6 +25,7 @@ from src.api.routes import (
     optimizer,
     params,
     portfolio,
+    risk_evaluation,
     sessions,
     strategies,
     war_room,
@@ -96,6 +97,7 @@ app.include_router(kill_switch.router)
 app.include_router(heartbeat.router)
 app.include_router(monte_carlo.router)
 app.include_router(portfolio.router)
+app.include_router(risk_evaluation.router)
 
 # WebSocket routes
 app.include_router(live_feed.router)

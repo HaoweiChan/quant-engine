@@ -50,6 +50,19 @@ async def pause_session(session_id: str) -> dict:
     return {"session_id": session.session_id, "status": session.status}
 
 
+@router.delete("/{session_id}")
+async def delete_session(session_id: str) -> dict:
+    mgr = _get_session_manager()
+    try:
+        mgr.delete_session(session_id)
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=409, detail=msg)
+    return {"session_id": session_id, "status": "deleted"}
+
+
 @router.get("")
 async def list_sessions() -> list[dict]:
     mgr = _get_session_manager()

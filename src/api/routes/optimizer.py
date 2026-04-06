@@ -25,12 +25,15 @@ class OptimizerRequest(BaseModel):
     n_jobs: int = 1
     slippage_bps: float = 0.0
     commission_bps: float = 0.0
+    commission_fixed_per_contract: float = 0.0
 
 
 @router.post("/optimizer/run", status_code=202)
 async def run_optimizer(req: OptimizerRequest) -> dict:
-    info = get_strategy_registry().get(req.strategy)
-    if not info:
+    from src.strategies.registry import get_info as _get_info
+    try:
+        _get_info(req.strategy)
+    except KeyError:
         raise HTTPException(status_code=400, detail=f"Unknown strategy: {req.strategy}")
     started = start_optimizer_run(
         symbol=req.symbol,
@@ -44,6 +47,7 @@ async def run_optimizer(req: OptimizerRequest) -> dict:
         factory_name=info.factory,
         slippage_bps=req.slippage_bps,
         commission_bps=req.commission_bps,
+        commission_fixed_per_contract=req.commission_fixed_per_contract,
     )
     if not started:
         raise HTTPException(status_code=409, detail="Optimizer already running")

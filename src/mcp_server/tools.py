@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from pathlib import Path
 
@@ -17,8 +18,11 @@ from src.mcp_server.facade import (
     run_backtest_for_mcp,
     run_backtest_realdata_for_mcp,
     run_monte_carlo_for_mcp,
+    run_risk_report_for_mcp,
+    run_sensitivity_check_for_mcp,
     run_stress_for_mcp,
     run_sweep_for_mcp,
+    run_walk_forward_for_mcp,
 )
 from src.mcp_server.validation import (
     backup_strategy_file,
@@ -41,6 +45,7 @@ TOOLS: list[Tool] = [
             "Returns: Sharpe ratio, max drawdown, win rate, total PnL, trade count. "
             "Always run this after modifying any strategy file. "
             "For comparing two strategies, prefer run_monte_carlo instead (more robust). "
+            "NOTE: Default costs are automatically applied (0.1% slippage + instrument commission). "
             "Synthetic results are NOT eligible for optimization-loop termination; "
             "terminate only after real-data validation."
         ),
@@ -94,7 +99,8 @@ TOOLS: list[Tool] = [
             "Uses the same BacktestRunner, adapter, and metrics as run_backtest, "
             "so results are directly comparable to the dashboard. "
             "Provide symbol (e.g. 'TX'), start and end dates (ISO format). "
-            "Returns: Sharpe, drawdown, win rate, PnL, equity curve, buy-and-hold comparison."
+            "Returns: Sharpe, drawdown, win rate, PnL, equity curve, buy-and-hold comparison. "
+            "NOTE: Default costs are automatically applied for the symbol (0.1% slippage + instrument commission)."
         ),
         inputSchema={
             "type": "object",
@@ -148,6 +154,7 @@ TOOLS: list[Tool] = [
             "PREFER this over run_backtest when comparing two strategies. "
             "ALWAYS run this after writing a strategy file to verify improvement. "
             "Use 200-300 paths for iterative work, 500+ for final validation. "
+            "NOTE: Default costs are automatically applied (0.1% slippage + instrument commission). "
             "Synthetic Monte Carlo is exploratory only and cannot satisfy final "
             "optimization termination criteria. "
             "IMPORTANT: For intraday strategies, set timeframe='intraday' and n_bars>=63000. "
@@ -217,6 +224,7 @@ TOOLS: list[Tool] = [
             "For random search: provide sweep_params as {param: [min, max]} and set n_samples. "
             "Returns: ranked list of parameter combinations by the chosen metric. "
             "Default metric is sortino. "
+            "NOTE: Default costs are automatically applied (0.1% slippage + instrument commission). "
             "NEVER optimize for net profit — use sortino, composite_fitness, or calmar instead. "
             "Mode controls governance: production_intent enforces promotion gates "
             "and never auto-activates candidates. "
@@ -347,6 +355,58 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="run_sensitivity_check",
+        description=(
+            "Run ±N% parameter sensitivity analysis to detect overfitting. "
+            "For each parameter in best_params, generates a perturbation grid (±20% by default), "
+            "runs backtests, and checks for cliff-edge drops (>30% Sharpe fall = cliff detected) "
+            "and coefficient of variation (CV > 0.30 = unstable). "
+            "Returns per-parameter stability metrics and aggregate overfit flag. "
+            "A strategy passes sensitivity check when: no cliffs detected AND all params have CV < 0.20 "
+            "AND max Sharpe degradation < 30%. Use this as a mandatory gate in Stage 4 EVALUATE "
+            "of the optimization loop. NOTE: Performs synthetic backtests (strong_bull scenario) "
+            "to assess parameter landscape around the best candidate."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "strategy": {
+                    "type": "string",
+                    "description": (
+                        "Strategy slug (path-like or legacy alias). "
+                        "Examples: 'swing/trend_following/pyramid_wrapper', "
+                        "'short_term/breakout/ta_orb'. Legacy: 'pyramid', 'ta_orb'."
+                    ),
+                },
+                "best_params": {
+                    "type": "object",
+                    "description": (
+                        "Parameter dict to test. If omitted, uses the currently active params for the strategy."
+                    ),
+                },
+                "perturbation_pct": {
+                    "type": "number",
+                    "description": "Perturbation range in percent (default 20 = ±20%)",
+                    "default": 20.0,
+                },
+                "n_steps": {
+                    "type": "integer",
+                    "description": (
+                        "Number of steps per side of the grid. "
+                        "Total grid size = 2*n_steps + 1. Default 5 = 11-point grid."
+                    ),
+                    "default": 5,
+                },
+                "instrument": {
+                    "type": "string",
+                    "description": "Instrument symbol for cost defaults (default: TX)",
+                    "default": "TX",
+                },
+            },
+            "required": ["strategy"],
+        },
+    ),
+    Tool(
         name="run_stress_test",
         description=(
             "Run stress test scenarios to evaluate strategy resilience "
@@ -354,7 +414,8 @@ TOOLS: list[Tool] = [
             "Available scenarios: gap_down, slow_bleed, flash_crash, "
             "vol_regime_shift, liquidity_crisis. "
             "Omit 'scenarios' to run all. "
-            "Use after parameter changes to verify tail risk."
+            "Use after parameter changes to verify tail risk. "
+            "NOTE: Default costs are automatically applied (0.1% slippage + instrument commission)."
         ),
         inputSchema={
             "type": "object",
@@ -599,11 +660,186 @@ TOOLS: list[Tool] = [
             "required": ["name", "category", "holding_period", "signal_timeframe"],
         },
     ),
+    Tool(
+        name="run_walk_forward",
+        description=(
+            "Run expanding-window walk-forward validation on real historical data. "
+            "Splits data into IS/OOS folds, evaluates strategy on each OOS window, "
+            "and reports overfit ratio (OOS/IS Sharpe). "
+            "Requires symbol, start, and end for real-data evaluation. "
+            "Returns per-fold metrics, aggregate OOS Sharpe, overfit flag, and pass/fail. "
+            "NOTE: Default costs are automatically applied (0.1% slippage + instrument commission)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "strategy": {
+                    "type": "string",
+                    "description": "Strategy slug or module:factory identifier",
+                },
+                "n_folds": {
+                    "type": "integer",
+                    "description": "Number of expanding folds (default: 3)",
+                    "default": 3,
+                },
+                "session": {
+                    "type": "string",
+                    "enum": ["all", "day", "night"],
+                    "description": "Session filter: all, day (08:45-13:45), night (15:00-05:00+1d)",
+                    "default": "all",
+                },
+                "symbol": {"type": "string", "description": "Instrument symbol (e.g., TX, MTX)"},
+                "start": {"type": "string", "description": "Start date (ISO format)"},
+                "end": {"type": "string", "description": "End date (ISO format)"},
+                "strategy_params": {
+                    "type": "object",
+                    "description": "Strategy parameters to use for evaluation",
+                },
+            },
+            "required": ["strategy", "symbol", "start", "end"],
+        },
+    ),
+    Tool(
+        name="run_risk_report",
+        description=(
+            "Generate a unified risk sign-off report for a strategy. "
+            "Orchestrates and aggregates results from all five evaluation layers: "
+            "cost model, parameter sensitivity, regime MC, adversarial injection, "
+            "and walk-forward validation. Returns pass/fail per gate and "
+            "a recommendation: promote, investigate, or reject. "
+            "Note: If symbol, start, and end are provided, run_walk_forward is called for L5. "
+            "Otherwise L5 shows 'not evaluated'. Similarly for regime/adversarial layers."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "strategy": {
+                    "type": "string",
+                    "description": "Strategy slug or module:factory identifier",
+                },
+                "instrument": {
+                    "type": "string",
+                    "description": "Instrument symbol for cost defaults (default: TX)",
+                    "default": "TX",
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "Contract symbol (e.g. TX) for real-data walk-forward validation (optional)",
+                },
+                "start": {
+                    "type": "string",
+                    "description": "Start date (ISO format) for walk-forward (optional, requires symbol and end)",
+                },
+                "end": {
+                    "type": "string",
+                    "description": "End date (ISO format) for walk-forward (optional, requires symbol and start)",
+                },
+                "n_folds": {
+                    "type": "integer",
+                    "description": "Number of walk-forward folds (default: 3)",
+                    "default": 3,
+                },
+            },
+            "required": ["strategy"],
+        },
+    ),
 ]
 
 
+_log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Response compaction — strip visualization-only fields that consume tokens
+# but provide no decision value to the LLM.  The facade returns full data so
+# the dashboard API (which calls facade directly) is unaffected.
+# ---------------------------------------------------------------------------
+
+_STRIP_KEYS = frozenset({
+    "equity_curve",
+    "daily_returns",
+    "bnh_returns",
+    "bnh_equity",
+    "trade_signals",
+    "indicator_series",
+    "indicator_meta",
+    "equity_timestamps",
+    "strategy_hash",
+    "auto_activation_disabled",
+    "real_data_guard",
+})
+
+# Metrics kept when trimming sweep trial rows (top_5, pareto_candidates).
+_ESSENTIAL_TRIAL_METRICS = frozenset({
+    "sharpe", "calmar", "sortino", "profit_factor",
+    "win_rate", "max_drawdown_pct", "trade_count", "total_pnl",
+})
+
+
+def _compact(data: Any) -> Any:
+    """Recursively strip visualization-only fields and summarize trade PnLs."""
+    if isinstance(data, dict):
+        out: dict[str, Any] = {}
+        for k, v in data.items():
+            if k in _STRIP_KEYS:
+                continue
+            if k == "trade_pnls" and isinstance(v, list) and len(v) > 0:
+                import numpy as np
+                arr = np.array(v, dtype=float)
+                out["trade_pnl_summary"] = {
+                    "count": len(v),
+                    "mean": round(float(np.mean(arr)), 2),
+                    "median": round(float(np.median(arr)), 2),
+                    "min": round(float(np.min(arr)), 2),
+                    "max": round(float(np.max(arr)), 2),
+                }
+                continue
+            out[k] = _compact(v)
+        return out
+    if isinstance(data, list):
+        return [_compact(item) for item in data]
+    return data
+
+
+# Known metric keys emitted by BacktestResult.metrics — everything NOT in
+# this set is assumed to be a parameter key and is always kept.
+_KNOWN_METRIC_KEYS = frozenset({
+    "sharpe", "calmar", "sortino", "profit_factor", "win_rate",
+    "max_drawdown_pct", "trade_count", "total_pnl", "expectancy",
+    "avg_trade", "avg_win", "avg_loss", "max_consec_loss", "max_consec_win",
+    "recovery_factor", "ulcer_index", "tail_ratio", "cagr",
+    "annual_return", "annual_volatility", "monthly_return_mean",
+    "monthly_return_std", "best_month", "worst_month",
+})
+
+
+def _trim_trial(trial: dict[str, Any]) -> dict[str, Any]:
+    """Keep all param keys and only essential metrics from a sweep trial row."""
+    trimmed: dict[str, Any] = {}
+    for k, v in trial.items():
+        if k in _ESSENTIAL_TRIAL_METRICS:
+            trimmed[k] = v
+        elif k not in _KNOWN_METRIC_KEYS:
+            # Not a known metric → must be a parameter key — always keep
+            trimmed[k] = v
+    return trimmed
+
+
+def _compact_default(obj: Any) -> Any:
+    """JSON default handler that also truncates float precision."""
+    if isinstance(obj, float):
+        return round(obj, 4)
+    return str(obj)
+
+
+_RESPONSE_SIZE_WARN = 10_000  # bytes
+
+
 def _json_response(data: Any) -> list[TextContent]:
-    return [TextContent(type="text", text=json.dumps(data, indent=2, default=str))]
+    stripped = _compact(data)
+    text = json.dumps(stripped, separators=(",", ":"), default=_compact_default)
+    if len(text) > _RESPONSE_SIZE_WARN:
+        _log.warning("MCP response exceeds %d bytes (%d bytes)", _RESPONSE_SIZE_WARN, len(text))
+    return [TextContent(type="text", text=text)]
 
 
 def register_tools(app: Server) -> None:
@@ -656,10 +892,6 @@ def register_tools(app: Server) -> None:
                         source_label=result.get("source_label"),
                         termination_eligible=bool(result.get("termination_eligible", False)),
                     )
-                # Strip large arrays from response to keep it readable
-                for key in ("daily_returns", "equity_curve", "bnh_returns", "bnh_equity"):
-                    if key in result:
-                        del result[key]
                 return _json_response(result)
 
             if name == "run_monte_carlo":
@@ -720,6 +952,11 @@ def register_tools(app: Server) -> None:
                         source_label=result.get("source_label"),
                         termination_eligible=bool(result.get("termination_eligible", False)),
                     )
+                # Trim trial rows to essential metrics before serialization
+                if "top_5" in result and isinstance(result["top_5"], list):
+                    result["top_5"] = [_trim_trial(t) for t in result["top_5"]]
+                if "pareto_candidates" in result and isinstance(result["pareto_candidates"], list):
+                    result["pareto_candidates"] = [_trim_trial(t) for t in result["pareto_candidates"]]
                 return _json_response(result)
 
             if name == "run_stress_test":
@@ -727,6 +964,39 @@ def register_tools(app: Server) -> None:
                     scenarios=arguments.get("scenarios"),
                     strategy_params=arguments.get("strategy_params"),
                     strategy=arguments.get("strategy", "pyramid"),
+                )
+                return _json_response(result)
+
+            if name == "run_walk_forward":
+                result = run_walk_forward_for_mcp(
+                    strategy=arguments["strategy"],
+                    n_folds=arguments.get("n_folds", 3),
+                    session=arguments.get("session", "all"),
+                    strategy_params=arguments.get("strategy_params"),
+                    symbol=arguments.get("symbol"),
+                    start=arguments.get("start"),
+                    end=arguments.get("end"),
+                )
+                return _json_response(result)
+
+            if name == "run_risk_report":
+                result = run_risk_report_for_mcp(
+                    strategy=arguments["strategy"],
+                    instrument=arguments.get("instrument", "TX"),
+                    symbol=arguments.get("symbol"),
+                    start=arguments.get("start"),
+                    end=arguments.get("end"),
+                    n_folds=arguments.get("n_folds", 3),
+                )
+                return _json_response(result)
+
+            if name == "run_sensitivity_check":
+                result = run_sensitivity_check_for_mcp(
+                    strategy=arguments["strategy"],
+                    best_params=arguments.get("best_params"),
+                    perturbation_pct=arguments.get("perturbation_pct", 20.0),
+                    n_steps=arguments.get("n_steps", 5),
+                    instrument=arguments.get("instrument", "TX"),
                 )
                 return _json_response(result)
 
@@ -780,6 +1050,9 @@ def register_tools(app: Server) -> None:
                 # Evict cached module so next import picks up the new file.
                 module_key = "src.strategies." + filename.replace("/", ".")
                 _sys.modules.pop(module_key, None)
+                # Also clear facade factory cache so resolve_factory re-imports.
+                from src.mcp_server.facade import _factory_cache
+                _factory_cache.clear()
                 stale_candidates_deactivated = 0
                 deactivation_warning = None
                 try:

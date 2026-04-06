@@ -128,17 +128,28 @@ async def update_strategies(account_id: str, req: UpdateStrategiesRequest) -> di
     config = db.load_account(account_id)
     if not config:
         raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+    old_strategies = list(config.strategies or [])
     config.strategies = req.strategies
     db.save_account(config)
-    # Ensure sessions exist for all strategy+symbol pairs
     try:
         from src.api.helpers import get_session_manager
         mgr = get_session_manager()
+        # Create sessions for new bindings
         for entry in req.strategies:
             slug = entry.get("slug", "")
             symbol = entry.get("symbol", "")
             if slug and symbol:
                 mgr.create_session(account_id, slug, symbol)
+        # Delete orphaned sessions for removed bindings
+        new_keys = {(e.get("slug", ""), e.get("symbol", "")) for e in req.strategies}
+        old_keys = {(e.get("slug", ""), e.get("symbol", "")) for e in old_strategies}
+        removed = old_keys - new_keys
+        if removed:
+            for session in mgr.get_sessions_for_account(account_id):
+                if (session.strategy_slug, session.symbol) in removed:
+                    if session.status == "active":
+                        mgr.set_status(session.session_id, "stopped")
+                    mgr.delete_session(session.session_id)
     except Exception:
         pass
     return {"id": account_id, "strategies": req.strategies}
