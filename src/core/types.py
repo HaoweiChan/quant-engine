@@ -341,6 +341,39 @@ class EventEngineConfig:
     audit_enabled: bool = True
 
 
+@dataclass(frozen=True)
+class InstrumentCostConfig:
+    """Per-instrument default transaction cost configuration."""
+
+    slippage_pct: float = 0.1  # 0.1% per side
+    commission_per_contract: float = 100.0  # NT$ round-trip
+    symbol: str = "TX"
+
+    @property
+    def slippage_bps(self) -> float:
+        """Convert slippage percentage to basis points."""
+        return self.slippage_pct * 10  # 0.1% -> 1.0 bps
+
+    @property
+    def commission_bps(self) -> float:
+        """Return 0 since we use fixed per-contract commission."""
+        return 0.0
+
+
+INSTRUMENT_COSTS: dict[str, InstrumentCostConfig] = {
+    "TX": InstrumentCostConfig(slippage_pct=0.1, commission_per_contract=100.0, symbol="TX"),
+    "MTX": InstrumentCostConfig(slippage_pct=0.1, commission_per_contract=40.0, symbol="MTX"),
+}
+
+
+def get_instrument_cost_config(symbol: str = "TX") -> InstrumentCostConfig:
+    """Look up cost config for a symbol, falling back to TX defaults."""
+    if symbol not in INSTRUMENT_COSTS:
+        import structlog
+        structlog.get_logger().warning("unknown_instrument_cost", symbol=symbol, fallback="TX")
+    return INSTRUMENT_COSTS.get(symbol, INSTRUMENT_COSTS["TX"])
+
+
 @dataclass
 class ImpactParams:
     """Parameters for the square-root market impact model."""

@@ -167,6 +167,10 @@ class SessionDB:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def delete_session(self, session_id: str) -> None:
+        self._conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        self._conn.commit()
+
     @staticmethod
     def validate_transition(current: str, target: str) -> bool:
         return target in _VALID_TRANSITIONS.get(current, set())

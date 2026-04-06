@@ -151,6 +151,18 @@ class SessionManager:
             session.peak_equity = snap.peak_equity
             self._store.write_snapshot(session.session_id, snap)
 
+    def delete_session(self, session_id: str) -> None:
+        """Remove a session. Must be stopped first."""
+        session = self._sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+        if session.status == "active":
+            raise ValueError("Cannot delete an active session — stop it first")
+        del self._sessions[session_id]
+        if self._session_db:
+            self._session_db.delete_session(session_id)
+        logger.info("session_deleted", session_id=session_id)
+
     def get_all_sessions(self) -> list[TradingSession]:
         return list(self._sessions.values())
 
