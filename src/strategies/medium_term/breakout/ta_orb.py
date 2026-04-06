@@ -122,6 +122,21 @@ PARAM_SCHEMA: dict[str, dict] = {
         "description": "Trend filter mode: 0=N-day slope, 1=EMA fast/slow crossover.",
         "grid": [0, 1],
     },
+    "ema_spread_min": {
+        "type": "float", "default": 0.0, "min": 0.0, "max": 0.01,
+        "description": "Min |EMA_fast - EMA_slow| / price to enter. 0=disabled. Filters weak trends.",
+        "grid": [0.0, 0.001, 0.002, 0.003, 0.005],
+    },
+    "or_atr_min": {
+        "type": "float", "default": 0.0, "min": 0.0, "max": 2.0,
+        "description": "Min OR range / ATR ratio to enter. 0=disabled. Filters weak ORs.",
+        "grid": [0.0, 0.3, 0.5, 0.7],
+    },
+    "or_atr_max": {
+        "type": "float", "default": 0.0, "min": 0.0, "max": 5.0,
+        "description": "Max OR range / ATR ratio to enter. 0=disabled. Filters gap ORs.",
+        "grid": [0.0, 1.5, 2.0, 3.0],
+    },
     "max_pyramid_levels": {
         "type": "int", "default": 4, "min": 1, "max": 4,
         "description": "Max pyramid levels (1=no adds, 4=entry + 3 adds with gamma decay).",
@@ -136,6 +151,39 @@ PARAM_SCHEMA: dict[str, dict] = {
         "type": "float", "default": 1.5, "min": 0.5, "max": 5.0,
         "description": "ATR multiple for first add trigger. Level N triggers at N * this value.",
         "grid": [1.0, 1.5, 2.0, 3.0],
+    },
+    "latest_night_entry_hour": {
+        "type": "int", "default": 20, "min": 17, "max": 23,
+        "description": "Latest hour (HH:00) to allow night session entries. 0=disabled.",
+        "grid": [18, 20, 22],
+    },
+    "adx_period": {
+        "type": "int", "default": 14, "min": 7, "max": 21,
+        "description": "Smoothing period for ADX regime strength indicator.",
+        "grid": [10, 14, 18],
+    },
+    "adx_threshold": {
+        "type": "float", "default": 25.0, "min": 0.0, "max": 35.0,
+        "description": "Min ADX score to permit breakout entries. 0=disabled.",
+        "grid": [0.0, 22.0, 25.0, 30.0],
+    },
+    "vol_len": {
+        "type": "int", "default": 20, "min": 5, "max": 60,
+        "description": "Rolling window for volume average.",
+    },
+    "vol_mult": {
+        "type": "float", "default": 0.0, "min": 0.0, "max": 3.0,
+        "description": "Min volume spike vs rolling avg for entry confirmation. 0=disabled.",
+        "grid": [0.0, 1.0, 1.2, 1.5],
+    },
+    "macro_ma_len": {
+        "type": "int", "default": 60, "min": 20, "max": 200,
+        "description": "Slow MA period for macro trend distance filter.",
+    },
+    "macro_filter_atr": {
+        "type": "float", "default": 0.0, "min": 0.0, "max": 8.0,
+        "description": "Block entry if |price - macro_ma| > N*ATR. 0=disabled.",
+        "grid": [0.0, 4.0, 5.0, 6.0],
     },
 }
 
@@ -176,10 +224,16 @@ class _Indicators:
         ema_fast: int,
         ema_slow: int,
         atr_len: int,
+        adx_period: int = 14,
+        vol_len: int = 20,
+        macro_ma_len: int = 60,
     ) -> None:
         self._n_fast = ema_fast
         self._n_slow = ema_slow
         self._atr_len = atr_len
+        self._adx_period = adx_period
+        self._vol_len = vol_len
+        self._macro_ma_len = macro_ma_len
 
         max_buf = max(ema_fast + 2, ema_slow + 2, atr_len + 2)
         self._closes: deque[float] = deque(maxlen=max_buf + 1)
@@ -194,10 +248,26 @@ class _Indicators:
         self.atr_avg: float | None = None
         self._atr_history: deque[float] = deque(maxlen=50)
 
+        # VWAP (resets per calendar date)
         self.vwap: float | None = None
         self._vwap_date = None
         self._cum_pv = 0.0
         self._cum_vol = 0.0
+
+        # ADX regime filter (smoothed directional movement)
+        self.adx: float = 0.0
+        self._dm_alpha = 1.0 / max(adx_period, 1)
+        self._plus_dm: float = 0.0
+        self._minus_dm: float = 0.0
+        self._last_price: float | None = None
+
+        # Volume confirmation
+        self._vol_history: deque[float] = deque(maxlen=vol_len)
+        self.vol_ratio: float | None = None
+
+        # Macro MA for extreme-trend filter
+        self._macro_ema: float | None = None
+        self.macro_ma: float | None = None
 
     def update(self, price: float, ts: datetime, volume: float = 0.0) -> None:
         if ts == self._last_ts:
@@ -205,6 +275,9 @@ class _Indicators:
         self._last_ts = ts
         self._closes.append(price)
         self._update_vwap(ts, price, volume)
+        self._update_adx(price)
+        self._update_volume(volume)
+        self._update_macro_ma(price)
         self._compute(price)
 
     def _update_vwap(self, ts: datetime, price: float, volume: float) -> None:
@@ -216,6 +289,43 @@ class _Indicators:
         self._cum_pv += price * max(volume, 0.0)
         self._cum_vol += max(volume, 0.0)
         self.vwap = self._cum_pv / self._cum_vol if self._cum_vol > 0 else None
+
+    def _update_adx(self, price: float) -> None:
+        if self._last_price is None:
+            self._last_price = price
+            return
+        delta = price - self._last_price
+        tr = abs(delta)
+        up_move = max(delta, 0.0)
+        down_move = max(-delta, 0.0)
+        self._plus_dm += self._dm_alpha * (up_move - self._plus_dm)
+        self._minus_dm += self._dm_alpha * (down_move - self._minus_dm)
+        atr_val = max(
+            self._plus_dm + self._minus_dm, 1e-6
+        ) if tr == 0 else max(tr, 1e-6)
+        # Use smoothed TR for DI normalization
+        plus_di = 100.0 * (self._plus_dm / max(self._plus_dm + self._minus_dm, 1e-6))
+        minus_di = 100.0 * (self._minus_dm / max(self._plus_dm + self._minus_dm, 1e-6))
+        dx = 100.0 * abs(plus_di - minus_di) / max(plus_di + minus_di, 1e-6)
+        self.adx += self._dm_alpha * (dx - self.adx)
+        self._last_price = price
+
+    def _update_volume(self, volume: float) -> None:
+        self._vol_history.append(max(volume, 0.0))
+        if len(self._vol_history) >= 5:
+            avg = _mean(list(self._vol_history))
+            self.vol_ratio = volume / avg if avg > 0 else None
+        else:
+            self.vol_ratio = None
+
+    def _update_macro_ma(self, price: float) -> None:
+        k = 2.0 / (self._macro_ma_len + 1)
+        if self._macro_ema is None:
+            self._macro_ema = price
+        else:
+            self._macro_ema = price * k + self._macro_ema * (1.0 - k)
+        if len(self._closes) >= self._macro_ma_len:
+            self.macro_ma = self._macro_ema
 
     @staticmethod
     def _ema_step(prev: float | None, price: float, n: int,
@@ -251,6 +361,7 @@ class _Indicators:
             "ema_fast": self.ema_fast,
             "ema_slow": self.ema_slow,
             "vwap": self.vwap,
+            "adx": self.adx,
         }
 
     def indicator_meta(self) -> dict[str, dict]:
@@ -258,6 +369,7 @@ class _Indicators:
             "ema_fast":  {"panel": "price", "color": "#FF6B6B", "label": "EMA Fast"},
             "ema_slow":  {"panel": "price", "color": "#4ECDC4", "label": "EMA Slow"},
             "vwap":      {"panel": "price", "color": "#95E1D3", "label": "VWAP"},
+            "adx":       {"panel": "oscillator", "color": "#FFD93D", "label": "ADX"},
         }
 
 
@@ -403,6 +515,16 @@ class TAORBEntryPolicy(EntryPolicy):
         allow_night: int = 0,
         require_vwap: int = 1,
         trend_mode: int = 1,
+        or_atr_min: float = 0.0,
+        or_atr_max: float = 0.0,
+        ema_spread_min: float = 0.0,
+        latest_night_entry_hour: int = 20,
+        adx_period: int = 14,
+        adx_threshold: float = 25.0,
+        vol_len: int = 20,
+        vol_mult: float = 0.0,
+        macro_ma_len: int = 60,
+        macro_filter_atr: float = 0.0,
     ) -> None:
         self._lots = lots
         self._contract_type = contract_type
@@ -417,10 +539,20 @@ class TAORBEntryPolicy(EntryPolicy):
         self._allow_night = bool(allow_night)
         self._require_vwap = bool(require_vwap)
         self._trend_mode = trend_mode
+        self._or_atr_min = or_atr_min
+        self._or_atr_max = or_atr_max
+        self._ema_spread_min = ema_spread_min
+        self._latest_night_entry = time(latest_night_entry_hour, 0)
+        self._adx_threshold = adx_threshold
+        self._vol_mult = vol_mult
+        self._macro_filter_atr = macro_filter_atr
         self.orb_state = _ORBState()
         self.trend_filter = _TrendFilter(n_days=trend_n_days, min_slope_pct=min_slope_pct)
         self._last_close_update_date: date | None = None
-        self.ind = _Indicators(ema_fast=ema_fast, ema_slow=ema_slow, atr_len=atr_len)
+        self.ind = _Indicators(
+            ema_fast=ema_fast, ema_slow=ema_slow, atr_len=atr_len,
+            adx_period=adx_period, vol_len=vol_len, macro_ma_len=macro_ma_len,
+        )
 
     def should_enter(
         self,
@@ -456,18 +588,48 @@ class TAORBEntryPolicy(EntryPolicy):
             if not self.orb_state.is_valid(self._min_or_pct, self._max_or_pct, price):
                 self.orb_state.traded_session = True
                 return None
+            # OR/ATR ratio filter — normalize OR quality across regimes
+            atr = self.ind.atr
+            if atr is not None and atr > 0 and self.orb_state.or_range > 0:
+                or_atr_ratio = self.orb_state.or_range / atr
+                if self._or_atr_min > 0 and or_atr_ratio < self._or_atr_min:
+                    self.orb_state.traded_session = True
+                    return None
+                if self._or_atr_max > 0 and or_atr_ratio > self._or_atr_max:
+                    self.orb_state.traded_session = True
+                    return None
             self._set_thresholds()
 
         if self.orb_state.traded_session:
             return None
 
-        # Latest entry time gate — only for day session
+        # Latest entry time gate — day and night sessions
         if day_ok and t > self._latest_entry:
             return None
+        if night_ok:
+            # Night spans midnight: block if past latest hour (pre-midnight)
+            # or any time after midnight (post-midnight entries are too stale)
+            if t >= time(15, 15) and t > self._latest_night_entry:
+                return None
+            if t <= time(5, 0):
+                return None
 
         trend = self._get_trend()
         if trend == "neutral":
             return None
+
+        # ADX regime filter — block entries in choppy markets
+        if self._adx_threshold > 0 and self.ind.adx < self._adx_threshold:
+            return None
+
+        # EMA spread filter — require minimum trend strength
+        if (self._ema_spread_min > 0
+                and self.ind.ema_fast is not None
+                and self.ind.ema_slow is not None
+                and price > 0):
+            spread_pct = abs(self.ind.ema_fast - self.ind.ema_slow) / price
+            if spread_pct < self._ema_spread_min:
+                return None
 
         or_high = self.orb_state.or_high
         or_low = self.orb_state.or_low
@@ -479,6 +641,20 @@ class TAORBEntryPolicy(EntryPolicy):
         atr = self.ind.atr
         if self._atr_ceil > 0 and atr is not None and self.ind.atr_avg is not None:
             if self.ind.atr_avg > 0 and atr > self._atr_ceil * self.ind.atr_avg:
+                return None
+
+        # Volume confirmation filter
+        if (self._vol_mult > 0
+                and self.ind.vol_ratio is not None
+                and self.ind.vol_ratio < self._vol_mult):
+            return None
+
+        # Macro trend distance filter — block entries in extreme dislocations
+        if (self._macro_filter_atr > 0
+                and self.ind.macro_ma is not None
+                and atr is not None and atr > 0):
+            dist = abs(price - self.ind.macro_ma)
+            if dist > self._macro_filter_atr * atr:
                 return None
 
         # VWAP confirmation filter
@@ -563,8 +739,14 @@ class TAORBEntryPolicy(EntryPolicy):
             self.orb_state.short_threshold = self._base_mult
 
     def _maybe_update_daily_close(self, price: float, ts: datetime) -> None:
+        """Update daily close for trend filter — once per calendar date.
+
+        Removed the in_day_session() gate so night session bars (especially
+        post-midnight) also trigger the update, keeping the N-day slope
+        fresh for night entries.
+        """
         d = ts.date()
-        if d != self._last_close_update_date and in_day_session(ts.time()):
+        if d != self._last_close_update_date:
             self.trend_filter.update_daily_close(price, d)
             self._last_close_update_date = d
 
@@ -699,6 +881,16 @@ def create_ta_orb_engine(
     allow_night: int = 1,
     require_vwap: int = 1,
     trend_mode: int = 1,
+    or_atr_min: float = 0.0,
+    or_atr_max: float = 0.0,
+    ema_spread_min: float = 0.0,
+    latest_night_entry_hour: int = 20,
+    adx_period: int = 14,
+    adx_threshold: float = 25.0,
+    vol_len: int = 20,
+    vol_mult: float = 0.0,
+    macro_ma_len: int = 60,
+    macro_filter_atr: float = 0.0,
     max_pyramid_levels: int = 4,
     pyramid_gamma: float = 0.7,
     pyramid_trigger_atr: float = 1.5,
@@ -723,6 +915,16 @@ def create_ta_orb_engine(
         allow_night=allow_night,
         require_vwap=require_vwap,
         trend_mode=trend_mode,
+        or_atr_min=or_atr_min,
+        or_atr_max=or_atr_max,
+        ema_spread_min=ema_spread_min,
+        latest_night_entry_hour=latest_night_entry_hour,
+        adx_period=adx_period,
+        adx_threshold=adx_threshold,
+        vol_len=vol_len,
+        vol_mult=vol_mult,
+        macro_ma_len=macro_ma_len,
+        macro_filter_atr=macro_filter_atr,
     )
     stop = TAORBStopPolicy(
         indicators=entry.ind,

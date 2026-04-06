@@ -58,6 +58,31 @@ def _stdev(vals: list[float], avg: float) -> float:
 
 
 PARAM_SCHEMA: dict[str, dict] = {
+    "adx_len": {
+        "type": "int", "default": 14, "min": 5, "max": 30,
+        "description": "ADX period on signal TF for regime filter.",
+        "grid": [10, 14, 20],
+    },
+    "adx_min": {
+        "type": "float", "default": 20.0, "min": 0.0, "max": 50.0,
+        "description": "Minimum ADX to allow entries (0=disabled). Filters choppy regimes.",
+        "grid": [0, 15, 20, 25],
+    },
+    "atr_pct_len": {
+        "type": "int", "default": 100, "min": 20, "max": 200,
+        "description": "Lookback (signal TF bars) for ATR percentile regime filter.",
+        "grid": [50, 100],
+    },
+    "atr_pct_min": {
+        "type": "float", "default": 25.0, "min": 0.0, "max": 100.0,
+        "description": "Min ATR percentile for entry (0=disabled). Filters dead-vol regimes.",
+        "grid": [0, 20, 30, 40],
+    },
+    "atr_pct_max": {
+        "type": "float", "default": 85.0, "min": 0.0, "max": 100.0,
+        "description": "Max ATR percentile for entry (100=disabled). Filters chaotic regimes.",
+        "grid": [70, 80, 90, 100],
+    },
     "bar_agg_trend": {
         "type": "int", "default": 4, "min": 1, "max": 16,
         "description": "Aggregate N incoming 15m bars for squeeze detection (4 = 1h).",
@@ -69,9 +94,9 @@ PARAM_SCHEMA: dict[str, dict] = {
         "grid": [14, 20, 26],
     },
     "bb_std": {
-        "type": "float", "default": 2.0, "min": 1.0, "max": 3.0,
+        "type": "float", "default": 1.8, "min": 1.0, "max": 3.0,
         "description": "Bollinger Band standard deviation multiplier.",
-        "grid": [1.5, 2.0, 2.5],
+        "grid": [1.5, 1.8, 2.0, 2.5],
     },
     "kc_len": {
         "type": "int", "default": 20, "min": 10, "max": 40,
@@ -89,7 +114,7 @@ PARAM_SCHEMA: dict[str, dict] = {
         "grid": [10, 20],
     },
     "vol_mult": {
-        "type": "float", "default": 1.5, "min": 0.5, "max": 3.0,
+        "type": "float", "default": 1.2, "min": 0.5, "max": 3.0,
         "description": "Min volume spike vs rolling average for entry confirmation.",
         "grid": [1.0, 1.2, 1.5, 2.0],
     },
@@ -108,9 +133,9 @@ PARAM_SCHEMA: dict[str, dict] = {
         "grid": [2.0, 2.5, 3.0, 3.5],
     },
     "min_squeeze_bars": {
-        "type": "int", "default": 3, "min": 1, "max": 10,
+        "type": "int", "default": 2, "min": 1, "max": 10,
         "description": "Minimum consecutive 1h bars in squeeze before entry allowed.",
-        "grid": [2, 3, 5],
+        "grid": [1, 2, 3, 5],
     },
     "max_hold_bars": {
         "type": "int", "default": 200, "min": 20, "max": 400,
@@ -154,8 +179,9 @@ STRATEGY_META: dict = {
     "description": (
         "Hourly Volatility Squeeze: detects BB inside KC compression on 1h bars "
         "(aggregated from 15m), enters on squeeze release with volume confirmation. "
-        "Chandelier trailing stop, no fixed TP — lets trend run. Holds overnight. "
-        "Positive skewness profile (~40-45% WR, high payoff ratio)."
+        "Regime-filtered: ADX minimum for trend confirmation, ATR percentile band "
+        "to trade only when stored energy exists (not dead-vol or chaotic). "
+        "Chandelier trailing stop, no fixed TP — lets trend run. Holds overnight."
     ),
 }
 
@@ -178,6 +204,8 @@ class _Indicators:
         vol_len: int,
         atr_len: int,
         bar_agg_trend: int = 4,
+        adx_len: int = 14,
+        atr_pct_len: int = 100,
     ) -> None:
         self._bb_len = bb_len
         self._bb_std = bb_std
@@ -200,6 +228,21 @@ class _Indicators:
         self._last_ts: datetime | None = None
         self._kc_ema: float | None = None
         self._kc_alpha = 2.0 / (kc_len + 1)
+
+        # ADX on signal TF — EMA-smoothed (same as atr_mean_reversion)
+        self._adx_len = adx_len
+        self._adx_alpha = 2.0 / (adx_len + 1)
+        self._adx_prev_price: float | None = None
+        self._atr_dm_ema: float | None = None
+        self._plus_dm_ema: float | None = None
+        self._minus_dm_ema: float | None = None
+        self._adx_ema: float | None = None
+        self.adx: float | None = None
+
+        # ATR percentile regime filter on signal TF
+        self._atr_pct_len = atr_pct_len
+        self._sig_atr_history: deque[float] = deque(maxlen=atr_pct_len + 1)
+        self.atr_percentile: float | None = None
 
         # Public state
         self.bb_upper: float | None = None
@@ -245,6 +288,52 @@ class _Indicators:
             if len(self._atr_history) >= 10:
                 self.atr_avg = _mean(list(self._atr_history))
 
+    def _update_adx(self, price: float) -> None:
+        """EMA-smoothed ADX on signal TF — filters choppy regimes."""
+        if self._adx_prev_price is None:
+            self._adx_prev_price = price
+            return
+        tr = abs(price - self._adx_prev_price)
+        delta = price - self._adx_prev_price
+        pdm = max(delta, 0.0)
+        mdm = max(-delta, 0.0)
+        a = self._adx_alpha
+        if self._atr_dm_ema is None:
+            self._atr_dm_ema = tr
+            self._plus_dm_ema = pdm
+            self._minus_dm_ema = mdm
+        else:
+            self._atr_dm_ema = a * tr + (1 - a) * self._atr_dm_ema
+            self._plus_dm_ema = a * pdm + (1 - a) * self._plus_dm_ema
+            self._minus_dm_ema = a * mdm + (1 - a) * self._minus_dm_ema
+        if self._atr_dm_ema and self._atr_dm_ema > 1e-9:
+            pdi = 100.0 * (self._plus_dm_ema / self._atr_dm_ema)
+            mdi = 100.0 * (self._minus_dm_ema / self._atr_dm_ema)
+            denom = pdi + mdi
+            if denom > 1e-9:
+                dx = 100.0 * abs(pdi - mdi) / denom
+                if self._adx_ema is None:
+                    self._adx_ema = dx
+                else:
+                    self._adx_ema = a * dx + (1 - a) * self._adx_ema
+                self.adx = self._adx_ema
+        self._adx_prev_price = price
+
+    def _update_atr_percentile(self) -> None:
+        """ATR percentile on signal TF — filters dead-vol and chaotic regimes."""
+        closes = list(self._sig_closes)
+        n = len(closes)
+        if n < 2:
+            return
+        # Current signal-TF ATR (last bar delta)
+        cur_atr = abs(closes[-1] - closes[-2])
+        self._sig_atr_history.append(cur_atr)
+        hist = list(self._sig_atr_history)
+        if len(hist) < 20:
+            return
+        below = sum(1 for v in hist if v <= cur_atr)
+        self.atr_percentile = 100.0 * below / len(hist)
+
     def _compute_signal(self, price: float, volume: float) -> None:
         closes = list(self._sig_closes)
         n = len(closes)
@@ -274,7 +363,7 @@ class _Indicators:
             self.kc_upper = self.kc_mid + width
             self.kc_lower = self.kc_mid - width
 
-        # Squeeze detection
+        # Squeeze detection: BB inside KC = volatility compression
         self._prev_squeeze = self.squeeze_on
         if (self.bb_upper is not None and self.kc_upper is not None
                 and self.bb_lower is not None and self.kc_lower is not None):
@@ -283,10 +372,8 @@ class _Indicators:
             if self.squeeze_on:
                 self.squeeze_count += 1
             else:
-                # Squeeze just released?
+                # Squeeze just released (was in squeeze, now out)
                 self.squeeze_released = self._prev_squeeze and not self.squeeze_on
-                if not self._prev_squeeze:
-                    self.squeeze_released = False
                 self.squeeze_count = 0
 
         # Volume ratio
@@ -299,6 +386,10 @@ class _Indicators:
             self.vol_ratio = 1.0
         else:
             self.vol_ratio = None
+
+        # Regime filters (on signal TF)
+        self._update_adx(price)
+        self._update_atr_percentile()
 
     def snapshot(self) -> dict[str, float | None]:
         return {
@@ -334,15 +425,20 @@ class VolatilitySqueezeEntry(EntryPolicy):
         contract_type: str = "large",
         bar_agg_trend: int = 4,
         bb_len: int = 20,
-        bb_std: float = 2.0,
+        bb_std: float = 1.8,
         kc_len: int = 20,
         kc_mult: float = 1.5,
         vol_len: int = 20,
-        vol_mult: float = 1.5,
+        vol_mult: float = 1.2,
         atr_len: int = 14,
         atr_sl_mult: float = 2.0,
-        min_squeeze_bars: int = 3,
+        min_squeeze_bars: int = 2,
         allow_night: int = 1,
+        adx_len: int = 14,
+        adx_min: float = 20.0,
+        atr_pct_len: int = 100,
+        atr_pct_min: float = 25.0,
+        atr_pct_max: float = 85.0,
     ) -> None:
         self._lots = lots
         self._contract_type = contract_type
@@ -350,11 +446,15 @@ class VolatilitySqueezeEntry(EntryPolicy):
         self._atr_sl_mult = atr_sl_mult
         self._min_squeeze_bars = min_squeeze_bars
         self._allow_night = bool(allow_night)
+        self._adx_min = adx_min
+        self._atr_pct_min = atr_pct_min
+        self._atr_pct_max = atr_pct_max
         self.ind = _Indicators(
             bb_len=bb_len, bb_std=bb_std,
             kc_len=kc_len, kc_mult=kc_mult,
             vol_len=vol_len, atr_len=atr_len,
             bar_agg_trend=bar_agg_trend,
+            adx_len=adx_len, atr_pct_len=atr_pct_len,
         )
         # Track squeeze duration (how many 1h bars were in squeeze before release)
         self._last_squeeze_duration: int = 0
@@ -400,20 +500,32 @@ class VolatilitySqueezeEntry(EntryPolicy):
         if ind.vol_ratio is not None and ind.vol_ratio < self._vol_mult:
             return None
 
+        # Regime filter: ADX — reject squeeze releases in choppy markets
+        if self._adx_min > 0 and (ind.adx is None or ind.adx < self._adx_min):
+            return None
+
+        # Regime filter: ATR percentile — reject dead-vol or chaotic regimes
+        if ind.atr_percentile is not None:
+            if self._atr_pct_min > 0 and ind.atr_percentile < self._atr_pct_min:
+                return None
+            if self._atr_pct_max < 100 and ind.atr_percentile > self._atr_pct_max:
+                return None
+
         sl_pts = atr * self._atr_sl_mult
 
         # Direction: which side of BB did price break?
+        _meta = {
+            "atr": atr, "squeeze_bars": self._last_squeeze_duration,
+            "vol_ratio": ind.vol_ratio, "adx": ind.adx,
+            "atr_pct": ind.atr_percentile, "strategy": "mt_volatility_squeeze",
+        }
         if price > ind.bb_upper:
             return EntryDecision(
                 lots=self._lots,
                 contract_type=self._contract_type,
                 initial_stop=price - sl_pts,
                 direction="long",
-                metadata={
-                    "atr": atr, "squeeze_bars": self._last_squeeze_duration,
-                    "bb_upper": ind.bb_upper, "vol_ratio": ind.vol_ratio,
-                    "strategy": "mt_volatility_squeeze",
-                },
+                metadata={**_meta, "bb_upper": ind.bb_upper},
             )
         if price < ind.bb_lower:
             return EntryDecision(
@@ -421,11 +533,7 @@ class VolatilitySqueezeEntry(EntryPolicy):
                 contract_type=self._contract_type,
                 initial_stop=price + sl_pts,
                 direction="short",
-                metadata={
-                    "atr": atr, "squeeze_bars": self._last_squeeze_duration,
-                    "bb_lower": ind.bb_lower, "vol_ratio": ind.vol_ratio,
-                    "strategy": "mt_volatility_squeeze",
-                },
+                metadata={**_meta, "bb_lower": ind.bb_lower},
             )
         return None
 
@@ -502,20 +610,25 @@ def create_volatility_squeeze_engine(
     contract_type: str = "large",
     bar_agg_trend: int = 4,
     bb_len: int = 20,
-    bb_std: float = 2.0,
+    bb_std: float = 1.8,
     kc_len: int = 20,
     kc_mult: float = 1.5,
     vol_len: int = 20,
-    vol_mult: float = 1.5,
+    vol_mult: float = 1.2,
     atr_len: int = 14,
     atr_sl_mult: float = 2.0,
     chandelier_atr_mult: float = 2.5,
-    min_squeeze_bars: int = 3,
+    min_squeeze_bars: int = 2,
     max_hold_bars: int = 200,
     allow_night: int = 1,
     max_pyramid_levels: int = 4,
     pyramid_gamma: float = 0.7,
     pyramid_trigger_atr: float = 1.5,
+    adx_len: int = 14,
+    adx_min: float = 20.0,
+    atr_pct_len: int = 100,
+    atr_pct_min: float = 25.0,
+    atr_pct_max: float = 85.0,
 ) -> "PositionEngine":
     """Build a PositionEngine wired with the Volatility Squeeze strategy."""
     from src.core.position_engine import PositionEngine
@@ -530,6 +643,8 @@ def create_volatility_squeeze_engine(
         atr_len=atr_len, atr_sl_mult=atr_sl_mult,
         min_squeeze_bars=min_squeeze_bars,
         allow_night=allow_night,
+        adx_len=adx_len, adx_min=adx_min,
+        atr_pct_len=atr_pct_len, atr_pct_min=atr_pct_min, atr_pct_max=atr_pct_max,
     )
     stop = VolatilitySqueezeStop(
         indicators=entry.ind,

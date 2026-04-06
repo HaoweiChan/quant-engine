@@ -249,25 +249,27 @@ class ParamRegistry:
     ) -> int:
         """Persist a single backtest result (not a full sweep). Returns run_id or -1 on error.
 
-        Deduplicates by (strategy_hash, symbol, train_start, train_end, timeframe).
+        Deduplicates by (strategy_hash, symbol, train_start, train_end, notes).
+        Notes include timeframe AND cost info, so different costs = different runs.
         Returns existing run_id if a matching run already exists.
         """
         self._validate_strategy_slug(strategy)
         try:
+            # Build notes first so dedup can check the full string (incl. costs)
+            tf_notes = f"tf={timeframe}" if timeframe else None
+            combined_notes = "; ".join(filter(None, [notes, tf_notes]))
             if strategy_hash and start and end and timeframe:
                 existing = self._conn.execute(
                     """SELECT r.id FROM param_runs r
                        WHERE r.strategy_hash = ? AND r.symbol = ?
                          AND r.train_start = ? AND r.train_end = ?
-                         AND r.notes LIKE ?""",
-                    (strategy_hash, symbol, start, end, f"%tf={timeframe}%"),
+                         AND r.notes = ?""",
+                    (strategy_hash, symbol, start, end, combined_notes or None),
                 ).fetchone()
                 if existing:
                     return existing[0]
             now = datetime.now(_TAIPEI_TZ).isoformat(timespec="seconds")
             run_tag = tag or f"tool:{tool}"
-            tf_notes = f"tf={timeframe}" if timeframe else None
-            combined_notes = "; ".join(filter(None, [notes, tf_notes]))
             cur = self._conn.execute(
                 """INSERT INTO param_runs
                    (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
@@ -346,11 +348,21 @@ class ParamRegistry:
         initial_capital: float = 2_000_000.0,
         strategy_hash: str | None = None,
         strategy_code: str | None = None,
+        base_params: dict[str, Any] | None = None,
     ) -> int:
-        """Persist a full OptimizerResult. Returns the run_id."""
+        """Persist a full OptimizerResult. Returns the run_id.
+
+        base_params: fixed parameters that were held constant during the sweep.
+        They are merged with result.best_params before saving candidates so that
+        activating a candidate always yields the complete parameter set.
+        """
         self._validate_strategy_slug(strategy)
         trials_dicts = result.trials.to_dicts() if len(result.trials) > 0 else []
         now = datetime.now(_TAIPEI_TZ).isoformat(timespec="seconds")
+        # Merge base_params into best_params so candidates always store the full set.
+        # base_params are fixed during the sweep and would otherwise fall back to
+        # schema defaults when the candidate is activated in the dashboard.
+        full_best_params = {**(base_params or {}), **(result.best_params or {})}
         cur = self._conn.execute(
             """INSERT INTO param_runs
                (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
@@ -422,7 +434,7 @@ class ParamRegistry:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
                 (
                     run_id,
-                    json.dumps(result.best_params),
+                    json.dumps(full_best_params),
                     m.get("sharpe"),
                     m.get("calmar"),
                     m.get("sortino"),
@@ -434,14 +446,14 @@ class ParamRegistry:
                     m.get("alpha"),
                 ),
             )
-        # Auto-create best candidate
+        # Auto-create best candidate (full params = base + swept)
         self.save_candidate(
             run_id=run_id,
             trial_id=None,
-            params=result.best_params,
+            params=full_best_params,
             label=f"best_{objective}",
         )
-        # Auto-extract Pareto frontier
+        # Auto-extract Pareto frontier — also merge base_params into each Pareto candidate
         if len(trials_dicts) > 1:
             n = len(trials_dicts)
             if n > _LARGE_TRIAL_THRESHOLD:
@@ -450,10 +462,11 @@ class ParamRegistry:
             for pt in pareto:
                 s = pt.get("sharpe", 0) or 0
                 c = pt.get("calmar", 0) or 0
+                full_pareto_params = {**(base_params or {}), **pt["params"]}
                 self.save_candidate(
                     run_id=run_id,
                     trial_id=None,
-                    params=pt["params"],
+                    params=full_pareto_params,
                     label=f"pareto_sharpe{s:.2f}_calmar{c:.2f}",
                 )
         self._conn.commit()
@@ -491,6 +504,20 @@ class ParamRegistry:
                 metrics.get("total_pnl"),
                 metrics.get("alpha"),
             ),
+        )
+        self._conn.commit()
+
+    def update_run_notes_append(self, run_id: int, extra: str) -> None:
+        """Append text to an existing run's notes (separated by '; ')."""
+        row = self._conn.execute(
+            "SELECT notes FROM param_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            return
+        existing = row["notes"] or ""
+        updated = "; ".join(filter(None, [existing, extra]))
+        self._conn.execute(
+            "UPDATE param_runs SET notes = ? WHERE id = ?", (updated, run_id)
         )
         self._conn.commit()
 

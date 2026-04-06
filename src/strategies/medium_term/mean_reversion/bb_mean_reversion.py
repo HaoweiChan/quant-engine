@@ -21,11 +21,12 @@ Exit logic (StopPolicy)
   Max hold     : 60 x 15m bars (~15h hard cap)
   No forced session close — medium-term, holds overnight.
 
-Design rationale: ~50% WR, RR ~1.2, ~312 trades/year.
+Design rationale: ~51% WR, RR ~1.15, ~307 trades/year.
 Uses BB(20, 2.0) on 30m bars for higher signal frequency with fast RSI(7)
-confirmation. Tight time stop (2h) prevents losers from bleeding.
-Optimized 2025-06 to 2026-04 on TX real data. Survives 1.5-tick slippage
-per side (Sharpe 0.69). OOS/IS Sharpe ratio 1.65.
+confirmation. Time stop (2.5h) prevents losers from bleeding.
+Optimized 2025-06 to 2026-04 on TX real data (run 763). Sharpe 1.29,
+Calmar 2.55, MDD 10.3%. OOS/IS Sharpe ratio 1.39. atr_sl_mult stability
+CV=13.4% (< 15%). Survives 50% slippage penalty (Sharpe ~1.27).
 """
 from __future__ import annotations
 
@@ -111,9 +112,9 @@ PARAM_SCHEMA: dict[str, dict] = {
         "grid": [1.5, 2.0, 2.5, 3.0],
     },
     "time_stop_bars": {
-        "type": "int", "default": 4, "min": 2, "max": 20,
-        "description": "Time stop: close if not reverted within N signal-TF bars (4 = 2h at 30m).",
-        "grid": [3, 4, 6, 8],
+        "type": "int", "default": 5, "min": 2, "max": 20,
+        "description": "Time stop: close if not reverted within N signal-TF bars (5 = 2.5h at 30m).",
+        "grid": [3, 4, 5, 6, 8],
     },
     "max_hold_bars": {
         "type": "int", "default": 60, "min": 10, "max": 300,
@@ -473,7 +474,7 @@ def create_bb_mean_reversion_engine(
     macro_filter_atr: float = 5.0,
     atr_len: int = 14,
     atr_sl_mult: float = 2.0,
-    time_stop_bars: int = 4,
+    time_stop_bars: int = 5,
     max_hold_bars: int = 60,
     allow_night: int = 1,
     max_pyramid_levels: int = 1,
