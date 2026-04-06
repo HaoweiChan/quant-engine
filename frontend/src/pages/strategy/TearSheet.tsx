@@ -105,6 +105,7 @@ export function TearSheet() {
   const initialCapital = useStrategyStore((s) => s.initialCapital);
   const slippageBps = useStrategyStore((s) => s.slippageBps);
   const commissionBps = useStrategyStore((s) => s.commissionBps);
+  const commissionFixed = useStrategyStore((s) => s.commissionFixed);
   const intraday = useStrategyStore((s) => s.intraday);
   const setIntraday = useStrategyStore((s) => s.setIntraday);
   const strategies = useStrategyStore((s) => s.strategies);
@@ -155,13 +156,20 @@ export function TearSheet() {
 
   const handleDelete = useCallback(async (e: React.MouseEvent, runId: number) => {
     e.stopPropagation();
+    e.preventDefault();
+    // Optimistic removal — update UI immediately
+    setParamRuns((prev) => prev.filter((r) => r.run_id !== runId));
+    setSelectedRunId((prev) => (prev === runId ? null : prev));
     try {
       await deleteParamRun(runId);
-      setParamRuns((prev) => prev.filter((r) => r.run_id !== runId));
-      setSelectedRunId((prev) => (prev === runId ? null : prev));
-      refreshAll();
     } catch (err) {
-      setError(`Delete failed: ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(`Delete failed: ${msg}`);
+      console.error("delete run failed", runId, err);
+      // Re-fetch on failure to restore the list
+      if (strategy) {
+        fetchParamRuns(strategy).then((r) => setParamRuns(r.runs)).catch(() => {});
+      }
     }
   }, [strategy]);
 
@@ -181,6 +189,12 @@ export function TearSheet() {
       if ([1, 3, 5, 15, 30, 60].includes(barAgg)) newParams.bar_agg = barAgg;
     }
     setParams(newParams);
+    // Restore cost settings from notes (e.g., "sbps=5|cfix=100")
+    const sbpsMatch = run.notes?.match(/sbps=([\d.]+)/);
+    const cfixMatch = run.notes?.match(/cfix=([\d.]+)/);
+    const store = useStrategyStore.getState();
+    store.setCosts(sbpsMatch ? parseFloat(sbpsMatch[1]) : 0, 0);
+    store.setCommissionFixed(cfixMatch ? parseFloat(cfixMatch[1]) : 0);
   };
 
   const handleSort = useCallback((key: SortKey) => {
@@ -345,11 +359,12 @@ export function TearSheet() {
         strategy, symbol, start: startDate, end: endDate, params,
         max_loss: maxLoss, initial_capital: initialCapital,
         slippage_bps: slippageBps, commission_bps: commissionBps,
+        commission_fixed_per_contract: commissionFixed,
         intraday,
         provenance: {
           param_hash: paramHash,
           date_range: `${startDate}~${endDate}`,
-          cost_model: { slippage_bps: slippageBps, commission_bps: commissionBps },
+          cost_model: { slippage_bps: slippageBps, commission_fixed: commissionFixed },
           git_commit: metaInfo.git_commit,
         },
       });
@@ -413,13 +428,13 @@ export function TearSheet() {
           />
           Intraday
         </label>
-        {slippageBps > 0 || commissionBps > 0 ? (
+        {slippageBps > 0 || commissionBps > 0 || commissionFixed > 0 ? (
           <span className="text-[9px]" style={{ color: colors.cyan, fontFamily: "var(--font-mono)" }}>
-            slip={slippageBps}bps comm={commissionBps}bps
+            slip={slippageBps}bps comm=NT${commissionFixed}/rt
           </span>
         ) : (
           <span className="text-[9px]" style={{ color: colors.orange, fontFamily: "var(--font-mono)" }}>
-            ⚠ zero cost model
+            ⚠ zero cost model (defaults applied by backend)
           </span>
         )}
       </div>
@@ -616,7 +631,7 @@ export function TearSheet() {
             {paramRuns.length === 0 ? (
               <div className="text-[10px] py-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No run history for this strategy.</div>
             ) : (
-              <table className="w-full text-[10px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse", minWidth: 970 }}>
+              <table className="w-full text-[10px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse", minWidth: 1040 }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid var(--color-qe-card-border)" }}>
                     <th className="text-left py-1 pr-1" style={{ color: colors.dim, width: 16 }}></th>
@@ -634,6 +649,7 @@ export function TearSheet() {
                     <SortHeader label="Win Rate" field="win_rate" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
                     <SortHeader label="Max DD" field="max_drawdown_pct" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
                     <SortHeader label="PF" field="profit_factor" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
+                    <th className="text-right py-1 pr-2" style={{ color: colors.dim }}>Costs</th>
                     <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>Hash</th>
                     <th className="text-right py-1" style={{ color: colors.dim }}></th>
                   </tr>
@@ -654,6 +670,11 @@ export function TearSheet() {
                     const tfMatch = run.notes?.match(/tf=(\d+)min/);
                     const tf = tfMatch ? `${tfMatch[1]}m` : "—";
                     const isIntraday = run.notes?.includes("|intraday") ?? false;
+                    const sbpsMatch = run.notes?.match(/sbps=([\d.]+)/);
+                    const cfixMatch = run.notes?.match(/cfix=([\d.]+)/);
+                    const slipBps = sbpsMatch ? parseFloat(sbpsMatch[1]) : 0;
+                    const commFixed = cfixMatch ? parseFloat(cfixMatch[1]) : 0;
+                    const hasCosts = slipBps > 0 || commFixed > 0;
                     return (
                       <tr
                         key={run.run_id}
@@ -702,6 +723,9 @@ export function TearSheet() {
                         <td className="text-right py-1 pr-2" style={{ color: pf != null && pf >= 1.5 ? colors.green : pf != null && pf >= 1 ? colors.gold : colors.red }}>
                           {pf != null ? pf.toFixed(2) : "—"}
                         </td>
+                        <td className="text-right py-1 pr-2" style={{ color: hasCosts ? colors.muted : colors.dim }} title={hasCosts ? `slippage=${slipBps}bps commission=NT$${commFixed}/rt` : "zero cost"}>
+                          {hasCosts ? `${Number.isInteger(slipBps) ? slipBps : slipBps.toFixed(1)}bp/$${Number.isInteger(commFixed) ? commFixed : commFixed.toFixed(0)}` : "—"}
+                        </td>
                         <td className="py-1 pr-2" style={{ color: colors.dim }}>
                           {run.strategy_hash != null ? (
                             <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -718,6 +742,7 @@ export function TearSheet() {
                         </td>
                         <td className="text-right py-1 whitespace-nowrap">
                           <button
+                            type="button"
                             onClick={(e) => handleDelete(e, run.run_id)}
                             className="px-1 py-0.5 rounded text-[9px] cursor-pointer border-none opacity-40 hover:opacity-100"
                             style={{ background: "transparent", color: colors.red, fontFamily: "var(--font-mono)" }}

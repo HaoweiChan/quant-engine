@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 type PrimaryTab = "datahub" | "strategy" | "trading";
-type StrategySubTab = "editor" | "tearsheet" | "paramsweep" | "stresstest" | "portfolio";
+type StrategySubTab = "editor" | "tearsheet" | "paramsweep" | "risk" | "portfolio";
 type TradingSubTab = "accounts" | "warroom" | "blotter" | "risk";
 
 interface UiState {

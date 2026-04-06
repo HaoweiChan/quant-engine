@@ -5,8 +5,8 @@ import { useUiStore } from "@/stores/uiStore";
 import { CodeEditor } from "@/pages/strategy/CodeEditor";
 import { TearSheet } from "@/pages/strategy/TearSheet";
 import { ParamSweep } from "@/pages/strategy/ParamSweep";
-import { StressTest } from "@/pages/strategy/StressTest";
 import { Portfolio } from "@/pages/strategy/Portfolio";
+import { RiskEvaluation } from "@/pages/strategy/RiskEvaluation";
 import { colors } from "@/lib/theme";
 
 
@@ -14,7 +14,7 @@ const subTabs = [
   { value: "editor", label: "Code Editor" },
   { value: "tearsheet", label: "Tear Sheet" },
   { value: "paramsweep", label: "Param Sweep" },
-  { value: "stresstest", label: "Stress Test" },
+  { value: "risk", label: "Risk Evaluation" },
   { value: "portfolio", label: "Portfolio" },
 ] as const;
 
@@ -22,7 +22,7 @@ const subTabComponents: Record<string, React.FC> = {
   editor: CodeEditor,
   tearsheet: TearSheet,
   paramsweep: ParamSweep,
-  stresstest: StressTest,
+  risk: RiskEvaluation,
   portfolio: Portfolio,
 };
 

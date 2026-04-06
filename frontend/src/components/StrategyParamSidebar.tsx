@@ -1,7 +1,53 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Sidebar, SectionLabel, ParamInput } from "@/components/Sidebar";
 import { useStrategyStore } from "@/stores/strategyStore";
 import { useBacktestStore } from "@/stores/backtestStore";
+
+/** A number input that allows free typing by buffering the raw string locally. */
+function NumericInput({
+  value,
+  onChange,
+  disabled,
+  step,
+  className,
+  style,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  disabled?: boolean;
+  step?: number;
+  className?: string;
+  style?: React.CSSProperties;
+}) {
+  const [raw, setRaw] = useState(String(value));
+  useEffect(() => { setRaw(String(value)); }, [value]);
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={raw}
+      onChange={(e) => {
+        const s = e.target.value;
+        setRaw(s);
+        const n = Number(s);
+        if (s !== "" && !isNaN(n)) onChange(n);
+      }}
+      onBlur={() => {
+        const n = Number(raw);
+        if (raw === "" || isNaN(n)) {
+          setRaw(String(value));
+        } else {
+          onChange(n);
+          setRaw(String(n));
+        }
+      }}
+      disabled={disabled}
+      step={step}
+      className={className}
+      style={style}
+    />
+  );
+}
 
 
 const inputStyle: React.CSSProperties = {
@@ -21,6 +67,7 @@ export function StrategyParamSidebar() {
   const endDate = useStrategyStore((s) => s.endDate);
   const slippageBps = useStrategyStore((s) => s.slippageBps);
   const commissionBps = useStrategyStore((s) => s.commissionBps);
+  const commissionFixed = useStrategyStore((s) => s.commissionFixed);
   const initialCapital = useStrategyStore((s) => s.initialCapital);
   const maxLoss = useStrategyStore((s) => s.maxLoss);
   const params = useStrategyStore((s) => s.params);
@@ -28,6 +75,7 @@ export function StrategyParamSidebar() {
   const setSymbol = useStrategyStore((s) => s.setSymbol);
   const setDates = useStrategyStore((s) => s.setDates);
   const setCosts = useStrategyStore((s) => s.setCosts);
+  const setCommissionFixed = useStrategyStore((s) => s.setCommissionFixed);
   const setParam = useStrategyStore((s) => s.setParam);
   const setInitialCapital = useStrategyStore((s) => s.setInitialCapital);
   const setMaxLoss = useStrategyStore((s) => s.setMaxLoss);
@@ -125,22 +173,18 @@ export function StrategyParamSidebar() {
         </select>
       </ParamInput>
       <ParamInput label="Init Capital ($)">
-        <input
-          type="number"
+        <NumericInput
           value={initialCapital}
-          step={100000}
-          onChange={(e) => setInitialCapital(Number(e.target.value))}
+          onChange={setInitialCapital}
           disabled={disabled}
           className="w-full rounded px-1.5 py-1 text-[11px]"
           style={inputStyle}
         />
       </ParamInput>
       <ParamInput label="Max Loss ($)">
-        <input
-          type="number"
+        <NumericInput
           value={maxLoss}
-          step={10000}
-          onChange={(e) => setMaxLoss(Number(e.target.value))}
+          onChange={setMaxLoss}
           disabled={disabled}
           className="w-full rounded px-1.5 py-1 text-[11px]"
           style={inputStyle}
@@ -149,24 +193,18 @@ export function StrategyParamSidebar() {
       <hr style={{ borderColor: "var(--color-qe-card-border)", margin: "10px 0" }} />
       <SectionLabel>COST MODEL</SectionLabel>
       <ParamInput label="Slippage (bps)">
-        <input
-          type="number"
+        <NumericInput
           value={slippageBps}
-          step={1}
-          min={0}
-          onChange={(e) => setCosts(Number(e.target.value), commissionBps)}
+          onChange={(v) => setCosts(v, commissionBps)}
           disabled={disabled}
           className="w-full rounded px-1.5 py-1 text-[11px]"
           style={inputStyle}
         />
       </ParamInput>
-      <ParamInput label="Commission (bps)">
-        <input
-          type="number"
-          value={commissionBps}
-          step={1}
-          min={0}
-          onChange={(e) => setCosts(slippageBps, Number(e.target.value))}
+      <ParamInput label="Commission (NT$/rt)">
+        <NumericInput
+          value={commissionFixed}
+          onChange={setCommissionFixed}
           disabled={disabled}
           className="w-full rounded px-1.5 py-1 text-[11px]"
           style={inputStyle}
@@ -179,11 +217,10 @@ export function StrategyParamSidebar() {
           .filter(([key]) => key !== "bar_agg")
           .map(([key, cfg]) => (
             <ParamInput key={key} label={cfg.label || key}>
-              <input
-                type="number"
+              <NumericInput
                 value={params[key] ?? 0}
                 step={cfg.type === "int" ? 1 : 0.1}
-                onChange={(e) => setParam(key, Number(e.target.value))}
+                onChange={(v) => setParam(key, v)}
                 disabled={disabled}
                 className="w-full rounded px-1.5 py-1 text-[11px]"
                 style={inputStyle}

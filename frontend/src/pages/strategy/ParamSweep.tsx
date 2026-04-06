@@ -130,6 +130,7 @@ export function ParamSweep() {
   const strategies = useStrategyStore((s) => s.strategies);
   const slippageBps = useStrategyStore((s) => s.slippageBps);
   const commissionBps = useStrategyStore((s) => s.commissionBps);
+  const commissionFixed = useStrategyStore((s) => s.commissionFixed);
   const currentStrat = strategies.find((s) => s.slug === strategy);
   const paramOpts = currentStrat
     ? Object.entries(currentStrat.param_grid).map(([k, v]) => ({ value: k, label: v.label || k }))
@@ -190,7 +191,7 @@ export function ParamSweep() {
         try {
           const r = await runBacktest({
             strategy, symbol, start: startDate, end: endDate, params: merged,
-            slippage_bps: slippageBps, commission_bps: commissionBps,
+            slippage_bps: slippageBps, commission_bps: commissionBps, commission_fixed_per_contract: commissionFixed,
           });
           const m = r.metrics;
           cells.push({
@@ -226,6 +227,7 @@ export function ParamSweep() {
         strategy, symbol, start: startDate, end: endDate,
         param_grid: parsed, is_fraction: isFraction, objective, n_jobs: nJobs,
         slippage_bps: slippageBps, commission_bps: commissionBps,
+        commission_fixed_per_contract: commissionFixed,
       });
       setRunning(true);
       const poll = setInterval(async () => {

@@ -153,6 +153,7 @@ export async function runBacktest(params: {
   initial_capital?: number;
   slippage_bps?: number;
   commission_bps?: number;
+  commission_fixed_per_contract?: number;
   provenance?: Record<string, unknown>;
   intraday?: boolean;
 }): Promise<BacktestResult> {
@@ -172,6 +173,7 @@ export async function runMonteCarloSim(params: {
   initial_equity?: number;
   slippage_bps?: number;
   commission_bps?: number;
+  commission_fixed_per_contract?: number;
   n_paths?: number;
   n_days?: number;
   method?: string;
@@ -232,6 +234,7 @@ export async function startOptimizer(params: {
   n_jobs?: number;
   slippage_bps?: number;
   commission_bps?: number;
+  commission_fixed_per_contract?: number;
 }): Promise<{ status: string }> {
   return fetchJSON("/api/optimizer/run", {
     method: "POST",
@@ -525,6 +528,7 @@ export async function runPortfolioBacktest(params: {
   initial_capital?: number;
   slippage_bps?: number;
   commission_bps?: number;
+  commission_fixed_per_contract?: number;
 }): Promise<PortfolioBacktestResult> {
   return fetchJSON("/api/portfolio/backtest", {
     method: "POST",
@@ -541,6 +545,7 @@ export async function runPortfolioStress(params: {
   initial_capital?: number;
   slippage_bps?: number;
   commission_bps?: number;
+  commission_fixed_per_contract?: number;
   n_paths?: number;
   n_days?: number;
   method?: string;

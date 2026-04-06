@@ -97,6 +97,7 @@ export function StressTest() {
   const initialCapital = useStrategyStore((s) => s.initialCapital);
   const slippageBps = useStrategyStore((s) => s.slippageBps);
   const commissionBps = useStrategyStore((s) => s.commissionBps);
+  const commissionFixed = useStrategyStore((s) => s.commissionFixed);
   const [method, setMethod] = useState<MCMethod>("stationary");
   const [nPaths, setNPaths] = useState(500);
   const [simDays, setSimDays] = useState(252);
@@ -119,6 +120,7 @@ export function StressTest() {
         initial_equity: initialCapital,
         slippage_bps: slippageBps,
         commission_bps: commissionBps,
+        commission_fixed_per_contract: commissionFixed,
         n_paths: nPaths,
         n_days: simDays,
         method,

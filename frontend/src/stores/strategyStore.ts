@@ -11,6 +11,7 @@ interface StrategyState {
   endDate: string;
   slippageBps: number;
   commissionBps: number;
+  commissionFixed: number;
   initialCapital: number;
   maxLoss: number;
   params: Record<string, number>;
@@ -22,6 +23,7 @@ interface StrategyState {
   setSymbol: (s: string) => void;
   setDates: (start: string, end: string) => void;
   setCosts: (slippage: number, commission: number) => void;
+  setCommissionFixed: (v: number) => void;
   setParam: (key: string, value: number) => void;
   setParams: (p: Record<string, number>) => void;
   setInitialCapital: (v: number) => void;
@@ -41,6 +43,7 @@ export const useStrategyStore = create<StrategyState>((set, get) => ({
   endDate: "2026-03-14",
   slippageBps: 0,
   commissionBps: 0,
+  commissionFixed: 0,
   initialCapital: 2_000_000,
   maxLoss: 500_000,
   params: {},
@@ -76,6 +79,7 @@ export const useStrategyStore = create<StrategyState>((set, get) => ({
   setSymbol: (symbol) => set({ symbol }),
   setDates: (startDate, endDate) => set({ startDate, endDate }),
   setCosts: (slippageBps, commissionBps) => set({ slippageBps, commissionBps }),
+  setCommissionFixed: (commissionFixed) => set({ commissionFixed }),
   setParam: (key, value) => set((s) => ({ params: { ...s.params, [key]: value } })),
   setParams: (params) => set({ params }),
   setInitialCapital: (initialCapital) => set({ initialCapital }),

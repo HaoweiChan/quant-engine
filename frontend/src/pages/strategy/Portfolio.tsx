@@ -273,6 +273,7 @@ export function Portfolio() {
   const storeCapital = useStrategyStore((s) => s.initialCapital);
   const storeSlippage = useStrategyStore((s) => s.slippageBps);
   const storeCommission = useStrategyStore((s) => s.commissionBps);
+  const storeCommissionFixed = useStrategyStore((s) => s.commissionFixed);
 
   const [slots, setSlots] = useState<StrategySlot[]>([
     { slug: "", weight: 50 },
@@ -325,6 +326,7 @@ export function Portfolio() {
         initial_capital: storeCapital,
         slippage_bps: storeSlippage,
         commission_bps: storeCommission,
+        commission_fixed_per_contract: storeCommissionFixed,
       });
       setBtResult(res);
     } catch (e: unknown) {
@@ -349,6 +351,7 @@ export function Portfolio() {
         initial_capital: storeCapital,
         slippage_bps: storeSlippage,
         commission_bps: storeCommission,
+        commission_fixed_per_contract: storeCommissionFixed,
       });
       setStressResult(res);
     } catch (e: unknown) {
