@@ -199,3 +199,51 @@ def _prices_to_bars(
         })
         timestamps.append(base_ts + timedelta(days=i))
     return bars, timestamps
+
+
+def _prices_to_intraday_bars(
+    prices: npt.NDArray[np.float64],
+    bars_per_day: int = 71,
+) -> tuple[list[dict[str, Any]], list[datetime]]:
+    """Expand daily scenario prices into intraday bars for sub-daily strategies.
+
+    Each daily transition prices[i-1] -> prices[i] is interpolated across
+    *bars_per_day* sub-bars with small noise, preserving the macro scenario
+    shape while providing enough bars for strategies that aggregate internally.
+    """
+    from src.simulator.monte_carlo import _generate_taifex_timestamps
+
+    n_days = len(prices) - 1
+    total_bars = n_days * bars_per_day
+    timestamps = _generate_taifex_timestamps(total_bars)
+    rng = np.random.default_rng(42)
+
+    bars: list[dict[str, Any]] = []
+    for day_idx in range(n_days):
+        day_open = float(prices[day_idx])
+        day_close = float(prices[day_idx + 1])
+        daily_atr = abs(day_close - day_open) * 2
+        step = (day_close - day_open) / bars_per_day
+        noise_std = max(abs(step) * 0.3, day_open * 0.0002)
+
+        prev_p = day_open
+        for bar_j in range(bars_per_day):
+            target = day_open + step * (bar_j + 1)
+            noise = rng.normal(0, noise_std) if bar_j < bars_per_day - 1 else 0.0
+            p = target + noise
+            o = prev_p
+            h = max(o, p) * (1 + rng.uniform(0, 0.0005))
+            l = min(o, p) * (1 - rng.uniform(0, 0.0005))  # noqa: E741
+            bars.append({
+                "price": p,
+                "symbol": "TX",
+                "daily_atr": daily_atr,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": p,
+                "volume": float(rng.uniform(1000, 5000)),
+            })
+            prev_p = p
+
+    return bars, timestamps[:len(bars)]

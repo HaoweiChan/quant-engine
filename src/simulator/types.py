@@ -152,7 +152,7 @@ PRESETS: dict[str, PathConfig] = {
     "bear": PathConfig(drift=-0.0005, volatility=0.02),
     "volatile_bull": PathConfig(
         drift=0.0005, volatility=0.03,
-        garch_omega=0.00001, garch_alpha=0.1, garch_beta=0.85,
+        garch_omega=0.00001, garch_alpha=0.08, garch_beta=0.89,
     ),
     "flash_crash": PathConfig(
         drift=0.0002, volatility=0.015,

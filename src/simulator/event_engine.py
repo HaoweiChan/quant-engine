@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import heapq
 import random
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from itertools import count
 from typing import TYPE_CHECKING, Any
 
 from src.core.adapter import BaseAdapter
@@ -93,15 +94,21 @@ def generate_synthetic_ticks(
 @dataclass
 class EventEngine:
     config: EventEngineConfig | None = None
-    _queue: deque[Event] = field(default_factory=deque)
+    _heap: list[tuple[int, int, Event]] = field(default_factory=list)
     _handlers: dict[EventType, list[Callable[[Event], list[Event] | None]]] = field(
         default_factory=dict
     )
     _audit_trail: "AuditTrail | None" = field(default=None, repr=False)
+    _counter: count = field(default_factory=count)
 
     def __post_init__(self) -> None:
         if self.config is None:
             self.config = EventEngineConfig()
+
+    @property
+    def _queue(self) -> list:
+        """Backward-compat alias for tests that check len(engine._queue)."""
+        return self._heap
 
     def set_audit_trail(self, audit_trail: "AuditTrail | None") -> None:
         self._audit_trail = audit_trail
@@ -114,11 +121,8 @@ class EventEngine:
         self._handlers[event_type].append(handler)
 
     def push(self, event: Event) -> None:
-        self._queue.append(event)
-
-    def _sort_queue(self) -> None:
-        sorted_events = sorted(self._queue, key=lambda e: EVENT_PRIORITY.get(e.event_type, 999))
-        self._queue = deque(sorted_events)
+        priority = EVENT_PRIORITY.get(event.event_type, 999)
+        heapq.heappush(self._heap, (priority, next(self._counter), event))
 
     def _audit_event(self, event: Event, account_state: AccountState | None = None) -> None:
         if self._audit_trail is None or (self.config and not self.config.audit_enabled):
@@ -149,15 +153,17 @@ class EventEngine:
             )
 
     def run(self) -> None:
-        while self._queue:
-            self._sort_queue()
-            event = self._queue.popleft()
+        heap = self._heap
+        counter = self._counter
+        while heap:
+            _, _, event = heapq.heappop(heap)
             handlers = self._handlers.get(event.event_type, [])
             for handler in handlers:
                 new_events = handler(event)
                 if new_events:
                     for new_event in new_events:
-                        self._queue.append(new_event)
+                        priority = EVENT_PRIORITY.get(new_event.event_type, 999)
+                        heapq.heappush(heap, (priority, next(counter), new_event))
 
     def run_backtest(
         self,

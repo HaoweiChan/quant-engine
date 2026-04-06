@@ -210,6 +210,23 @@ class BacktestRunner:
         metrics["total_commission_cost"] = impact_report.total_commission_cost
         metrics["avg_latency_ms"] = impact_report.avg_latency_ms
         metrics["partial_fill_count"] = float(impact_report.partial_fill_count)
+        # Cost breakdown metrics
+        metrics["gross_pnl"] = impact_report.naive_pnl
+        metrics["net_pnl"] = impact_report.realistic_pnl
+        total_costs = (
+            impact_report.total_market_impact
+            + impact_report.total_spread_cost
+            + impact_report.total_commission_cost
+        )
+        metrics["total_slippage_cost"] = impact_report.total_spread_cost
+        metrics["total_commission_cost"] = impact_report.total_commission_cost
+        cost_drag = (
+            total_costs / impact_report.naive_pnl
+            if impact_report.naive_pnl > 0
+            else 0.0
+        )
+        metrics["cost_drag_pct"] = cost_drag * 100.0
+        metrics["high_cost_drag"] = cost_drag > 0.5
 
         result = BacktestResult(
             equity_curve=equity_curve,

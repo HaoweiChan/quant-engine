@@ -83,11 +83,15 @@ def _generate_volatility(
         sigmas = np.empty(n)
         var = config.volatility**2
         for i in range(n):
-            var = (
-                config.garch_omega
-                + config.garch_alpha * (config.volatility * innovations[i - 1] if i > 0 else 0) ** 2
-                + config.garch_beta * var
+            # Standard GARCH(1,1): var_t = omega + alpha * (sigma_{t-1} * epsilon_{t-1})^2 + beta * var_{t-1}
+            # Use previous variance to compute previous sigma for the shock term
+            prev_sigma = np.sqrt(var) if i > 0 else config.volatility
+            shock_term = (
+                config.garch_alpha * (prev_sigma * innovations[i - 1]) ** 2
+                if i > 0
+                else 0.0
             )
+            var = config.garch_omega + shock_term + config.garch_beta * var
             sigmas[i] = np.sqrt(max(var, 1e-10))
         return sigmas
     return np.full(n, config.volatility)
