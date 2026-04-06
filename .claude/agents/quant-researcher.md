@@ -87,7 +87,7 @@ Walk-forward structure:
 - Report only validation period metrics. Training metrics are withheld.
 
 Phase 2 acceptance:
-- Validation Sharpe ≥ 0.6 (annualized, out-of-sample windows only)
+- Validation Sharpe ≥ 1.0 (annualized, out-of-sample windows only)
 - MDD ≤ 20% in any single validation window
 - Win Rate: 35%–70%
 - N_trades ≥ 30 per validation window — if below this, result is inconclusive

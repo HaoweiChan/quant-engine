@@ -58,7 +58,7 @@ Risk Auditor: [agent instance]
 [ ] Symbol and date range: TXF [interval]m, [start] → [end]
 [ ] Walk-forward structure: train=6mo, validate=2mo, step=1mo
 [ ] Params from Phase 1 used WITHOUT re-optimization on validation data
-[ ] Validation Sharpe ≥ 0.6 (out-of-sample windows only)
+[ ] Validation Sharpe ≥ 1.0 (out-of-sample windows only)
 [ ] Validation MDD ≤ 20% in every window
 [ ] Avg N_trades/window ≥ 30 (if any window < 30: INCONCLUSIVE)
 [ ] Day session validated: Sharpe ≥ 0.5
@@ -179,7 +179,7 @@ A strategy cannot be promoted based on simulation results alone.
 
 Required before re-submission:
 - Walk-forward backtest on real TXF OHLCV bars (minimum 2 years)
-- Out-of-sample validation Sharpe ≥ 0.6
+- Out-of-sample validation Sharpe ≥ 1.0
 - N_trades ≥ 30 per validation window
 - Both day and night sessions validated separately
 - Phase 2 report written to .claude/research/[name]-phase2.md

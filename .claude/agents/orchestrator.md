@@ -38,7 +38,7 @@ This sequence is mandatory. No step can begin until the previous step's gate pas
 [4] Quant Researcher  → Phase 1 simulation (parameter stress)
         ↓ Gate: MC P50 Sharpe ≥ 0.8 (bull), ≥ 0.4 (sideways), survives flash_crash
 [5] Quant Researcher  → Phase 2 historical walk-forward (alpha claim)
-        ↓ Gate: validation Sharpe ≥ 0.6, N_trades ≥ 30/window, both sessions
+        ↓ Gate: validation Sharpe ≥ 1.0, N_trades ≥ 30/window, both sessions
 [6] Risk Auditor      → Bias audit + full promotion checklist
         ↓ Gate: checklist signed PROMOTE, no look-ahead bias found
 [7] Live Systems Engineer → Paper trade 5 sessions

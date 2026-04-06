@@ -219,23 +219,42 @@ Constraints:
 ### Stage 4: EVALUATE
 
 **Read references:** `references/statistical-validity.md`
-**MCP tools:** `run_monte_carlo`, `run_stress_test`, `run_backtest_realdata`, `run_parameter_sweep`, `get_optimization_history`
+**MCP tools:** `run_monte_carlo`, `run_stress_test`, `run_backtest_realdata`, `run_parameter_sweep`, `run_walk_forward`, `run_sensitivity_check`, `run_risk_report`, `get_optimization_history`
 
 Only reach this stage if Stage 3's quick backtests were promising. Now run
 the full validation suite.
 
-Use two-layer evaluation:
+Use three-layer evaluation:
 
 1. **Synthetic robustness (exploratory, non-terminating)**  
    Run `run_monte_carlo` (n_paths=200) across scenarios + `run_stress_test`.
    For intraday strategies, MC uses multiprocessing automatically.
 
-2. **Real-data termination gate (mandatory for accept/stop decisions)**  
+2. **Parameter sensitivity & stability check (mandatory gate)**  
+   Run `run_sensitivity_check` with the candidate parameters to test ±20% perturbation.
+   This checks for overfitting and parameter cliff-edges.
+   - MUST PASS: max Sharpe drop < 30%
+   - MUST PASS: all parameters have stability CV < 0.20
+   - MUST PASS: no parameter has a cliff (>30% drop between adjacent grid points)
+   If sensitivity check fails, the candidate is overfit — reject and return to HYPOTHESIZE.
+
+3. **Real-data termination gate (mandatory for accept/stop decisions)**  
    Validate the candidate on TAIFEX history using:
    - `run_backtest_realdata` on baseline params and candidate params
    - `run_parameter_sweep` with `mode="production_intent"`, `require_real_data=true`,
      and explicit `symbol/start/end`
+   - `run_walk_forward` with the candidate params for expanding-window out-of-sample
+     validation. This is a mandatory check to confirm the candidate doesn't overfit
+     to a particular training window.
    The final commit/reject decision must be based on this real-data layer.
+
+Walk-forward acceptance criteria (from `references/statistical-validity.md`):
+- Aggregate OOS Sharpe ≥ 1.0
+- Mean overfit ratio (OOS/IS) ≥ 0.7 (less than 30% degradation from IS to OOS)
+- Per-fold MDD ≤ 20%
+- Per-fold win rate within the **strategy type's healthy range** (Step 0)
+- Per-fold trade count ≥ 30
+- Per-fold profit factor ≥ 1.2
 
 Real-data acceptance criteria (from `references/statistical-validity.md`):
 - P50 PnL > 0 across all 7 scenarios
@@ -253,9 +272,9 @@ Compare against baseline:
 - Sharpe improvement > 0.1 (absolute) is meaningful
 - If improvement < 0.05, the change is noise — reject it
 
-Check for overfitting:
-- Run the ±20% parameter sensitivity test from `references/statistical-validity.md`
-- If performance collapses with small perturbation, the value is overfit
+Optional: Use `run_risk_report` to automatically orchestrate all 5 evaluation layers
+(cost, sensitivity, regime MC, adversarial injection, walk-forward) in a single call.
+This requires providing symbol/start/end for walk-forward validation.
 
 Do not terminate the loop from synthetic metrics alone, even if they look superior.
 

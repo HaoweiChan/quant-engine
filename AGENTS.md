@@ -145,14 +145,41 @@ def compute_intraday_bnh(bars: list[Bar]) -> BenchmarkResult:
 
 ## MCP Tools Available
 
-All agents with research or implementation tasks can call the backtest MCP server:
-- `run_backtest` — single path, quick parameter check
+All agents with research or implementation tasks can call the backtest MCP server (16 tools total):
+
+**Core backtesting**
+- `run_backtest` — single path, quick parameter check on synthetic data
+- `run_backtest_realdata` — backtest on real historical OHLCV from database
 - `run_monte_carlo` — distributional robustness across N synthetic paths (prefer over single backtest)
-- `run_parameter_sweep` — grid/random search (max 2 params per sweep)
-- `run_stress_test` — tail scenarios: gap_down, flash_crash, vol_regime_shift
-- `read_strategy_file` / `write_strategy_file` — strategy sandbox I/O
-- `get_parameter_schema` — call first in any optimization session
-- `get_optimization_history` — avoid re-testing known parameter combinations
+- `run_parameter_sweep` — grid/random search (max 3 params per sweep, gates-aware)
+- `run_stress_test` — tail scenarios: gap_down, flash_crash, vol_regime_shift, liquidity_crisis, slow_bleed
+
+**Out-of-sample validation**
+- `run_walk_forward` — expanding-window out-of-sample validation on real data (Phase 2 alpha proof)
+- `run_sensitivity_check` — ±20% parameter perturbation analysis to detect overfitting (mandatory Stage 4 gate)
+
+**Risk reporting**
+- `run_risk_report` — unified 5-layer risk sign-off report (cost, sensitivity, regime MC, adversarial, walk-forward)
+
+**Strategy file I/O**
+- `read_strategy_file` — read strategy policy from registry
+- `write_strategy_file` — write/validate strategy policy with syntax checking
+- `scaffold_strategy` — generate strategy boilerplate with correct Policy interfaces
+
+**Parameter & run history**
+- `get_parameter_schema` — call first in any optimization session, returns all param bounds + scenarios
+- `get_run_history` — query persisted optimization runs across sessions
+- `get_optimization_history` — session-local run history (avoid re-testing known combinations)
+- `get_active_params` — retrieve currently active optimized parameters for a strategy
+- `activate_candidate` — promote a parameter candidate to active status for live trading
+
+### Default Cost Model
+
+All backtest, Monte Carlo, parameter sweep, and stress test tools **automatically apply default transaction costs**:
+- **TX**: 0.1% slippage + NT$100/round-trip commission
+- **MTX**: 0.1% slippage + NT$40/round-trip commission
+
+These defaults are injected automatically in the backtest engine (`_build_runner`). Users need not specify costs; costs are applied unless explicitly overridden. The cost model is configurable per instrument via `get_instrument_cost_config(symbol)` in `src/core/types.py`.
 
 ---
 
@@ -169,7 +196,7 @@ These are checked and signed by the Risk Auditor. No exceptions.
 - Optimal parameters not at the boundary of the search range
 
 **Historical alpha validation (Phase 2 — required for sign-off)**
-- Walk-forward validation Sharpe ≥ 0.6 on real OHLCV bars (out-of-sample only)
+- Walk-forward validation Sharpe ≥ 1.0 on real OHLCV bars (out-of-sample only)
 - Strategy Sharpe exceeds intraday B&H Sharpe for the same sessions
 - MDD ≤ 20% in any single validation window
 - Win Rate 35%–70%

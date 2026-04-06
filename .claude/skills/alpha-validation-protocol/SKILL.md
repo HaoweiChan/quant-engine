@@ -60,7 +60,7 @@ Final: report ONLY validation period metrics, never training period metrics
 ```
 
 **Acceptance criteria for Phase 2 (MINIMUM for sign-off):**
-- Walk-forward Sharpe ≥ 0.6 (annualized, validation periods only)
+- Walk-forward Sharpe ≥ 1.0 (annualized, validation periods only)
 - Max Drawdown ≤ 20% on any single validation window
 - Win Rate: 35%–70%
 - N_trades ≥ 30 per validation window (low sample → inconclusive)
