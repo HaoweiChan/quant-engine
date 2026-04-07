@@ -31,11 +31,11 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 PARAM_SCHEMA: dict[str, dict] = {
-    "sma_len":             {"type": "int",   "default": 50,   "min": 10,  "max": 200,
+    "sma_len":             {"type": "int",   "default": 20,   "min": 10,  "max": 200,
                             "description": "SMA lookback for trend filter."},
-    "max_levels":          {"type": "int",   "default": 4,    "min": 1,   "max": 8,
-                            "description": "Maximum pyramid levels."},
-    "stop_atr_mult":       {"type": "float", "default": 1.5,  "min": 0.5, "max": 4.0,
+    "max_levels":          {"type": "int",   "default": 1,    "min": 1,   "max": 8,
+                            "description": "Maximum pyramid levels (1 = no adds)."},
+    "stop_atr_mult":       {"type": "float", "default": 0.5,  "min": 0.5, "max": 4.0,
                             "description": "ATR multiplier for initial stop distance."},
     "trail_atr_mult":      {"type": "float", "default": 3.0,  "min": 1.0, "max": 6.0,
                             "description": "ATR multiplier for chandelier trailing stop."},
