@@ -1,0 +1,28 @@
+# BB Mean Reversion — optimized 2026-04-08
+# Signal TF: 2h (bar_agg_trend=8 × 15m bars), ATR macro filter=7
+# Validated: real TX data 2024-01-01–2026-03-31, OOS Sharpe=1.47, 4 WF folds
+# Activated candidate: 1070 (promotable), best candidate: 1075 (Sharpe=1.578)
+
+[params]
+bar_agg_trend = 8       # 2-hour signal timeframe (8 × 15m bars) — key parameter
+macro_filter_atr = 7    # macro trend filter ATR threshold
+bb_std = 2.5            # Bollinger Band width (wider = fewer, higher-quality entries)
+rsi_oversold = 35.0     # RSI oversold threshold
+rsi_overbought = 65.0   # RSI overbought threshold
+atr_sl_mult = 2.0       # ATR stop-loss multiplier
+time_stop_bars = 5      # time-based stop (5 × 15m = 75 min)
+max_hold_bars = 60      # max hold (60 × 15m = 15 hours)
+
+[optimization]
+level = 2
+level_name = "L2_VALIDATED"
+achieved_at = "2026-04-08T01:48:40+08:00"
+holding_period = "medium_term"
+
+[optimization.gate_results]
+sharpe = 1.4662
+trades_per_fold = 43
+mdd_pct = 10.83
+profit_factor = 1.71
+win_rate = 0.42
+sensitivity_cv = 0

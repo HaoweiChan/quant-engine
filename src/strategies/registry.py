@@ -216,7 +216,7 @@ _SIGNAL_TF_TO_BAR_AGG: dict[str, int] = {
     "5min": 5,
     "15min": 15,
     "1hour": 60,
-    "daily": 1,
+    "daily": 1440,
 }
 
 
