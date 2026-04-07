@@ -216,9 +216,9 @@ class TestFacade:
             run_backtest_for_mcp("nonexistent_scenario")
 
     def test_run_monte_carlo_clamps_n_paths(self):
-        from src.mcp_server.facade import run_monte_carlo_for_mcp
+        from src.mcp_server.facade import run_monte_carlo_for_mcp, _HW
         result = run_monte_carlo_for_mcp("strong_bull", n_paths=5000)
-        assert result["n_paths"] == 1000
+        assert result["n_paths"] == _HW["n_paths_cap"]
         assert "warning" in result
 
     def test_run_monte_carlo_returns_distribution(self):
@@ -316,7 +316,7 @@ class TestFacade:
 class TestToolRegistration:
     def test_tools_list_has_correct_count(self):
         from src.mcp_server.tools import TOOLS
-        assert len(TOOLS) == 13
+        assert len(TOOLS) == 17
 
     def test_all_tools_have_names_and_schemas(self):
         from src.mcp_server.tools import TOOLS
@@ -326,6 +326,8 @@ class TestToolRegistration:
             "get_optimization_history", "get_parameter_schema",
             "get_active_params", "run_backtest_realdata",
             "scaffold_strategy", "get_run_history", "activate_candidate",
+            "run_risk_report", "run_walk_forward",
+            "promote_optimization_level", "run_sensitivity_check",
         }
         actual_names = {t.name for t in TOOLS}
         assert actual_names == expected_names
