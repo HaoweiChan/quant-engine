@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 from typing import Any
@@ -891,12 +893,16 @@ def register_tools(app: Server) -> None:
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         try:
             if name == "run_backtest":
-                result = run_backtest_for_mcp(
-                    scenario=arguments["scenario"],
-                    strategy_params=arguments.get("strategy_params"),
-                    strategy=arguments.get("strategy", "pyramid"),
-                    n_bars=arguments.get("n_bars"),
-                    timeframe=arguments.get("timeframe", "daily"),
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    functools.partial(
+                        run_backtest_for_mcp,
+                        scenario=arguments["scenario"],
+                        strategy_params=arguments.get("strategy_params"),
+                        strategy=arguments.get("strategy", "pyramid"),
+                        n_bars=arguments.get("n_bars"),
+                        timeframe=arguments.get("timeframe", "daily"),
+                    ),
                 )
                 history.append(
                     tool="run_backtest",
@@ -911,13 +917,17 @@ def register_tools(app: Server) -> None:
                 return _json_response(result)
 
             if name == "run_backtest_realdata":
-                result = run_backtest_realdata_for_mcp(
-                    symbol=arguments["symbol"],
-                    start=arguments["start"],
-                    end=arguments["end"],
-                    strategy=arguments.get("strategy", "pyramid"),
-                    strategy_params=arguments.get("strategy_params"),
-                    intraday=arguments.get("intraday", False),
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    functools.partial(
+                        run_backtest_realdata_for_mcp,
+                        symbol=arguments["symbol"],
+                        start=arguments["start"],
+                        end=arguments["end"],
+                        strategy=arguments.get("strategy", "pyramid"),
+                        strategy_params=arguments.get("strategy_params"),
+                        intraday=arguments.get("intraday", False),
+                    ),
                 )
                 if "metrics" in result:
                     history.append(
@@ -933,13 +943,17 @@ def register_tools(app: Server) -> None:
                 return _json_response(result)
 
             if name == "run_monte_carlo":
-                result = run_monte_carlo_for_mcp(
-                    scenario=arguments["scenario"],
-                    strategy_params=arguments.get("strategy_params"),
-                    strategy=arguments.get("strategy", "pyramid"),
-                    n_paths=arguments.get("n_paths", 200),
-                    n_bars=arguments.get("n_bars"),
-                    timeframe=arguments.get("timeframe", "daily"),
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    functools.partial(
+                        run_monte_carlo_for_mcp,
+                        scenario=arguments["scenario"],
+                        strategy_params=arguments.get("strategy_params"),
+                        strategy=arguments.get("strategy", "pyramid"),
+                        n_paths=arguments.get("n_paths", 200),
+                        n_bars=arguments.get("n_bars"),
+                        timeframe=arguments.get("timeframe", "daily"),
+                    ),
                 )
                 history.append(
                     tool="run_monte_carlo",
@@ -958,26 +972,30 @@ def register_tools(app: Server) -> None:
                 return _json_response(result)
 
             if name == "run_parameter_sweep":
-                result = run_sweep_for_mcp(
-                    base_params=arguments["base_params"],
-                    sweep_params=arguments["sweep_params"],
-                    strategy=arguments.get("strategy", "pyramid"),
-                    n_samples=arguments.get("n_samples"),
-                    metric=arguments.get("metric", "sortino"),
-                    mode=arguments.get("mode", "production_intent"),
-                    scenario=arguments.get("scenario", "strong_bull"),
-                    symbol=arguments.get("symbol"),
-                    start=arguments.get("start"),
-                    end=arguments.get("end"),
-                    is_fraction=arguments.get("is_fraction", 0.8),
-                    min_trade_count=arguments.get("min_trade_count"),
-                    min_expectancy=arguments.get("min_expectancy", 0.0),
-                    min_oos_metric=arguments.get("min_oos_metric", 0.0),
-                    train_bars=arguments.get("train_bars"),
-                    test_bars=arguments.get("test_bars"),
-                    n_bars=arguments.get("n_bars"),
-                    timeframe=arguments.get("timeframe", "daily"),
-                    require_real_data=arguments.get("require_real_data", True),
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    functools.partial(
+                        run_sweep_for_mcp,
+                        base_params=arguments["base_params"],
+                        sweep_params=arguments["sweep_params"],
+                        strategy=arguments.get("strategy", "pyramid"),
+                        n_samples=arguments.get("n_samples"),
+                        metric=arguments.get("metric", "sortino"),
+                        mode=arguments.get("mode", "production_intent"),
+                        scenario=arguments.get("scenario", "strong_bull"),
+                        symbol=arguments.get("symbol"),
+                        start=arguments.get("start"),
+                        end=arguments.get("end"),
+                        is_fraction=arguments.get("is_fraction", 0.8),
+                        min_trade_count=arguments.get("min_trade_count"),
+                        min_expectancy=arguments.get("min_expectancy", 0.0),
+                        min_oos_metric=arguments.get("min_oos_metric", 0.0),
+                        train_bars=arguments.get("train_bars"),
+                        test_bars=arguments.get("test_bars"),
+                        n_bars=arguments.get("n_bars"),
+                        timeframe=arguments.get("timeframe", "daily"),
+                        require_real_data=arguments.get("require_real_data", True),
+                    ),
                 )
                 if "best_is_metrics" in result:
                     history.append(
@@ -998,43 +1016,59 @@ def register_tools(app: Server) -> None:
                 return _json_response(result)
 
             if name == "run_stress_test":
-                result = run_stress_for_mcp(
-                    scenarios=arguments.get("scenarios"),
-                    strategy_params=arguments.get("strategy_params"),
-                    strategy=arguments.get("strategy", "pyramid"),
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    functools.partial(
+                        run_stress_for_mcp,
+                        scenarios=arguments.get("scenarios"),
+                        strategy_params=arguments.get("strategy_params"),
+                        strategy=arguments.get("strategy", "pyramid"),
+                    ),
                 )
                 return _json_response(result)
 
             if name == "run_walk_forward":
-                result = run_walk_forward_for_mcp(
-                    strategy=arguments["strategy"],
-                    n_folds=arguments.get("n_folds", 3),
-                    session=arguments.get("session", "all"),
-                    strategy_params=arguments.get("strategy_params"),
-                    symbol=arguments.get("symbol"),
-                    start=arguments.get("start"),
-                    end=arguments.get("end"),
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    functools.partial(
+                        run_walk_forward_for_mcp,
+                        strategy=arguments["strategy"],
+                        n_folds=arguments.get("n_folds", 3),
+                        session=arguments.get("session", "all"),
+                        strategy_params=arguments.get("strategy_params"),
+                        symbol=arguments.get("symbol"),
+                        start=arguments.get("start"),
+                        end=arguments.get("end"),
+                    ),
                 )
                 return _json_response(result)
 
             if name == "run_risk_report":
-                result = run_risk_report_for_mcp(
-                    strategy=arguments["strategy"],
-                    instrument=arguments.get("instrument", "TX"),
-                    symbol=arguments.get("symbol"),
-                    start=arguments.get("start"),
-                    end=arguments.get("end"),
-                    n_folds=arguments.get("n_folds", 3),
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    functools.partial(
+                        run_risk_report_for_mcp,
+                        strategy=arguments["strategy"],
+                        instrument=arguments.get("instrument", "TX"),
+                        symbol=arguments.get("symbol"),
+                        start=arguments.get("start"),
+                        end=arguments.get("end"),
+                        n_folds=arguments.get("n_folds", 3),
+                    ),
                 )
                 return _json_response(result)
 
             if name == "run_sensitivity_check":
-                result = run_sensitivity_check_for_mcp(
-                    strategy=arguments["strategy"],
-                    best_params=arguments.get("best_params"),
-                    perturbation_pct=arguments.get("perturbation_pct", 20.0),
-                    n_steps=arguments.get("n_steps", 5),
-                    instrument=arguments.get("instrument", "TX"),
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    functools.partial(
+                        run_sensitivity_check_for_mcp,
+                        strategy=arguments["strategy"],
+                        best_params=arguments.get("best_params"),
+                        perturbation_pct=arguments.get("perturbation_pct", 20.0),
+                        n_steps=arguments.get("n_steps", 5),
+                        instrument=arguments.get("instrument", "TX"),
+                    ),
                 )
                 return _json_response(result)
 

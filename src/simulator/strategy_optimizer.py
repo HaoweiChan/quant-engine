@@ -9,8 +9,8 @@ Supports:
 - walk_forward  — rolling IS+OOS windows with efficiency scoring
 - random_search — random sampling from continuous param bounds
 
-For parallel execution (n_jobs > 1), engine_factory MUST be a module-level
-picklable function (not a lambda or closure).
+For parallel execution (n_jobs > 1), engine_factory MUST be either a
+module-level function or a picklable callable class (not a lambda or closure).
 """
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from collections import defaultdict
 from src.core.adapter import BaseAdapter
 from src.core.position_engine import PositionEngine
 from src.simulator.backtester import BacktestRunner
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from src.simulator.fill_model import FillModel, MarketImpactFillModel
 from src.simulator.types import (
@@ -83,6 +84,41 @@ def _run_single_trial(
     return row
 
 
+def _run_single_trial_callable(
+    bars: list[dict[str, Any]],
+    timestamps: list[datetime],
+    factory_pickle: bytes,
+    params: dict[str, Any],
+    adapter_module: str,
+    adapter_class: str,
+    adapter_kwargs: dict[str, Any],
+    initial_equity: float,
+    slippage: float,
+    force_flat_indices: set[int] | None = None,
+) -> dict[str, Any]:
+    """Picklable worker for callable factory objects (e.g. _PicklableEngineFactory)."""
+    import pickle as _pickle
+    factory = _pickle.loads(factory_pickle)
+    engine = factory(**params)
+
+    a_mod = importlib.import_module(adapter_module)
+    a_cls = getattr(a_mod, adapter_class)
+    adapter = a_cls(**adapter_kwargs)
+
+    fill_model = MarketImpactFillModel()
+    runner = BacktestRunner(
+        config=lambda: engine,
+        adapter=adapter,
+        fill_model=fill_model,
+        initial_equity=initial_equity,
+    )
+    result = runner.run(bars, timestamps=timestamps, force_flat_indices=force_flat_indices)
+    row: dict[str, Any] = dict(params)
+    row.update(result.metrics)
+    row["_trade_count"] = int(result.metrics.get("trade_count", 0.0))
+    return row
+
+
 # ---------------------------------------------------------------------------
 # StrategyOptimizer
 # ---------------------------------------------------------------------------
@@ -100,6 +136,7 @@ class StrategyOptimizer:
         min_trade_count: int = _LOW_TRADE_THRESHOLD,
         min_expectancy: float = 0.0,
         min_oos_objective: float = 0.0,
+        worker_pool: "ProcessPoolExecutor | None" = None,
     ) -> None:
         if mode not in {"research", "production_intent"}:
             raise ValueError("mode must be 'research' or 'production_intent'")
@@ -112,6 +149,10 @@ class StrategyOptimizer:
         self._min_trade_count = min_trade_count
         self._min_expectancy = min_expectancy
         self._min_oos_objective = min_oos_objective
+        # Pre-initialized pool from caller (avoids per-call spawn overhead and
+        # the asyncio/signal-handling issues that arise when spawning from a
+        # thread inside an asyncio application).
+        self._worker_pool: "ProcessPoolExecutor | None" = worker_pool
 
     # -- Public API --
 
@@ -409,33 +450,62 @@ class StrategyOptimizer:
                 for p in param_list
             ]
 
-        # Parallel path: serialize factory reference
-        mod_name = inspect.getmodule(factory).__name__  # type: ignore[union-attr]
-        fn_name = factory.__name__
+        # Parallel path
         a_mod = inspect.getmodule(self._adapter).__name__  # type: ignore[union-attr]
         a_cls = type(self._adapter).__name__
 
         futures_map = {}
-        with ProcessPoolExecutor(max_workers=self._n_jobs) as pool:
-            for params in param_list:
-                f = pool.submit(
-                    _run_single_trial,
-                    bars, timestamps,
-                    mod_name, fn_name, params,
-                    a_mod, a_cls, {},
-                    self._initial_equity, self._slippage,
-                    force_flat_indices,
-                )
-                futures_map[f] = params
+        # Use pre-initialized pool if provided; otherwise create one per-call.
+        # The pre-initialized pool is forked before asyncio starts, avoiding
+        # signal-handling deadlocks when called from a thread inside asyncio.
+        _owned_pool = None
+        if self._worker_pool is not None:
+            pool = self._worker_pool
+        else:
+            _ctx = multiprocessing.get_context("forkserver")
+            _owned_pool = ProcessPoolExecutor(max_workers=self._n_jobs, mp_context=_ctx)
+            pool = _owned_pool
+        try:
+            if inspect.isfunction(factory):
+                # Module-level function: serialize by module+name
+                mod_name = inspect.getmodule(factory).__name__  # type: ignore[union-attr]
+                fn_name = factory.__name__
+                for params in param_list:
+                    f = pool.submit(
+                        _run_single_trial,
+                        bars, timestamps,
+                        mod_name, fn_name, params,
+                        a_mod, a_cls, {},
+                        self._initial_equity, self._slippage,
+                        force_flat_indices,
+                    )
+                    futures_map[f] = params
+            else:
+                # Callable class: serialize by pickling
+                import pickle as _pickle
+                factory_pickle = _pickle.dumps(factory)
+                for params in param_list:
+                    f = pool.submit(
+                        _run_single_trial_callable,
+                        bars, timestamps,
+                        factory_pickle, params,
+                        a_mod, a_cls, {},
+                        self._initial_equity, self._slippage,
+                        force_flat_indices,
+                    )
+                    futures_map[f] = params
 
-        rows: list[dict[str, Any]] = []
-        for fut in as_completed(futures_map):
-            try:
-                rows.append(fut.result())
-            except Exception as exc:
-                params = futures_map[fut]
-                rows.append({**params, "_error": str(exc)})
-        return rows
+            rows: list[dict[str, Any]] = []
+            for fut in as_completed(futures_map):
+                try:
+                    rows.append(fut.result())
+                except Exception as exc:
+                    params = futures_map[fut]
+                    rows.append({**params, "_error": str(exc)})
+            return rows
+        finally:
+            if _owned_pool is not None:
+                _owned_pool.shutdown(wait=False)
 
     def _run_trial_serial(
         self,
@@ -554,15 +624,25 @@ def _validate_objective(objective: str, rows: list[dict[str, Any]]) -> None:
 
 
 def _check_pickle_safety(factory: Callable[..., Any]) -> None:
-    """Raise ValueError if factory is a lambda or local closure (unpicklable)."""
+    """Raise ValueError if factory cannot be pickled for parallel execution."""
     name = getattr(factory, "__name__", "")
     qualname = getattr(factory, "__qualname__", "")
     if name == "<lambda>" or "<locals>" in qualname:
         raise ValueError(
             f"engine_factory '{qualname}' is a lambda or closure and cannot be "
             "pickled for parallel execution (n_jobs > 1). "
-            "Use a module-level function instead."
+            "Use a module-level function or a picklable callable class instead."
         )
+    if not inspect.isfunction(factory):
+        # Callable class: verify it can actually be pickled before dispatching workers
+        import pickle as _pickle
+        try:
+            _pickle.dumps(factory)
+        except Exception as exc:
+            raise ValueError(
+                f"engine_factory '{type(factory).__name__}' cannot be pickled for "
+                f"parallel execution (n_jobs > 1): {exc}"
+            ) from exc
 
 
 def _low_trade_count_warnings(

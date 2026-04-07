@@ -133,15 +133,24 @@ def _make_path_config(
     scenario: str,
     n_bars: int | None = None,
     timeframe: str = "daily",
+    bar_agg: int = 1,
 ) -> PathConfig:
-    """Create a PathConfig, rescaling daily-calibrated params for intraday."""
+    """Create a PathConfig, rescaling daily-calibrated params for intraday.
+
+    bar_agg: strategy's native bar aggregation (e.g., 15 for 15m strategies).
+    When bar_agg > 1 and timeframe is intraday, n_bars is scaled up so that
+    after aggregation the caller receives exactly n_bars N-min bars.
+    """
     import math
     from src.simulator.monte_carlo import TAIFEX_BARS_PER_DAY
 
     base = _resolve_path_config(scenario)
     is_intraday = timeframe in ("intraday", "1m")
-    bpd = TAIFEX_BARS_PER_DAY  # 1050
-    effective_n = n_bars if n_bars is not None else (bpd * 20 if is_intraday else base.n_bars)
+    bpd = TAIFEX_BARS_PER_DAY  # 1065
+    # Scale requested N-min bars back to 1-min count for generation.
+    # Default when n_bars is None: 20 trading days of 1-min bars.
+    _scale = bar_agg if (is_intraday and bar_agg > 1) else 1
+    effective_n = (n_bars * _scale) if n_bars is not None else (bpd * 20 if is_intraday else base.n_bars)
     if not is_intraday:
         if n_bars is None:
             return base
@@ -186,16 +195,57 @@ def _make_path_config(
     )
 
 
+def _aggregate_synthetic_bars(
+    bars: list[dict[str, Any]],
+    timestamps: list,
+    bar_agg: int,
+) -> tuple[list[dict[str, Any]], list]:
+    """Aggregate 1-min synthetic bars (dicts) to N-min bars.
+
+    Groups every bar_agg consecutive bars: open=first.open, high=max(highs),
+    low=min(lows), close=last.close, volume=sum. Timestamp from first bar.
+    """
+    if bar_agg <= 1 or not bars:
+        return bars, timestamps
+    agg_bars: list[dict[str, Any]] = []
+    agg_ts = []
+    for i in range(0, len(bars), bar_agg):
+        group = bars[i : i + bar_agg]
+        ts_group = timestamps[i : i + bar_agg]
+        if not group:
+            break
+        agg_bars.append({
+            "price": group[-1]["close"],
+            "symbol": group[0].get("symbol", "TX"),
+            "daily_atr": group[-1].get("daily_atr", 0.0),
+            "open": group[0]["open"],
+            "high": max(b["high"] for b in group),
+            "low": min(b["low"] for b in group),
+            "close": group[-1]["close"],
+            "volume": sum(b.get("volume", 0.0) for b in group),
+        })
+        agg_ts.append(ts_group[0])
+    return agg_bars, agg_ts
+
+
 def _bars_from_path(
     path,
     config: PathConfig,
     timeframe: str = "daily",
+    bar_agg: int = 1,
 ):
-    """Generate bars with correct timestamps for the given timeframe."""
+    """Generate bars with correct timestamps for the given timeframe.
+
+    When bar_agg > 1 and timeframe is intraday, the 1-min bars are
+    aggregated into N-min bars so the strategy receives its native timeframe.
+    """
     if timeframe in ("intraday", "1m"):
         from src.simulator.monte_carlo import _path_to_intraday_bars
 
-        return _path_to_intraday_bars(path, config)
+        bars, timestamps = _path_to_intraday_bars(path, config)
+        if bar_agg > 1:
+            bars, timestamps = _aggregate_synthetic_bars(bars, timestamps, bar_agg)
+        return bars, timestamps
     from src.simulator.monte_carlo import _path_to_bars
 
     return _path_to_bars(path, config)
@@ -356,14 +406,17 @@ def run_backtest_for_mcp(
 
         clamped_params, param_warnings = validate_and_clamp(resolved_slug, strategy_params)
 
-    path_config = _make_path_config(scenario, n_bars, timeframe)
+    from src.strategies.registry import get_bar_agg
+    bar_agg = get_bar_agg(resolved_slug)
+    path_config = _make_path_config(scenario, n_bars, timeframe, bar_agg)
     is_intraday = timeframe in ("intraday", "1m")
-    ppy = TAIFEX_BARS_PER_DAY * 252.0 if is_intraday else 252.0
+    effective_bpd = TAIFEX_BARS_PER_DAY / max(bar_agg, 1) if is_intraday else 1
+    ppy = effective_bpd * 252.0 if is_intraday else 252.0
     runner = _build_runner(
         resolved_slug, clamped_params, periods_per_year=ppy, initial_equity=initial_equity
     )
     paths = generate_paths(1, path_config)
-    bars, timestamps = _bars_from_path(paths[0], path_config, timeframe)
+    bars, timestamps = _bars_from_path(paths[0], path_config, timeframe, bar_agg)
     result = runner.run(bars, timestamps=timestamps)
     out = _format_backtest_result(
         result,
@@ -674,12 +727,18 @@ def run_monte_carlo_for_mcp(
 
         clamped_params, param_warnings = validate_and_clamp(resolved_slug, strategy_params)
 
-    path_config = _make_path_config(scenario, n_bars, timeframe)
+    from src.strategies.registry import get_bar_agg
+    bar_agg = get_bar_agg(resolved_slug)
+    path_config = _make_path_config(scenario, n_bars, timeframe, bar_agg)
 
     merged = dict(clamped_params)
     if "max_loss" not in merged:
         merged["max_loss"] = 500_000
-    mc_result = _run_mc_with_runner(resolved_slug, merged, clamped, path_config, timeframe)
+
+    import time as _time
+    _t0 = _time.perf_counter()
+    mc_result = _run_mc_with_runner(resolved_slug, merged, clamped, path_config, timeframe, bar_agg)
+    _elapsed = _time.perf_counter() - _t0
 
     result: dict[str, Any] = {
         "scenario": scenario,
@@ -709,7 +768,26 @@ def run_monte_carlo_for_mcp(
     result["termination_eligible"] = False
     result["termination_block_reason"] = "synthetic_data"
     result["param_warnings"] = param_warnings
+    result["_timing"] = getattr(mc_result, "_timing", None)
     return result
+
+
+class _PicklableEngineFactory:
+    """Picklable engine factory for parallel sweep/walk-forward workers.
+
+    Replaces lambda closures that cannot cross process boundaries.
+    The wrapped ``factory`` must be a module-level callable (returned by
+    ``resolve_factory()``) so that it survives pickling.
+    """
+
+    __slots__ = ("factory", "base_params")
+
+    def __init__(self, factory: Any, base_params: dict[str, Any]) -> None:
+        self.factory = factory
+        self.base_params = base_params
+
+    def __call__(self, **overrides: Any) -> Any:
+        return self.factory(**{**self.base_params, **overrides})
 
 
 def _mc_single_path(args: tuple) -> tuple[float, float, float]:
@@ -719,7 +797,11 @@ def _mc_single_path(args: tuple) -> tuple[float, float, float]:
     worker generates its own path — avoids serializing large numpy arrays
     through the multiprocessing boundary.
     """
-    strategy_name, strategy_params, seed_idx, path_config, timeframe = args
+    if len(args) == 6:
+        strategy_name, strategy_params, seed_idx, path_config, timeframe, bar_agg = args
+    else:
+        strategy_name, strategy_params, seed_idx, path_config, timeframe = args
+        bar_agg = 1
     from src.simulator.backtester import BacktestRunner
     from src.simulator.metrics import max_drawdown_pct, sharpe_ratio
     from src.simulator.price_gen import generate_path
@@ -740,7 +822,7 @@ def _mc_single_path(args: tuple) -> tuple[float, float, float]:
     engine_factory = lambda: factory(**strategy_params)  # noqa: E731
     adapter = _get_adapter()
     runner = BacktestRunner(engine_factory, adapter)
-    bars, timestamps = _bars_from_path(path_array, path_config, timeframe)
+    bars, timestamps = _bars_from_path(path_array, path_config, timeframe, bar_agg)
     result = runner.run(bars, timestamps=timestamps)
     pnl = result.equity_curve[-1] - result.equity_curve[0]
     return (pnl, max_drawdown_pct(result.equity_curve), sharpe_ratio(result.equity_curve))
@@ -752,6 +834,34 @@ def _mc_single_path(args: tuple) -> tuple[float, float, float]:
 import os as _os
 
 
+def _detect_total_ram_gb() -> float:
+    """Return total RAM in GB without requiring psutil.
+
+    Tries psutil first, then /proc/meminfo (Linux), then sysctl (macOS).
+    Falls back to 4.0 GB only if all methods fail.
+    """
+    try:
+        import psutil
+        return psutil.virtual_memory().total / (1024 ** 3)
+    except ImportError:
+        pass
+    try:
+        with open("/proc/meminfo") as _f:
+            for _line in _f:
+                if _line.startswith("MemTotal:"):
+                    return int(_line.split()[1]) / (1024 ** 2)  # kB → GB
+    except OSError:
+        pass
+    try:
+        import subprocess as _sp
+        _r = _sp.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=2)
+        if _r.returncode == 0:
+            return int(_r.stdout.strip()) / (1024 ** 3)
+    except Exception:
+        pass
+    return 4.0  # conservative fallback
+
+
 def _classify_hardware() -> dict[str, Any]:
     """Detect hardware capacity and return resource budgets.
 
@@ -759,15 +869,13 @@ def _classify_hardware() -> dict[str, Any]:
     constrained (small VPS).  Env vars override any auto-detected value.
     """
     cpu = _os.cpu_count() or 4
-    try:
-        import psutil
-        total_ram_gb = psutil.virtual_memory().total / (1024**3)
-    except ImportError:
-        total_ram_gb = 4.0  # conservative fallback
+    total_ram_gb = _detect_total_ram_gb()
 
     if cpu >= 12 and total_ram_gb >= 32:
         tier = "powerful"
-    elif cpu >= 6 and total_ram_gb >= 16:
+    elif (cpu >= 6 and total_ram_gb >= 16) or (cpu >= 16 and total_ram_gb >= 12):
+        # Second branch: high-CPU machines with moderate RAM (e.g. 24-core/15 GB)
+        # also qualify as moderate to avoid under-utilizing CPU headroom.
         tier = "moderate"
     else:
         tier = "constrained"
@@ -798,6 +906,34 @@ def _classify_hardware() -> dict[str, Any]:
 _HW = _classify_hardware()
 _MAX_MC_WORKERS = _HW["mc_workers"]
 
+# Pre-initialize a process pool using fork context BEFORE asyncio.run() is called.
+# Workers are forked from a clean process (no asyncio locks), so they can't inherit
+# a locked event loop.  Using a persistent pool also avoids per-call forkserver
+# startup overhead and the signal-handling edge cases that caused hangs.
+# The pool is created lazily on first use but that first use always happens at
+# module import time (triggered by server.py's register_tools call, before asyncio).
+import multiprocessing as _mp
+from concurrent.futures import ProcessPoolExecutor as _ProcessPoolExecutor
+
+_WORKER_POOL: _ProcessPoolExecutor | None = None
+
+
+def _get_worker_pool() -> _ProcessPoolExecutor:
+    """Return the module-level process pool, creating it on first call.
+
+    Uses 'fork' context because this is called before asyncio starts.  Fork is
+    safe here: the process has no background threads yet (module import is
+    single-threaded), so no asyncio lock can be inherited in a locked state.
+    """
+    global _WORKER_POOL
+    if _WORKER_POOL is None:
+        ctx = _mp.get_context("fork")
+        _WORKER_POOL = _ProcessPoolExecutor(max_workers=_MAX_MC_WORKERS, mp_context=ctx)
+        # Warm up one worker immediately so the first real call pays no startup cost.
+        # submit() is non-blocking; the future is never awaited here.
+        _WORKER_POOL.submit(int, 0)
+    return _WORKER_POOL
+
 
 def _check_memory(min_available_gb: float | None = None) -> None:
     """Raise if available memory is below threshold.
@@ -824,6 +960,7 @@ def _run_mc_with_runner(
     n_paths: int,
     path_config: PathConfig,
     timeframe: str = "daily",
+    bar_agg: int = 1,
 ) -> Any:
     """Run MC for non-pyramid strategies, using multiprocessing for intraday.
 
@@ -840,20 +977,24 @@ def _run_mc_with_runner(
 
     _check_memory()
 
-    use_mp = n_paths > 1 and (
-        timeframe in ("intraday", "1m")
-        or _HW["tier"] == "powerful"
-    )
-    if use_mp:
-        from concurrent.futures import ProcessPoolExecutor
+    import time as _time
+    _t_start = _time.perf_counter()
 
-        workers = min(n_paths, _MAX_MC_WORKERS)
+    # Parallelise whenever we have spare workers.
+    # The old gate (timeframe=="intraday" or tier=="powerful") left daily strategies
+    # single-threaded on every non-powerful machine — intentionally removed.
+    # Threshold of 20 prevents ProcessPoolExecutor spawn overhead from dominating
+    # on tiny runs where each path takes < 1 ms.
+    use_mp = n_paths >= 20 and _MAX_MC_WORKERS > 1
+    workers_used = 1
+    if use_mp:
+        workers_used = min(n_paths, _MAX_MC_WORKERS)
         work_items = [
-            (strategy_name, strategy_params, i, path_config, timeframe)
+            (strategy_name, strategy_params, i, path_config, timeframe, bar_agg)
             for i in range(n_paths)
         ]
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            results_list = list(pool.map(_mc_single_path, work_items))
+        pool = _get_worker_pool()
+        results_list = list(pool.map(_mc_single_path, work_items))
     else:
         from src.simulator.backtester import BacktestRunner
         from src.simulator.metrics import max_drawdown_pct, sharpe_ratio
@@ -875,7 +1016,7 @@ def _run_mc_with_runner(
                 seed=path_config.seed + i if path_config.seed is not None else None,
             )
             path = generate_path(cfg)
-            bars, timestamps = _bars_from_path(path, path_config, timeframe)
+            bars, timestamps = _bars_from_path(path, path_config, timeframe, bar_agg)
             result = runner.run(bars, timestamps=timestamps)
             pnl = result.equity_curve[-1] - result.equity_curve[0]
             results_list.append(
@@ -897,7 +1038,8 @@ def _run_mc_with_runner(
     ruin_count = sum(1 for p in terminal_pnls if p < -1_000_000)
     ruin_prob = ruin_count / n_paths if n_paths > 0 else 0.0
 
-    return MonteCarloResult(
+    _elapsed = _time.perf_counter() - _t_start
+    mc_res = MonteCarloResult(
         terminal_pnl_distribution=terminal_pnls,
         percentiles=percentiles,
         win_rate=wr,
@@ -905,6 +1047,14 @@ def _run_mc_with_runner(
         sharpe_distribution=sharpes,
         ruin_probability=ruin_prob,
     )
+    mc_res._timing = {
+        "elapsed_s": round(_elapsed, 2),
+        "use_mp": use_mp,
+        "workers": workers_used,
+        "n_paths": n_paths,
+        "per_path_ms": round(_elapsed / n_paths * 1000, 1),
+    }
+    return mc_res
 
 
 def run_sweep_for_mcp(
@@ -1059,6 +1209,7 @@ def run_sweep_for_mcp(
         min_expectancy=min_expectancy,
         min_oos_objective=min_oos_metric,
         n_jobs=_HW["optimizer_n_jobs"],
+        worker_pool=_get_worker_pool() if _HW["optimizer_n_jobs"] > 1 else None,
     )
     walk_forward_summary: dict[str, Any] | None = None
 
@@ -1071,7 +1222,7 @@ def run_sweep_for_mcp(
             else:
                 return {"error": f"For random search, sweep_params['{k}'] must be [min, max]"}
         result = optimizer.random_search(
-            engine_factory=lambda **p: factory(**{**clamped_base, **p}),
+            engine_factory=_PicklableEngineFactory(factory, clamped_base),
             param_bounds=param_bounds,
             bars=bars,
             timestamps=timestamps,
@@ -1094,7 +1245,7 @@ def run_sweep_for_mcp(
             if effective_train + effective_test <= len(bars):
                 try:
                     wf = optimizer.walk_forward(
-                        engine_factory=lambda **p: factory(**{**clamped_base, **p}),
+                        engine_factory=_PicklableEngineFactory(factory, clamped_base),
                         param_grid=param_grid,
                         bars=bars,
                         timestamps=timestamps,
@@ -1111,7 +1262,7 @@ def run_sweep_for_mcp(
                 except ValueError as _wf_err:
                     walk_forward_summary = {"error": str(_wf_err)}
         result = optimizer.grid_search(
-            engine_factory=lambda **p: factory(**{**clamped_base, **p}),
+            engine_factory=_PicklableEngineFactory(factory, clamped_base),
             param_grid=param_grid,
             bars=bars,
             timestamps=timestamps,
