@@ -62,6 +62,7 @@ export interface BacktestResult {
   trade_pnls?: number[];
   trade_signals?: TradeSignal[];
   timeframe_minutes?: number;
+  timeframe_label?: string;
   equity_timestamps?: number[];
   symbol?: string;
   start?: string;

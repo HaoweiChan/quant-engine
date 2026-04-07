@@ -20,6 +20,12 @@ import "prismjs/components/prism-python";
 type SortKey = "run_at" | "sharpe" | "sortino" | "alpha" | "total_pnl" | "win_rate" | "max_drawdown_pct" | "profit_factor" | "n_trials" | "search_type" | "symbol";
 type SortDir = "asc" | "desc";
 
+function fmtTf(min: number): string {
+  if (min === 1440) return "1D";
+  if (min === 60) return "1h";
+  return `${min}m`;
+}
+
 function isoToEpoch(ts: string): number {
   const n = ts.includes("T") ? ts : ts.replace(" ", "T");
   const z = /(?:Z|[+-]\d{2}:\d{2})$/i.test(n) ? n : `${n}Z`;
@@ -182,11 +188,19 @@ export function TearSheet() {
     for (const [k, v] of Object.entries(run.best_params)) {
       if (k in newParams && typeof v === "number") newParams[k] = v;
     }
-    // Set timeframe from notes (e.g., "tf=15min" → bar_agg=15)
-    const tfMatch = run.notes?.match(/tf=(\d+)min/);
+    // Set timeframe from notes (e.g., "tf=1D" or "tf=15min" → bar_agg)
+    const tfMatch = run.notes?.match(/tf=([^\|]+)/);
     if (tfMatch) {
-      const barAgg = Number(tfMatch[1]);
-      if ([1, 3, 5, 15, 30, 60].includes(barAgg)) newParams.bar_agg = barAgg;
+      const tfLabel = tfMatch[1];
+      let barAgg = 1;
+      if (tfLabel === "1D") barAgg = 1440;
+      else if (tfLabel === "1h") barAgg = 60;
+      else if (tfLabel.endsWith("m")) {
+        barAgg = Number(tfLabel.slice(0, -1));
+      } else if (tfLabel.endsWith("min")) {
+        barAgg = Number(tfLabel.slice(0, -3));
+      }
+      if ([1, 3, 5, 15, 30, 60, 1440].includes(barAgg)) newParams.bar_agg = barAgg;
     }
     setParams(newParams);
     // Restore cost settings from notes (e.g., "sbps=5|cfix=100")
@@ -459,7 +473,7 @@ export function TearSheet() {
       {result && m && (
         <>
           <div className="text-[9px] mb-2.5" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
-            {currentStrat?.name} on {symbol} ({startDate} → {endDate}) • {result.bars_count.toLocaleString()} bars • {result.timeframe_minutes ?? params.bar_agg ?? 1}min TF{result.intraday ? " • INTRADAY" : ""}
+            {currentStrat?.name} on {symbol} ({startDate} → {endDate}) • {result.bars_count.toLocaleString()} bars • {result.timeframe_label ?? fmtTf(result.timeframe_minutes ?? params.bar_agg ?? 1)}{result.intraday ? " • INTRADAY" : ""}
           </div>
           <StatRow>
             <StatCard label="SHARPE" value={(m.sharpe ?? 0).toFixed(2)} color={(m.sharpe ?? 0) > 1 ? colors.green : (m.sharpe ?? 0) > 0 ? colors.gold : colors.red} />
@@ -536,7 +550,7 @@ export function TearSheet() {
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <span style={{ color: colors.cyan, fontSize: 10, fontFamily: "var(--font-mono)", fontWeight: 600 }}>
-                    {baseTfMin}m DETAIL
+                    {fmtTf(baseTfMin)} DETAIL
                   </span>
                   <span style={{ color: colors.dim, fontSize: 9, fontFamily: "var(--font-mono)", margin: "0 4px" }}>|</span>
                   {result?.indicator_meta && Object.entries(result.indicator_meta).map(([key, meta]) => {
@@ -667,8 +681,8 @@ export function TearSheet() {
                     const isSelected = selectedRunId === run.run_id;
                     const fmtPeriod = (d: string) => d.slice(2).replace(/-/g, "");
                     const period = run.train_start && run.train_end ? `${fmtPeriod(run.train_start)}→${fmtPeriod(run.train_end)}` : "—";
-                    const tfMatch = run.notes?.match(/tf=(\d+)min/);
-                    const tf = tfMatch ? `${tfMatch[1]}m` : "—";
+                    const tfMatch = run.notes?.match(/tf=([^\|]+)/);
+                    const tf = tfMatch ? tfMatch[1] : "—";
                     const isIntraday = run.notes?.includes("|intraday") ?? false;
                     const sbpsMatch = run.notes?.match(/sbps=([\d.]+)/);
                     const cfixMatch = run.notes?.match(/cfix=([\d.]+)/);

@@ -170,6 +170,7 @@ export function StrategyParamSidebar() {
           <option value={15}>15 min</option>
           <option value={30}>30 min</option>
           <option value={60}>60 min</option>
+          <option value={1440}>1D</option>
         </select>
       </ParamInput>
       <ParamInput label="Init Capital ($)">

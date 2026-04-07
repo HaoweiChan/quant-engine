@@ -228,6 +228,24 @@ def _aggregate_bars(raw, bar_agg: int):
     return aggregated
 
 
+def _bar_agg_to_label(bar_agg: int) -> str:
+    """Map bar aggregation minutes to a human-readable timeframe label."""
+    return {1: "1m", 5: "5m", 15: "15m", 60: "1h", 1440: "1D"}.get(bar_agg, f"{bar_agg}m")
+
+
+def _default_fill_model(instrument: str = "TX"):
+    """Create a MarketImpactFillModel with standard instrument costs."""
+    from src.core.types import ImpactParams, get_instrument_cost_config
+    from src.simulator.fill_model import MarketImpactFillModel
+
+    cost_config = get_instrument_cost_config(instrument)
+    return MarketImpactFillModel(params=ImpactParams(
+        spread_bps=cost_config.slippage_bps,
+        commission_bps=cost_config.commission_bps,
+        commission_fixed_per_contract=cost_config.commission_per_contract,
+    ))
+
+
 def _build_runner(
     strategy: str,
     strategy_params: dict[str, Any] | None,
@@ -599,6 +617,19 @@ def run_backtest_realdata_for_mcp(
     base["trade_pnls"] = _extract_trade_pnls(result.trade_log)
     base["trade_signals"] = _serialize_trade_log(result.trade_log)
     base["timeframe_minutes"] = bar_agg
+    # Add human-readable timeframe label for correct display
+    if bar_agg == 1:
+        base["timeframe_label"] = "1m"
+    elif bar_agg == 5:
+        base["timeframe_label"] = "5m"
+    elif bar_agg == 15:
+        base["timeframe_label"] = "15m"
+    elif bar_agg == 60:
+        base["timeframe_label"] = "1h"
+    elif bar_agg == 1440:
+        base["timeframe_label"] = "1D"
+    else:
+        base["timeframe_label"] = f"{bar_agg}m"
     _ind_series = getattr(result, "indicator_series", {})
     if _ind_series:
         base["indicator_series"] = _ind_series
@@ -621,16 +652,22 @@ def run_backtest_realdata_for_mcp(
 
         registry = ParamRegistry()
         save_metrics = {**base.get("metrics", {}), "total_pnl": base.get("total_pnl"), "alpha": alpha}
-        # Build notes with cost setup and params fingerprint for dedup
+        # Build notes with actual applied costs (explicit or defaults) and params fingerprint
+        from src.core.types import get_instrument_cost_config
+        cost_config = get_instrument_cost_config(symbol)
         _sp = strategy_params or {}
-        _slip_bps = _sp.get("slippage_bps", 0)
-        _comm_fixed = _sp.get("commission_fixed_per_contract", 0)
-        cost_note = f"sbps={_slip_bps}|cfix={_comm_fixed}" if (_slip_bps or _comm_fixed) else None
+        # Use explicit costs if provided, otherwise use instrument defaults
+        _slip_bps = _sp.get("slippage_bps", cost_config.slippage_bps)
+        _comm_fixed = _sp.get("commission_fixed_per_contract", cost_config.commission_per_contract)
+        cost_note = f"sbps={_slip_bps}|cfix={_comm_fixed}"
         # Include a short hash of params so different params = different runs
         import hashlib, json as _json
         _p_str = _json.dumps(_sp, sort_keys=True)
         _p_hash = hashlib.md5(_p_str.encode()).hexdigest()[:8]
-        cost_note = f"p={_p_hash}" + (f"|{cost_note}" if cost_note else "")
+        cost_note = f"p={_p_hash}|{cost_note}"
+        # Map bar_agg to readable timeframe for database storage
+        tf_label = _bar_agg_to_label(bar_agg)
+
         run_id = registry.save_backtest_run(
             strategy=resolved_slug,
             symbol=symbol,
@@ -640,7 +677,7 @@ def run_backtest_realdata_for_mcp(
             tool="run_backtest_realdata",
             start=start,
             end=end,
-            timeframe=f"{bar_agg}min{'|intraday' if intraday else ''}",
+            timeframe=f"{tf_label}{'|intraday' if intraday else ''}",
             notes=cost_note,
             initial_capital=initial_equity,
             strategy_hash=strategy_hash,
@@ -738,7 +775,7 @@ def _mc_single_path(args: tuple) -> tuple[float, float, float]:
     factory = resolve_factory(strategy_name)
     engine_factory = lambda: factory(**strategy_params)  # noqa: E731
     adapter = _get_adapter()
-    runner = BacktestRunner(engine_factory, adapter)
+    runner = BacktestRunner(engine_factory, adapter, fill_model=_default_fill_model())
     bars, timestamps = _bars_from_path(path_array, path_config, timeframe)
     result = runner.run(bars, timestamps=timestamps)
     pnl = result.equity_curve[-1] - result.equity_curve[0]
@@ -811,7 +848,7 @@ def _run_mc_with_runner(
         factory = resolve_factory(strategy_name)
         engine_factory = lambda: factory(**strategy_params)  # noqa: E731
         adapter = _get_adapter()
-        runner = BacktestRunner(engine_factory, adapter)
+        runner = BacktestRunner(engine_factory, adapter, fill_model=_default_fill_model())
         results_list = []
         for i in range(n_paths):
             cfg = PathConfig(
@@ -984,6 +1021,7 @@ def run_sweep_for_mcp(
     factory = resolve_factory(resolved_slug)
     optimizer = StrategyOptimizer(
         adapter,
+        fill_model=_default_fill_model(),
         mode=mode,
         min_trade_count=min_trade_count,
         min_expectancy=min_expectancy,
@@ -1064,7 +1102,8 @@ def run_sweep_for_mcp(
         search = "random" if n_samples is not None else "grid"
         # Build notes with timeframe info (matches run_backtest_realdata format)
         _is_intra = timeframe in ("intraday", "1m")
-        _sweep_tf_str = f"{sweep_bar_agg}min{'|intraday' if _is_intra else ''}" if mode == "production_intent" and symbol else None
+        _sweep_tf_label = _bar_agg_to_label(sweep_bar_agg)
+        _sweep_tf_str = f"{_sweep_tf_label}{'|intraday' if _is_intra else ''}" if mode == "production_intent" and symbol else None
         _sweep_notes = f"tf={_sweep_tf_str}" if _sweep_tf_str else None
         run_id = registry.save_run(
             result=result,
@@ -1234,7 +1273,7 @@ def run_stress_for_mcp(
         if "max_loss" not in merged:
             merged["max_loss"] = 500_000
         engine_factory = lambda: factory(**merged)  # noqa: E731
-        runner = BacktestRunner(engine_factory, adapter)
+        runner = BacktestRunner(engine_factory, adapter, fill_model=_default_fill_model())
         prices = _generate_scenario_prices(scenario_obj, 20000.0)
         bar_agg = _get_stress_bar_agg(resolved_slug)
         if bar_agg > 1:

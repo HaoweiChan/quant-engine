@@ -86,3 +86,7 @@ src/strategies/.backup/
 # Node
 node_modules/
 *.tsbuildinfo
+
+# Playwright CLI session artifacts
+.playwright-cli/
+frontend/.playwright-cli/
