@@ -184,11 +184,16 @@ export function TearSheet() {
     if (run.train_start) useStrategyStore.getState().setDates(run.train_start, run.train_end ?? endDate);
     if (run.symbol && !run.symbol.startsWith("synthetic")) useStrategyStore.getState().setSymbol(run.symbol);
     if (!run.best_params) return;
-    const newParams = { ...params };
+    // Load all params from the run as-is (no schema filtering)
+    const newParams: Record<string, number> = {};
     for (const [k, v] of Object.entries(run.best_params)) {
-      if (k in newParams && typeof v === "number") newParams[k] = v;
+      if (typeof v === "number") newParams[k] = v;
     }
-    // Set timeframe from notes (e.g., "tf=1D" or "tf=15min" → bar_agg)
+    // Preserve bar_agg from current params as fallback
+    if (!("bar_agg" in newParams) && "bar_agg" in params) {
+      newParams.bar_agg = params.bar_agg;
+    }
+    // Override bar_agg from notes if available (e.g., "tf=1D" or "tf=15min")
     const tfMatch = run.notes?.match(/tf=([^\|]+)/);
     if (tfMatch) {
       const tfLabel = tfMatch[1];
