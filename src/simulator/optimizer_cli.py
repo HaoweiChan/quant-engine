@@ -124,7 +124,17 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
     if not raw:
         raise ValueError(f"No data for {symbol} in {cfg['start']}–{cfg['end']}")
 
-    daily_atr = _mean(b.high - b.low for b in raw)
+    # Compute true daily ATR from daily high-low ranges, NOT per-bar ranges.
+    _daily_hl: dict[str, tuple[float, float]] = {}
+    for b in raw:
+        d = b.timestamp.date() if hasattr(b.timestamp, "date") else str(b.timestamp)[:10]
+        if d not in _daily_hl:
+            _daily_hl[d] = (b.high, b.low)
+        else:
+            prev = _daily_hl[d]
+            _daily_hl[d] = (max(prev[0], b.high), min(prev[1], b.low))
+    daily_ranges = [hi - lo for hi, lo in _daily_hl.values() if hi > lo]
+    daily_atr = _mean(daily_ranges) if daily_ranges else _mean(b.high - b.low for b in raw)
     bars = [
         {"symbol": symbol, "price": b.close, "open": b.open, "high": b.high,
          "low": b.low, "close": b.close, "daily_atr": daily_atr, "timestamp": b.timestamp}

@@ -49,6 +49,7 @@ class WalkForwardResult:
     overfit_flag: str  # "none" | "mild" | "severe"
     passed: bool
     failure_reasons: list[str] = field(default_factory=list)
+    thresholds_applied: dict[str, Any] = field(default_factory=dict)
 
 
 def compute_expanding_folds(
@@ -198,36 +199,57 @@ def evaluate_quality_gates(
     folds: list[FoldResult],
     aggregate_oos_sharpe: float,
     overfit_flag: str,
+    thresholds: dict[str, Any] | None = None,
 ) -> tuple[bool, list[str]]:
     """Apply quality gate thresholds from the sign-off checklist.
+
+    Args:
+        thresholds: Optional dict with keys from StageThresholds.to_dict().
+            When None, falls back to legacy hardcoded values (L2 SHORT_TERM).
 
     Returns:
         (passed, failure_reasons)
     """
+    # Resolve gate values — legacy defaults match L2 SHORT_TERM behavior
+    sharpe_floor = thresholds.get("sharpe_floor", 1.0) if thresholds else 1.0
+    mdd_max = thresholds.get("mdd_max_pct") if thresholds else 20.0
+    wr_min = (thresholds.get("win_rate_min", 0.35) * 100) if thresholds else 35.0
+    wr_max = (thresholds.get("win_rate_max", 0.70) * 100) if thresholds else 70.0
+    min_trades = thresholds.get("min_trade_count", 30) if thresholds else 30
+    pf_floor = thresholds.get("profit_factor_floor", 1.2) if thresholds else 1.2
+
     reasons = []
 
-    if aggregate_oos_sharpe < 1.0:
-        reasons.append(f"Aggregate OOS Sharpe {aggregate_oos_sharpe:.2f} < 1.0")
+    if aggregate_oos_sharpe < sharpe_floor:
+        reasons.append(f"Aggregate OOS Sharpe {aggregate_oos_sharpe:.2f} < {sharpe_floor}")
 
     if overfit_flag == "severe":
         reasons.append("Severe overfit detected (OOS/IS ratio < 0.3)")
 
     for f in folds:
-        if f.oos_mdd_pct > 20.0:
-            reasons.append(f"Fold {f.fold_index}: MDD {f.oos_mdd_pct:.1f}% > 20%")
-        if not (35.0 <= f.oos_win_rate <= 70.0):
-            reasons.append(f"Fold {f.fold_index}: Win rate {f.oos_win_rate:.1f}% outside 35-70%")
-        if f.oos_n_trades < 30:
-            reasons.append(f"Fold {f.fold_index}: {f.oos_n_trades} trades < 30")
-        if f.oos_profit_factor < 1.2:
-            reasons.append(f"Fold {f.fold_index}: Profit factor {f.oos_profit_factor:.2f} < 1.2")
+        if mdd_max is not None and f.oos_mdd_pct > mdd_max:
+            reasons.append(f"Fold {f.fold_index}: MDD {f.oos_mdd_pct:.1f}% > {mdd_max}%")
+        if not (wr_min <= f.oos_win_rate <= wr_max):
+            reasons.append(f"Fold {f.fold_index}: Win rate {f.oos_win_rate:.1f}% outside {wr_min:.0f}-{wr_max:.0f}%")
+        if f.oos_n_trades < min_trades:
+            reasons.append(f"Fold {f.fold_index}: {f.oos_n_trades} trades < {min_trades}")
+        if f.oos_profit_factor < pf_floor:
+            reasons.append(f"Fold {f.fold_index}: Profit factor {f.oos_profit_factor:.2f} < {pf_floor}")
 
     passed = len(reasons) == 0
     return passed, reasons
 
 
-def build_walk_forward_result(folds: list[FoldResult]) -> WalkForwardResult:
-    """Build aggregate WalkForwardResult from fold results."""
+def build_walk_forward_result(
+    folds: list[FoldResult],
+    thresholds: dict[str, Any] | None = None,
+) -> WalkForwardResult:
+    """Build aggregate WalkForwardResult from fold results.
+
+    Args:
+        thresholds: Optional StageThresholds.to_dict() for holding-period-aware
+            quality gates. When None, uses legacy hardcoded values.
+    """
     if not folds:
         return WalkForwardResult(
             folds=[],
@@ -236,6 +258,7 @@ def build_walk_forward_result(folds: list[FoldResult]) -> WalkForwardResult:
             overfit_flag="severe",
             passed=False,
             failure_reasons=["No folds computed"],
+            thresholds_applied=thresholds or {},
         )
 
     oos_sharpes = [f.oos_sharpe for f in folds]
@@ -245,7 +268,9 @@ def build_walk_forward_result(folds: list[FoldResult]) -> WalkForwardResult:
     mean_overfit_ratio = float(np.mean(overfit_ratios))
     overfit_flag = classify_overfit(mean_overfit_ratio)
 
-    passed, failure_reasons = evaluate_quality_gates(folds, aggregate_oos_sharpe, overfit_flag)
+    passed, failure_reasons = evaluate_quality_gates(
+        folds, aggregate_oos_sharpe, overfit_flag, thresholds=thresholds,
+    )
 
     return WalkForwardResult(
         folds=folds,
@@ -254,6 +279,7 @@ def build_walk_forward_result(folds: list[FoldResult]) -> WalkForwardResult:
         overfit_flag=overfit_flag,
         passed=passed,
         failure_reasons=failure_reasons,
+        thresholds_applied=thresholds or {},
     )
 
 

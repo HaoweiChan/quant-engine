@@ -268,7 +268,7 @@ class StrategyOptimizer:
                 best_params=best,
                 is_result=is_opt.best_is_result,
                 oos_result=oos_result,
-                low_trade_count=is_trades < _LOW_TRADE_THRESHOLD,
+                low_trade_count=is_trades < self._min_trade_count,
             ))
 
         efficiency = _compute_efficiency(windows, objective)
@@ -485,7 +485,7 @@ class StrategyOptimizer:
                     "No promotable candidate after production-intent gates "
                     f"(min_trade_count={self._min_trade_count}, min_expectancy={self._min_expectancy})"
                 )
-        warnings = _low_trade_count_warnings(rows, param_keys)
+        warnings = _low_trade_count_warnings(rows, param_keys, threshold=self._min_trade_count)
         df = pl.DataFrame(eligible_rows).sort(objective, descending=descending)
         return df, disqualified_trials, gate_details, warnings
 
@@ -566,15 +566,17 @@ def _check_pickle_safety(factory: Callable[..., Any]) -> None:
 
 
 def _low_trade_count_warnings(
-    rows: list[dict[str, Any]], param_keys: list[str]
+    rows: list[dict[str, Any]],
+    param_keys: list[str],
+    threshold: int = _LOW_TRADE_THRESHOLD,
 ) -> list[str]:
     warnings: list[str] = []
     for row in rows:
-        count = row.get("_trade_count", _LOW_TRADE_THRESHOLD)
-        if count < _LOW_TRADE_THRESHOLD:
+        count = row.get("_trade_count", threshold)
+        if count < threshold:
             label = ", ".join(f"{k}={row[k]}" for k in param_keys if k in row)
             warnings.append(
-                f"Low IS trade count ({count} < {_LOW_TRADE_THRESHOLD}) for params: {label}"
+                f"Low IS trade count ({count} < {threshold}) for params: {label}"
             )
     return warnings
 

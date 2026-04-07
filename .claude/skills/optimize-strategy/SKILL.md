@@ -11,18 +11,47 @@ Strategy optimization orchestration skill. Defines the 5-stage closed loop
 and tells you which reference files to read at each stage. Read this once at
 session start, then follow the stages.
 
+## Multi-Stage Optimization Levels
+
+Strategies progress through three optimization levels with progressively stricter gates.
+The engine auto-resolves thresholds from `HoldingPeriod` + `OptimizationLevel`.
+
+| Level | Name | Purpose | Required Checks |
+|-------|------|---------|----------------|
+| L1 | Exploratory | "Worth investigating?" | MC on 2+ scenarios |
+| L2 | Validated | "Survives out-of-sample?" | WF + sensitivity + MC 5+ scenarios |
+| L3 | Production | "Ready for live capital?" | All L2 + slippage stress + paper trade |
+
+### Quality Gate Thresholds by Holding Period and Level
+
+| Gate | SHORT_TERM L1/L2/L3 | MEDIUM_TERM L1/L2/L3 | SWING L1/L2/L3 |
+|------|---------------------|----------------------|----------------|
+| Sharpe floor | 0.6 / 1.0 / 1.0 | 0.5 / 0.8 / 0.8 | 0.4 / 0.7 / 0.7 |
+| Min trades/fold | 30 / 100 / 100 | 15 / 30 / 30 | 10 / 20 / 20 |
+| MDD max | — / 10% / 10% | — / 15% / 15% | — / 20% / 20% |
+| WR range | 40-75 / 45-70 / 45-70 | 35-70 / 40-65 / 40-65 | 25-60 / 35-55 / 35-55 |
+| PF floor | 1.0 / 1.3 / 1.3 | 1.0 / 1.2 / 1.2 | 1.0 / 1.2 / 1.2 |
+| Sensitivity CV | — / <0.15 / <0.15 | — / <0.20 / <0.20 | — / <0.25 / <0.25 |
+| Slippage Sharpe | — / — / ≥0.5 | — / — / ≥0.5 | — / — / ≥0.4 |
+
+These thresholds are the **single source of truth** in `src/strategies/__init__.py`.
+The MCP tools `run_walk_forward`, `run_parameter_sweep`, and `run_risk_report`
+auto-resolve them from the strategy's `STRATEGY_META["holding_period"]`.
+
+Use `promote_optimization_level` MCP tool to advance a strategy after it passes all gates.
+
 ## Default Optimization Goal (for `optimize [strategy]` requests)
 
-Unless the user specifies otherwise, optimize for these criteria:
+Unless the user specifies otherwise, optimize to **advance to the next level**:
 
 **Find a parameter set with a maximum of 3 variables that:**
 - Maintains positive expectancy across both In-Sample and Out-of-Sample datasets
-- Achieves OOS/IS Sharpe ratio > **1.0** (robust generalization)
-- Demonstrates stable parameter landscape: variance < 15% in adjacent ±15% shifts
-- **Survives 50% penalty to execution slippage** (e.g., 1.5 ticks/side on TX)
-- **Generates ≥ 200 trades per year** (statistical validity)
+- Achieves the holding-period-appropriate Sharpe floor for the target level
+- Demonstrates stable parameter landscape (sensitivity CV below threshold)
+- **Survives 50% penalty to execution slippage** (at L3)
+- Meets the holding-period-appropriate trade count minimum
 
-This goal ensures strategies are robust to real execution conditions and parameter perturbation while maintaining alpha that isn't driven by overfitting.
+Check current level with strategy TOML: `config/strategies/<slug>.toml`.
 
 ## Step 0: Classify Strategy Type (MANDATORY)
 
@@ -30,18 +59,19 @@ Before ANY diagnosis or optimization, classify the strategy into one of
 these types. This determines which metrics are "healthy" and which reference
 files apply:
 
-| Type | Timeframe | Edge Source | Healthy WR | Healthy RR | Key References |
-|------|-----------|-------------|-----------|-----------|----------------|
-| Trend-following | Daily | Asymmetric payoff | 35-45% | 2.5+ | references/strategy-types.md, references/position-sizing.md |
-| Intraday breakout | Intraday | Momentum continuation | 45-55% | 1.0-2.0 | references/strategy-types.md (intraday sections) |
-| Intraday mean-reversion | Intraday | Overshoot correction | 55-65% | 0.6-1.0 | references/strategy-types.md (intraday sections) |
-| Statistical arb / liquidity | Intraday | Spread capture | 60-70% | 0.3-0.8 | (specialized) |
+| Type | Holding Period | Edge Source | Healthy WR | Healthy RR | Key References |
+|------|---------------|-------------|-----------|-----------|----------------|
+| Swing trend-following | SWING | Asymmetric payoff (multi-week) | 35-45% | 2.5+ | references/strategy-types.md, references/position-sizing.md |
+| Daily trend-following | MEDIUM_TERM | Asymmetric payoff (daily) | 40-55% | 1.5-2.5 | references/strategy-types.md |
+| Intraday breakout | SHORT_TERM | Momentum continuation | 45-55% | 1.0-2.0 | references/strategy-types.md (intraday sections) |
+| Intraday mean-reversion | SHORT_TERM | Overshoot correction | 55-65% | 0.6-1.0 | references/strategy-types.md (intraday sections) |
+| Statistical arb / liquidity | SHORT_TERM | Spread capture | 60-70% | 0.3-0.8 | (specialized) |
 
 **How to classify:**
-1. Call `get_parameter_schema` — check `recommended_timeframe` and `category`.
-2. If `timeframe=intraday` and `category=mean_reversion` → Intraday mean-reversion.
-3. If `timeframe=intraday` and `category=breakout` → Intraday breakout.
-4. If `timeframe=daily` → Trend-following (default).
+1. Call `get_parameter_schema` — check `holding_period`, `category`, and `signal_timeframe`.
+2. The `holding_period` metadata (`SHORT_TERM`/`MEDIUM_TERM`/`SWING`) determines which
+   threshold row applies. If missing, fall back to `SHORT_TERM` (conservative).
+3. The engine resolves thresholds automatically — you don't need to hardcode them.
 
 **Why this matters:**
 - A 60% win rate is FAILING for trend-following but HEALTHY for mean-reversion.
@@ -248,25 +278,32 @@ Use three-layer evaluation:
      to a particular training window.
    The final commit/reject decision must be based on this real-data layer.
 
-Walk-forward acceptance criteria (from `references/statistical-validity.md`):
-- Aggregate OOS Sharpe ≥ 1.0
-- Mean overfit ratio (OOS/IS) ≥ 0.7 (less than 30% degradation from IS to OOS)
-- Per-fold MDD ≤ 20%
-- Per-fold win rate within the **strategy type's healthy range** (Step 0)
-- Per-fold trade count ≥ 30
-- Per-fold profit factor ≥ 1.2
+Walk-forward acceptance criteria are now **auto-resolved from holding period + optimization level**.
+The engine reads thresholds from `src/strategies/__init__.py` `get_stage_thresholds()`.
 
-Real-data acceptance criteria (from `references/statistical-validity.md`):
+For L2 (typical walk-forward validation):
+
+| Gate | SHORT_TERM | MEDIUM_TERM | SWING |
+|------|-----------|-------------|-------|
+| Aggregate OOS Sharpe | ≥ 1.0 | ≥ 0.8 | ≥ 0.7 |
+| Per-fold MDD | ≤ 10% | ≤ 15% | ≤ 20% |
+| Per-fold trade count | ≥ 100 | ≥ 30 | ≥ 20 |
+| Per-fold PF | ≥ 1.3 | ≥ 1.2 | ≥ 1.2 |
+| Per-fold WR | 45-70% | 40-65% | 35-55% |
+| Sensitivity CV | < 0.15 | < 0.20 | < 0.25 |
+| Mean overfit ratio | ≥ 0.7 | ≥ 0.7 | ≥ 0.7 |
+| WF structure | 3mo/1mo/1mo | 6mo/2mo/1mo | 12mo/3mo/2mo |
+
+**You do NOT need to hardcode these values.** Call `run_walk_forward` and the engine
+applies the correct gates automatically based on strategy metadata.
+
+Real-data acceptance criteria:
 - P50 PnL > 0 across all 7 scenarios
 - P25 PnL > -max_loss/2
 - Win rate within the **strategy type's healthy range** (Step 0) in at least 5 of 7 scenarios
-  - Daily trend-following: > 35%
-  - Intraday breakout: > 45%
-  - Intraday mean-reversion: > 55%
-- Sharpe of P50 path > 0.5
+- Sharpe of P50 path > holding-period Sharpe floor
 - Stress test: no scenario causes ruin (PnL < -max_loss)
-- **Intraday only**: trade_count >= 100 × N_params (from `references/statistical-validity.md`)
-- **Intraday only**: Sharpe remains > 0.5 AFTER adding 1-tick round-trip slippage
+- Trade count meets holding-period DoF requirement (auto-resolved)
 
 Compare against baseline:
 - Sharpe improvement > 0.1 (absolute) is meaningful

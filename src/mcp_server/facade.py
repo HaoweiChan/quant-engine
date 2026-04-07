@@ -663,8 +663,9 @@ def run_monte_carlo_for_mcp(
     timeframe: str = "daily",
 ) -> dict[str, Any]:
     """Run Monte Carlo simulation with N paths."""
-    clamped = min(n_paths, 1000)
-    warning = f"n_paths clamped from {n_paths} to 1000" if n_paths > 1000 else None
+    _cap = _HW["n_paths_cap"]
+    clamped = min(n_paths, _cap)
+    warning = f"n_paths clamped from {n_paths} to {_cap}" if n_paths > _cap else None
 
     resolved_slug = resolve_strategy_slug(strategy)
     clamped_params, param_warnings = ({} if strategy_params is None else strategy_params), []
@@ -745,30 +746,76 @@ def _mc_single_path(args: tuple) -> tuple[float, float, float]:
     return (pnl, max_drawdown_pct(result.equity_curve), sharpe_ratio(result.equity_curve))
 
 
-def _check_memory(min_available_gb: float = 1.0) -> None:
-    """Raise if available memory is below threshold."""
+# ---------------------------------------------------------------------------
+# Hardware-aware resource budgets
+# ---------------------------------------------------------------------------
+import os as _os
+
+
+def _classify_hardware() -> dict[str, Any]:
+    """Detect hardware capacity and return resource budgets.
+
+    Three tiers: powerful (dev workstation), moderate (mid server),
+    constrained (small VPS).  Env vars override any auto-detected value.
+    """
+    cpu = _os.cpu_count() or 4
+    try:
+        import psutil
+        total_ram_gb = psutil.virtual_memory().total / (1024**3)
+    except ImportError:
+        total_ram_gb = 4.0  # conservative fallback
+
+    if cpu >= 12 and total_ram_gb >= 32:
+        tier = "powerful"
+    elif cpu >= 6 and total_ram_gb >= 16:
+        tier = "moderate"
+    else:
+        tier = "constrained"
+
+    _budgets: dict[str, dict[str, Any]] = {
+        "powerful":    {"mc_workers": max(1, cpu // 2), "n_paths_cap": 2000, "memory_floor_gb": 4.0, "optimizer_n_jobs": max(1, cpu // 3)},
+        "moderate":    {"mc_workers": max(1, cpu // 3), "n_paths_cap": 1000, "memory_floor_gb": 2.0, "optimizer_n_jobs": max(1, cpu // 4)},
+        "constrained": {"mc_workers": max(1, cpu // 4), "n_paths_cap": 500,  "memory_floor_gb": 1.0, "optimizer_n_jobs": 1},
+    }
+    budget: dict[str, Any] = dict(_budgets[tier])
+    budget["tier"] = tier
+    budget["cpu_count"] = cpu
+    budget["total_ram_gb"] = round(total_ram_gb, 1)
+
+    # Env var overrides (operators can pin specific values)
+    if v := _os.environ.get("QUANT_MC_WORKERS"):
+        budget["mc_workers"] = int(v)
+    if v := _os.environ.get("QUANT_N_PATHS_CAP"):
+        budget["n_paths_cap"] = int(v)
+    if v := _os.environ.get("QUANT_MEMORY_FLOOR_GB"):
+        budget["memory_floor_gb"] = float(v)
+    if v := _os.environ.get("QUANT_OPTIMIZER_JOBS"):
+        budget["optimizer_n_jobs"] = int(v)
+
+    return budget
+
+
+_HW = _classify_hardware()
+_MAX_MC_WORKERS = _HW["mc_workers"]
+
+
+def _check_memory(min_available_gb: float | None = None) -> None:
+    """Raise if available memory is below threshold.
+
+    Uses hardware-tier-aware floor when min_available_gb is not specified.
+    """
+    effective_floor = min_available_gb if min_available_gb is not None else _HW["memory_floor_gb"]
     try:
         import psutil
         mem = psutil.virtual_memory()
         avail_gb = mem.available / (1024**3)
-        if avail_gb < min_available_gb:
+        if avail_gb < effective_floor:
             raise MemoryError(
-                f"Only {avail_gb:.1f} GB available (need {min_available_gb}). "
+                f"Only {avail_gb:.1f} GB available (need {effective_floor}). "
                 f"Reduce n_paths or wait for other sessions to finish."
             )
     except ImportError:
         pass  # psutil not installed — skip check
-
-
-# Per-session MC worker cap.  Divides CPU budget by 3 (assumes up to 3
-# concurrent sessions).  Override via QUANT_MC_WORKERS env var.
-import os as _os
-_MAX_MC_WORKERS = int(
-    _os.environ.get(
-        "QUANT_MC_WORKERS",
-        max(1, (_os.cpu_count() or 4) // 3),
-    )
-)
 
 
 def _run_mc_with_runner(
@@ -791,9 +838,12 @@ def _run_mc_with_runner(
     from src.simulator.price_gen import generate_path
     from src.simulator.types import MonteCarloResult
 
-    _check_memory(min_available_gb=1.0)
+    _check_memory()
 
-    use_mp = timeframe in ("intraday", "1m") and n_paths > 1
+    use_mp = n_paths > 1 and (
+        timeframe in ("intraday", "1m")
+        or _HW["tier"] == "powerful"
+    )
     if use_mp:
         from concurrent.futures import ProcessPoolExecutor
 
@@ -869,7 +919,7 @@ def run_sweep_for_mcp(
     start: str | None = None,
     end: str | None = None,
     is_fraction: float = 0.8,
-    min_trade_count: int = 100,
+    min_trade_count: int | None = None,
     min_expectancy: float = 0.0,
     min_oos_metric: float = 0.0,
     train_bars: int | None = None,
@@ -878,7 +928,11 @@ def run_sweep_for_mcp(
     timeframe: str = "daily",
     require_real_data: bool = True,
 ) -> dict[str, Any]:
-    """Run parameter sweep (grid or random search)."""
+    """Run parameter sweep (grid or random search).
+
+    min_trade_count: When None (default), auto-resolved from strategy's
+        holding_period and current optimization level.
+    """
     if mode not in {"research", "production_intent"}:
         return {"error": "mode must be 'research' or 'production_intent'"}
     if require_real_data and mode != "production_intent":
@@ -898,7 +952,14 @@ def run_sweep_for_mcp(
             )
         }
 
-    _check_memory(min_available_gb=1.0)
+    # Resolve holding-period-aware min_trade_count if not explicitly provided
+    resolved_slug = resolve_strategy_slug(strategy)
+    from src.strategies import get_thresholds_for_strategy
+    _stage_th = get_thresholds_for_strategy(resolved_slug)
+    if min_trade_count is None:
+        min_trade_count = _stage_th.min_trade_count
+
+    _check_memory()
 
     from datetime import datetime
     from pathlib import Path
@@ -908,7 +969,6 @@ def run_sweep_for_mcp(
     from src.simulator.price_gen import generate_paths
     from src.simulator.strategy_optimizer import StrategyOptimizer
 
-    resolved_slug = resolve_strategy_slug(strategy)
     clamped_base, param_warnings = base_params, []
     from src.strategies.registry import validate_and_clamp
 
@@ -934,8 +994,18 @@ def run_sweep_for_mcp(
         raw = db.get_ohlcv(symbol, datetime.fromisoformat(start), datetime.fromisoformat(end))
         if not raw:
             return {"error": f"No data for {symbol} in {start}–{end}"}
-        daily_ranges = [b.high - b.low for b in raw]
-        daily_atr = _mean(daily_ranges) if daily_ranges else 0.0
+        # Compute true daily ATR from daily high-low ranges (matching
+        # run_backtest_realdata), NOT per-bar ranges.
+        _daily_hl_sweep: dict[str, tuple[float, float]] = {}
+        for b in raw:
+            d = b.timestamp.date() if hasattr(b.timestamp, "date") else str(b.timestamp)[:10]
+            if d not in _daily_hl_sweep:
+                _daily_hl_sweep[d] = (b.high, b.low)
+            else:
+                prev = _daily_hl_sweep[d]
+                _daily_hl_sweep[d] = (max(prev[0], b.high), min(prev[1], b.low))
+        daily_ranges = [hi - lo for hi, lo in _daily_hl_sweep.values() if hi > lo]
+        daily_atr = _mean(daily_ranges) if daily_ranges else _mean(b.high - b.low for b in raw)
         bars = [
             {
                 "symbol": symbol,
@@ -988,6 +1058,7 @@ def run_sweep_for_mcp(
         min_trade_count=min_trade_count,
         min_expectancy=min_expectancy,
         min_oos_objective=min_oos_metric,
+        n_jobs=_HW["optimizer_n_jobs"],
     )
     walk_forward_summary: dict[str, Any] | None = None
 
@@ -1149,6 +1220,7 @@ def run_sweep_for_mcp(
         "gate_results": result.gate_results,
         "gate_details": result.gate_details,
         "promotable": result.promotable if mode == "production_intent" else False,
+        "quality_thresholds_applied": _stage_th.to_dict(),
         "auto_activation_disabled": True,
         "best_params": result.best_params,
         "best_is_metrics": result.best_is_result.metrics,
@@ -1444,8 +1516,20 @@ def run_walk_forward_for_mcp(
         raw = _aggregate_bars(raw, bar_agg)
 
     from statistics import mean as _mean
-    daily_ranges = [b.high - b.low for b in raw]
-    daily_atr = _mean(daily_ranges) if daily_ranges else 0.0
+
+    # Compute true daily ATR from daily high-low ranges (matching
+    # run_backtest_realdata), NOT per-bar ranges which are ~6-8x smaller
+    # for intraday bars and produce impossibly tight stops.
+    _daily_hl: dict[str, tuple[float, float]] = {}
+    for b in raw:
+        d = b.timestamp.date() if hasattr(b.timestamp, "date") else str(b.timestamp)[:10]
+        if d not in _daily_hl:
+            _daily_hl[d] = (b.high, b.low)
+        else:
+            prev = _daily_hl[d]
+            _daily_hl[d] = (max(prev[0], b.high), min(prev[1], b.low))
+    daily_ranges = [hi - lo for hi, lo in _daily_hl.values() if hi > lo]
+    daily_atr = _mean(daily_ranges) if daily_ranges else _mean(b.high - b.low for b in raw)
 
     bars = [
         {
@@ -1523,7 +1607,12 @@ def run_walk_forward_for_mcp(
             overfit_ratio=compute_overfit_ratio(is_sharpe, oos_sharpe),
         ))
 
-    wf_result = build_walk_forward_result(fold_results)
+    # Resolve holding-period-aware quality gate thresholds
+    from src.strategies import get_thresholds_for_strategy
+    stage_thresholds = get_thresholds_for_strategy(resolved_slug)
+    thresholds_dict = stage_thresholds.to_dict()
+
+    wf_result = build_walk_forward_result(fold_results, thresholds=thresholds_dict)
 
     return {
         "strategy": strategy,
@@ -1534,6 +1623,7 @@ def run_walk_forward_for_mcp(
         "overfit_flag": wf_result.overfit_flag,
         "passed": wf_result.passed,
         "failure_reasons": wf_result.failure_reasons,
+        "quality_thresholds_applied": thresholds_dict,
         "folds": [
             {
                 "fold_index": f.fold_index,

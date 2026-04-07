@@ -47,28 +47,36 @@ Confusing these is the most common — and most expensive — mistake in quant r
 **Data**: Real 1m/5m bars from the SQLite database
 **Method**: Walk-forward validation (NOT in-sample optimization)
 
-**Walk-forward structure:**
-```
-Total data: 2 years of real bars
+**Walk-forward structure (varies by holding period):**
 
-Training window:  6 months  (optimize params here — but use Phase 1 params as prior)
-Validation window: 2 months (evaluate without touching params)
-Step size: 1 month
+| Parameter | SHORT_TERM | MEDIUM_TERM | SWING |
+|-----------|-----------|-------------|-------|
+| Minimum data | 1 year | 2 years | 3+ years |
+| Train window | 3 months | 6 months | 12 months |
+| Validate window | 1 month | 2 months | 3 months |
+| Step size | 1 month | 1 month | 2 months |
 
-Run: [T1→T6 train, T7→T8 validate], [T2→T7 train, T8→T9 validate], ...
-Final: report ONLY validation period metrics, never training period metrics
-```
+The engine auto-resolves these from `get_thresholds_for_strategy()` when you
+call `run_walk_forward`. You do NOT need to hardcode them.
 
-**Acceptance criteria for Phase 2 (MINIMUM for sign-off):**
-- Walk-forward Sharpe ≥ 1.0 (annualized, validation periods only)
-- Max Drawdown ≤ 20% on any single validation window
-- Win Rate: 35%–70%
-- N_trades ≥ 30 per validation window (low sample → inconclusive)
-- Strategy must be tested on BOTH day session and night session separately
-- Profit Factor ≥ 1.2 on combined validation periods
-- **Intraday strategies**: must use `intraday=true` in `run_backtest_realdata`
-  to enforce engine-level session-close and use intraday B&H benchmark.
-  Strategy Sharpe must exceed intraday B&H Sharpe (not full-period B&H).
+**Acceptance criteria for Phase 2 (auto-resolved per holding period + optimization level):**
+
+The `run_walk_forward` MCP tool now applies gates from `src/strategies/__init__.py`.
+For L2 (the typical Phase 2 target):
+
+| Gate | SHORT_TERM | MEDIUM_TERM | SWING |
+|------|-----------|-------------|-------|
+| WF Sharpe | ≥ 1.0 | ≥ 0.8 | ≥ 0.7 |
+| MDD per fold | ≤ 10% | ≤ 15% | ≤ 20% |
+| N_trades/fold | ≥ 100 | ≥ 30 | ≥ 20 |
+| Win Rate | 45-70% | 40-65% | 35-55% |
+| Profit Factor | ≥ 1.3 | ≥ 1.2 | ≥ 1.2 |
+
+Additional requirements:
+- Intraday strategies (SHORT_TERM): test BOTH day and night sessions separately
+- Intraday strategies: must use `intraday=true` to enforce session-close
+- Strategy Sharpe must exceed intraday B&H Sharpe (not full-period B&H)
+- **After all Phase 2 gates pass**: use `promote_optimization_level` to advance to L2
 
 ---
 

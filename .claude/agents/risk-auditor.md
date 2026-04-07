@@ -56,14 +56,15 @@ Risk Auditor: [agent instance]
 ━━━ PHASE 2: HISTORICAL ALPHA VALIDATION ━━━  (no exceptions)
 [ ] Data source confirmed as real OHLCV bars (not synthetic)
 [ ] Symbol and date range: TXF [interval]m, [start] → [end]
-[ ] Walk-forward structure: train=6mo, validate=2mo, step=1mo
+[ ] Walk-forward structure matches holding period (short_term: 3mo/1mo/1mo, medium_term: 6mo/2mo/1mo, swing: 12mo/3mo/2mo)
 [ ] Params from Phase 1 used WITHOUT re-optimization on validation data
-[ ] Validation Sharpe ≥ 1.0 (out-of-sample windows only)
-[ ] Validation MDD ≤ 20% in every window
-[ ] Avg N_trades/window ≥ 30 (if any window < 30: INCONCLUSIVE)
-[ ] Day session validated: Sharpe ≥ 0.5
-[ ] Night session validated: Sharpe ≥ 0.4
-[ ] Profit Factor ≥ 1.2 on combined validation periods
+[ ] Validation Sharpe ≥ holding-period L2 floor (short_term: 1.0, medium_term: 0.8, swing: 0.7)
+[ ] Validation MDD ≤ holding-period limit (short_term: 10%, medium_term: 15%, swing: 20%)
+[ ] Avg N_trades/window ≥ holding-period threshold (short_term: 100, medium_term: 30, swing: 20)
+[ ] Day session validated: Sharpe ≥ 0.5 (N/A for swing/daily strategies)
+[ ] Night session validated: Sharpe ≥ 0.4 (N/A for swing/daily strategies)
+[ ] Profit Factor ≥ holding-period floor (short_term: 1.3, medium_term/swing: 1.2)
+[ ] Strategy TOML at `config/strategies/<slug>.toml` updated via `promote_optimization_level`
 
 ━━━ BIAS AUDIT ━━━
 [ ] No look-ahead bias (see audit checklist below)

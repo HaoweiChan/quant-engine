@@ -27,6 +27,9 @@ Everything else. Code, backtests, data, deployment — all delegated.
 ## Strategy Promotion Pipeline
 
 This sequence is mandatory. No step can begin until the previous step's gate passes.
+Strategies advance through optimization levels: L0 → L1 → L2 → L3.
+Gate thresholds are auto-resolved per holding period (short_term/medium_term/swing)
+from `src/strategies/__init__.py` `get_stage_thresholds()`.
 
 ```
 [1] Quant Researcher  → Hypothesis + signal design
@@ -35,19 +38,23 @@ This sequence is mandatory. No step can begin until the previous step's gate pas
         ↓ Gate: coverage report, session IDs verified on sample
 [3] Strategy Engineer → Policy implementation
         ↓ Gate: validate_engine() passes, unit tests green
-[4] Quant Researcher  → Phase 1 simulation (parameter stress)
-        ↓ Gate: MC P50 Sharpe ≥ 0.8 (bull), ≥ 0.4 (sideways), survives flash_crash
-[5] Quant Researcher  → Phase 2 historical walk-forward (alpha claim)
-        ↓ Gate: validation Sharpe ≥ 1.0, N_trades ≥ 30/window, both sessions
+[4] Quant Researcher  → Phase 1 simulation → L1 (parameter stress)
+        ↓ Gate: MC L1 thresholds pass (holding-period-aware)
+        ↓ Action: promote_optimization_level → L1
+[5] Quant Researcher  → Phase 2 walk-forward → L2 (alpha claim)
+        ↓ Gate: WF L2 thresholds pass (holding-period-aware)
+        ↓ Action: promote_optimization_level → L2
 [6] Risk Auditor      → Bias audit + full promotion checklist
         ↓ Gate: checklist signed PROMOTE, no look-ahead bias found
 [7] Live Systems Engineer → Paper trade 5 sessions
         ↓ Gate: actual slippage ≤ 2× modeled
-[8] Platform Engineer → Deploy with monitoring active
+[8] Platform Engineer → Deploy → L3
         ↓ Gate: drawdown alert fires in test, rollback plan confirmed
+        ↓ Action: promote_optimization_level → L3
 ```
 
 If any gate fails: work returns to the agent who owns that step. Later steps do not begin.
+Available MCP tools: all 17 tools including `promote_optimization_level` for level advancement.
 
 ---
 

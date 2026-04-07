@@ -193,7 +193,7 @@ TOOLS: list[Tool] = [
                 },
                 "n_paths": {
                     "type": "integer",
-                    "description": "Number of simulation paths (default 200, max 1000)",
+                    "description": "Number of simulation paths (default 200, max determined by hardware tier: 500-2000)",
                     "default": 200,
                 },
                 "n_bars": {
@@ -307,8 +307,11 @@ TOOLS: list[Tool] = [
                 },
                 "min_trade_count": {
                     "type": "integer",
-                    "description": "Production gate: minimum trade count",
-                    "default": 100,
+                    "description": (
+                        "Production gate: minimum trade count. "
+                        "When omitted, auto-resolved from strategy holding_period and optimization level "
+                        "(swing: 10-20, medium_term: 15-30, short_term: 30-100)."
+                    ),
                 },
                 "min_expectancy": {
                     "type": "number",
@@ -743,6 +746,41 @@ TOOLS: list[Tool] = [
             "required": ["strategy"],
         },
     ),
+    Tool(
+        name="promote_optimization_level",
+        description=(
+            "Promote a strategy to the next optimization level. "
+            "Validates that quality gates for the target level are met based on "
+            "recent run history, then writes the level + gate snapshot to the "
+            "strategy's TOML config file. Returns pass/fail with gate details.\n\n"
+            "Levels: L0_UNOPTIMIZED → L1_EXPLORATORY → L2_VALIDATED → L3_PRODUCTION.\n"
+            "Thresholds are resolved from the strategy's holding_period metadata "
+            "(short_term, medium_term, swing)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "strategy": {
+                    "type": "string",
+                    "description": "Strategy name or slug (e.g., 'ta_orb', 'pyramid')",
+                },
+                "target_level": {
+                    "type": "integer",
+                    "description": "Target optimization level: 1=L1_EXPLORATORY, 2=L2_VALIDATED, 3=L3_PRODUCTION",
+                    "enum": [1, 2, 3],
+                },
+                "gate_results": {
+                    "type": "object",
+                    "description": (
+                        "Gate metric values to validate and persist. "
+                        "Keys: sharpe, trades_per_fold, mdd_pct, sensitivity_cv, "
+                        "profit_factor, win_rate. All should be actual measured values."
+                    ),
+                },
+            },
+            "required": ["strategy", "target_level", "gate_results"],
+        },
+    ),
 ]
 
 
@@ -932,7 +970,7 @@ def register_tools(app: Server) -> None:
                     start=arguments.get("start"),
                     end=arguments.get("end"),
                     is_fraction=arguments.get("is_fraction", 0.8),
-                    min_trade_count=arguments.get("min_trade_count", 100),
+                    min_trade_count=arguments.get("min_trade_count"),
                     min_expectancy=arguments.get("min_expectancy", 0.0),
                     min_oos_metric=arguments.get("min_oos_metric", 0.0),
                     train_bars=arguments.get("train_bars"),
@@ -1142,6 +1180,81 @@ def register_tools(app: Server) -> None:
                     params=arguments.get("params"),
                 )
                 return _json_response(result)
+
+            if name == "promote_optimization_level":
+                from src.mcp_server.facade import resolve_strategy_slug
+                from src.strategies import (
+                    OptimizationLevel,
+                    get_stage_thresholds,
+                    get_thresholds_for_strategy,
+                    read_optimization_level,
+                    write_optimization_level,
+                )
+
+                slug = arguments["strategy"]
+                resolved = resolve_strategy_slug(slug)
+                target_val = arguments["target_level"]
+                gate_results = arguments.get("gate_results", {})
+
+                try:
+                    target = OptimizationLevel(target_val)
+                except ValueError:
+                    return _json_response({"error": f"Invalid level: {target_val}. Use 1, 2, or 3."})
+
+                current, _ = read_optimization_level(resolved)
+                if target.value <= current.value:
+                    return _json_response({
+                        "error": f"Strategy already at {current.name} (level {current.value}). "
+                                 f"Target {target.name} ({target.value}) is not an advancement."
+                    })
+
+                # Validate gate_results against target level thresholds
+                thresholds = get_thresholds_for_strategy(resolved, level=target)
+                failures = []
+                sharpe = gate_results.get("sharpe", 0.0)
+                if sharpe < thresholds.sharpe_floor:
+                    failures.append(f"Sharpe {sharpe:.2f} < {thresholds.sharpe_floor}")
+                trades = gate_results.get("trades_per_fold", 0)
+                if trades < thresholds.min_trade_count:
+                    failures.append(f"Trades/fold {trades} < {thresholds.min_trade_count}")
+                if thresholds.mdd_max_pct is not None:
+                    mdd = gate_results.get("mdd_pct", 0.0)
+                    if mdd > thresholds.mdd_max_pct:
+                        failures.append(f"MDD {mdd:.1f}% > {thresholds.mdd_max_pct}%")
+                wr = gate_results.get("win_rate", 0.0)
+                wr_pct = wr if wr > 1 else wr * 100  # handle both 0.52 and 52.0
+                if not (thresholds.win_rate[0] * 100 <= wr_pct <= thresholds.win_rate[1] * 100):
+                    failures.append(
+                        f"Win rate {wr_pct:.1f}% outside "
+                        f"{thresholds.win_rate[0]*100:.0f}-{thresholds.win_rate[1]*100:.0f}%"
+                    )
+                pf = gate_results.get("profit_factor", 0.0)
+                if pf < thresholds.profit_factor_floor:
+                    failures.append(f"Profit factor {pf:.2f} < {thresholds.profit_factor_floor}")
+
+                if failures:
+                    return _json_response({
+                        "passed": False,
+                        "target_level": target.name,
+                        "holding_period": thresholds.holding_period.value,
+                        "failures": failures,
+                        "thresholds": thresholds.to_dict(),
+                        "gate_results_submitted": gate_results,
+                    })
+
+                # All gates passed — write TOML
+                path = write_optimization_level(
+                    resolved, target, gate_results,
+                    holding_period=thresholds.holding_period,
+                )
+                return _json_response({
+                    "passed": True,
+                    "promoted_to": target.name,
+                    "holding_period": thresholds.holding_period.value,
+                    "toml_path": str(path),
+                    "gate_results": gate_results,
+                    "thresholds": thresholds.to_dict(),
+                })
 
             return _json_response({"error": f"Unknown tool: {name}"})
 

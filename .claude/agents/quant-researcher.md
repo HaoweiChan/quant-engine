@@ -80,19 +80,22 @@ Before running Phase 2, confirm with Market Data Engineer:
 - Coverage report shows < 0.1% gap rate
 - Session IDs have been verified on sample bars
 
-Walk-forward structure:
-- Train window: 6 months (use Phase 1 params — do NOT re-optimize on validation data)
-- Validation window: 2 months
-- Step: 1 month
+Walk-forward structure (varies by holding period):
+- SHORT_TERM: 3mo train / 1mo validate / 1mo step
+- MEDIUM_TERM: 6mo train / 2mo validate / 1mo step (default)
+- SWING: 12mo train / 3mo validate / 2mo step
+- Use Phase 1 params — do NOT re-optimize on validation data
 - Report only validation period metrics. Training metrics are withheld.
+- The engine auto-resolves structure from `get_thresholds_for_strategy()`.
 
-Phase 2 acceptance:
-- Validation Sharpe ≥ 1.0 (annualized, out-of-sample windows only)
-- MDD ≤ 20% in any single validation window
-- Win Rate: 35%–70%
-- N_trades ≥ 30 per validation window — if below this, result is inconclusive
-- Profit Factor ≥ 1.2 on combined validation periods
+Phase 2 acceptance (auto-resolved per holding period — these are L2 thresholds):
+- Validation Sharpe ≥ 1.0 (short_term/medium_term: ≥ 0.8; swing: ≥ 0.7)
+- MDD ≤ 10% (short_term) / ≤ 15% (medium_term) / ≤ 20% (swing)
+- Win Rate within holding-period healthy range (see Step 0 typology)
+- N_trades ≥ 100 (short_term) / ≥ 30 (medium_term) / ≥ 20 (swing) per fold
+- Profit Factor ≥ 1.3 (short_term) / ≥ 1.2 (medium_term/swing)
 - Both day session and night session tested and reported separately
+- After gates pass, use `promote_optimization_level` MCP tool to advance to L2
 
 Phase 2 report (write to `.claude/research/[name]-phase2.md`):
 ```

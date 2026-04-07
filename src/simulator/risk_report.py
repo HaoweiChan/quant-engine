@@ -120,20 +120,23 @@ class RiskReport:
 def evaluate_cost_gate(
     net_sharpe: float,
     cost_drag_pct: float,
+    min_net_sharpe: float = 0.5,
+    max_cost_drag_pct: float = 80.0,
 ) -> tuple[bool, list[str]]:
-    """Evaluate cost gate: net Sharpe >= 0.5 and cost drag < 80%."""
+    """Evaluate cost gate: net Sharpe >= threshold and cost drag < limit."""
     reasons = []
-    if net_sharpe < 0.5:
-        reasons.append(f"Net Sharpe {net_sharpe:.2f} < 0.5 after costs")
-    if cost_drag_pct >= 80.0:
-        reasons.append(f"Cost drag {cost_drag_pct:.1f}% >= 80%")
+    if net_sharpe < min_net_sharpe:
+        reasons.append(f"Net Sharpe {net_sharpe:.2f} < {min_net_sharpe} after costs")
+    if cost_drag_pct >= max_cost_drag_pct:
+        reasons.append(f"Cost drag {cost_drag_pct:.1f}% >= {max_cost_drag_pct}%")
     return len(reasons) == 0, reasons
 
 
 def evaluate_param_stability_gate(
     sensitivity: AggregatedSensitivity | None,
+    stability_cv_max: float = 0.20,
 ) -> tuple[bool, list[str]]:
-    """Evaluate param stability: no cliffs, >50% params stable (CV < 0.20)."""
+    """Evaluate param stability: no cliffs, >50% params stable (CV < threshold)."""
     if sensitivity is None:
         return False, ["Parameter sensitivity not evaluated"]
     reasons = []
@@ -141,27 +144,28 @@ def evaluate_param_stability_gate(
     if cliffs:
         names = [r.param_name for r in cliffs]
         reasons.append(f"Cliff detected in: {', '.join(names)}")
-    stable_count = sum(1 for r in sensitivity.per_param if r.stability_cv < 0.20)
+    stable_count = sum(1 for r in sensitivity.per_param if r.stability_cv < stability_cv_max)
     total = len(sensitivity.per_param)
     if total > 0 and stable_count <= total / 2:
-        reasons.append(f"Only {stable_count}/{total} params stable (CV < 0.20)")
+        reasons.append(f"Only {stable_count}/{total} params stable (CV < {stability_cv_max})")
     return len(reasons) == 0, reasons
 
 
 def evaluate_regime_gate(
     regime_metrics: list[RegimeMetrics] | None,
+    min_worst_regime_sharpe: float = 0.4,
 ) -> tuple[bool, float, list[str]]:
-    """Evaluate regime gate: worst regime Sharpe >= 0.4."""
+    """Evaluate regime gate: worst regime Sharpe >= threshold."""
     if not regime_metrics:
         return False, 0.0, ["Regime metrics not evaluated"]
     worst_sharpe = min(m.sharpe for m in regime_metrics if m.n_sessions > 0)
     reasons = []
-    if worst_sharpe < 0.4:
+    if worst_sharpe < min_worst_regime_sharpe:
         worst_label = next(
             m.regime_label for m in regime_metrics if m.sharpe == worst_sharpe
         )
         reasons.append(
-            f"Worst regime '{worst_label}' Sharpe {worst_sharpe:.2f} < 0.4"
+            f"Worst regime '{worst_label}' Sharpe {worst_sharpe:.2f} < {min_worst_regime_sharpe}"
         )
     return len(reasons) == 0, worst_sharpe, reasons
 
