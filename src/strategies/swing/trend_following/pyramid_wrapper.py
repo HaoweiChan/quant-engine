@@ -3,7 +3,7 @@
 Bridges the PyramidConfig-based core engine to the standard
 create_*_engine(keyword_args) interface used by the registry and facade.
 
-Entry signal: price > SMA(sma_len) → long, price < SMA(sma_len) → short.
+Entry signal: price > EMA(ema_len) → long, price < EMA(ema_len) → short.
 Anti-martingale pyramid: add on profit, reduce on stop-loss.
 """
 from __future__ import annotations
@@ -31,11 +31,11 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 PARAM_SCHEMA: dict[str, dict] = {
-    "sma_len":             {"type": "int",   "default": 20,   "min": 10,  "max": 200,
-                            "description": "SMA lookback for trend filter."},
+    "ema_len":             {"type": "int",   "default": 25,   "min": 5,   "max": 200,
+                            "description": "EMA lookback for trend filter."},
     "max_levels":          {"type": "int",   "default": 4,    "min": 1,   "max": 8,
                             "description": "Maximum pyramid levels (1 = no adds)."},
-    "stop_atr_mult":       {"type": "float", "default": 2.0,  "min": 0.5, "max": 4.0,
+    "stop_atr_mult":       {"type": "float", "default": 3.0,  "min": 0.5, "max": 4.0,
                             "description": "ATR multiplier for initial stop distance."},
     "trail_atr_mult":      {"type": "float", "default": 3.0,  "min": 1.0, "max": 6.0,
                             "description": "ATR multiplier for chandelier trailing stop."},
@@ -56,7 +56,7 @@ STRATEGY_META: dict = {
     "stop_architecture": StopArchitecture.SWING,
     "expected_duration_minutes": (10080, 40320),
     "tradeable_sessions": ["day", "night"],
-    "description": "Pyramid trend-following with SMA filter, Kelly sizing and chandelier stops.",
+    "description": "Pyramid trend-following with EMA filter, Kelly sizing and chandelier stops.",
 }
 
 
@@ -64,25 +64,33 @@ _DEFAULT_LOT_SCHEDULE = [[1, 0], [1, 0], [1, 0], [1, 0]]
 _DEFAULT_ADD_TRIGGER_ATR = [4.0, 8.0, 12.0]
 
 
-class SmaPyramidEntryPolicy(EntryPolicy):
-    """Enter long when price > SMA, short when price < SMA.
+class EmaPyramidEntryPolicy(EntryPolicy):
+    """Enter long when price > EMA, short when price < EMA.
 
-    Reuses PyramidConfig sizing logic (schedule, equity-risk, static cap).
+    EMA is seeded from the first ema_len prices (SMA seed), then updated
+    incrementally: EMA_t = price * k + EMA_{t-1} * (1-k), k = 2/(N+1).
     Uses smoothed ATR (rolling average) instead of raw bar ATR for sizing.
     """
 
     _ATR_SMOOTH_LEN = 14
 
-    def __init__(self, config: PyramidConfig, sma_len: int = 50) -> None:
+    def __init__(self, config: PyramidConfig, ema_len: int = 20) -> None:
         self._config = config
-        self._sma_len = sma_len
-        self._prices: deque[float] = deque(maxlen=sma_len)
+        self._ema_len = ema_len
+        self._k = 2.0 / (ema_len + 1)
+        self._seed_buf: deque[float] = deque(maxlen=ema_len)
+        self._ema: float | None = None
         self._atr_buf: deque[float] = deque(maxlen=self._ATR_SMOOTH_LEN)
 
-    def _sma(self) -> float | None:
-        if len(self._prices) < self._sma_len:
-            return None
-        return sum(self._prices) / self._sma_len
+    def _update_ema(self, price: float) -> float | None:
+        if self._ema is None:
+            self._seed_buf.append(price)
+            if len(self._seed_buf) < self._ema_len:
+                return None
+            self._ema = sum(self._seed_buf) / self._ema_len
+        else:
+            self._ema = price * self._k + self._ema * (1.0 - self._k)
+        return self._ema
 
     def _smoothed_atr(self, raw_atr: float) -> float | None:
         self._atr_buf.append(raw_atr)
@@ -97,19 +105,18 @@ class SmaPyramidEntryPolicy(EntryPolicy):
         engine_state: EngineState,
         account: AccountState | None = None,
     ) -> EntryDecision | None:
-        self._prices.append(snapshot.price)
+        ema = self._update_ema(snapshot.price)
 
         if engine_state.mode in ("halted", "rule_only"):
             return None
 
-        sma = self._sma()
-        if sma is None:
+        if ema is None:
             return None
 
-        # Trend filter: price vs SMA
-        if snapshot.price > sma:
+        # Trend filter: price vs EMA
+        if snapshot.price > ema:
             direction = "long"
-        elif snapshot.price < sma:
+        elif snapshot.price < ema:
             direction = "short"
         else:
             return None
@@ -144,38 +151,36 @@ class SmaPyramidEntryPolicy(EntryPolicy):
             initial_stop=stop_level,
             direction=direction,
             metadata={
-                "sma": sma,
-                "sma_len": self._sma_len,
+                "ema": ema,
+                "ema_len": self._ema_len,
                 "smoothed_atr": daily_atr,
-                "price_sma_ratio": snapshot.price / sma,
+                "price_ema_ratio": snapshot.price / ema,
             },
         )
 
     # -- IndicatorProvider interface --
 
     def snapshot(self) -> dict[str, float | None]:
-        return {
-            "sma": self._sma(),
-        }
+        return {"ema": self._ema}
 
     def indicator_meta(self) -> dict[str, dict]:
         return {
-            "sma": {"panel": "price", "color": "#FFE66D", "label": f"SMA({self._sma_len})"},
+            "ema": {"panel": "price", "color": "#FFE66D", "label": f"EMA({self._ema_len})"},
         }
 
 
 def create_pyramid_wrapper_engine(
     max_loss: float = 500_000.0,
     max_levels: int = 4,
-    sma_len: int = 20,
-    stop_atr_mult: float = 2.0,
+    ema_len: int = 25,
+    stop_atr_mult: float = 3.0,
     trail_atr_mult: float = 3.0,
     trail_lookback: int = 22,
     margin_limit: float = 0.50,
     kelly_fraction: float = 0.25,
     entry_conf_threshold: float = 0.65,
 ) -> "PositionEngine":
-    """Build a PositionEngine with SMA-filtered pyramid strategy."""
+    """Build a PositionEngine with EMA-filtered pyramid strategy."""
     from src.core.position_engine import PositionEngine
 
     # Auto-adjust array params to match max_levels
@@ -205,7 +210,7 @@ def create_pyramid_wrapper_engine(
         trail_lookback=config.trail_lookback,
     )
 
-    entry = SmaPyramidEntryPolicy(config, sma_len=sma_len)
+    entry = EmaPyramidEntryPolicy(config, ema_len=ema_len)
     engine = PositionEngine(
         entry_policy=entry,
         add_policy=PyramidAddPolicy(config),
