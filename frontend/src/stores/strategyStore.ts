@@ -64,9 +64,10 @@ export const useStrategyStore = create<StrategyState>((set, get) => ({
     fetchActiveParams(slug)
       .then((active) => {
         if (active.source === "registry" && active.params) {
+          // Merge all active params over defaults (no schema filtering)
           const merged = { ...defaults };
           for (const [k, v] of Object.entries(active.params)) {
-            if (k in merged && typeof v === "number") merged[k] = v;
+            if (typeof v === "number") merged[k] = v;
           }
           set({ params: merged });
         } else {

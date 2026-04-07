@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Sidebar, SectionLabel, ParamInput } from "@/components/Sidebar";
 import { useStrategyStore } from "@/stores/strategyStore";
 import { useBacktestStore } from "@/stores/backtestStore";
+import { ParamJsonDialog } from "@/components/ParamJsonDialog";
 
 /** A number input that allows free typing by buffering the raw string locally. */
 function NumericInput({
@@ -58,6 +59,32 @@ const inputStyle: React.CSSProperties = {
   fontSize: 11,
   outline: "none",
 };
+
+function ParamJsonButton({ disabled }: { disabled?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const params = useStrategyStore((s) => s.params);
+  const SIDEBAR_KEYS = ["bar_agg", "max_loss", "slippage_bps", "commission_fixed_per_contract"];
+  const count = Object.keys(params).filter((k) => !SIDEBAR_KEYS.includes(k)).length;
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        disabled={disabled}
+        className="w-full rounded px-2 py-1.5 text-[11px] text-left hover:opacity-80"
+        style={{
+          background: "var(--color-qe-input)",
+          border: "1px solid var(--color-qe-input-border)",
+          color: "var(--color-qe-text)",
+          cursor: disabled ? "not-allowed" : "pointer",
+          fontFamily: "var(--font-mono)",
+        }}
+      >
+        {count} params &mdash; click to edit
+      </button>
+      <ParamJsonDialog open={open} onOpenChange={setOpen} />
+    </>
+  );
+}
 
 export function StrategyParamSidebar() {
   const strategies = useStrategyStore((s) => s.strategies);
@@ -213,21 +240,7 @@ export function StrategyParamSidebar() {
       </ParamInput>
       <hr style={{ borderColor: "var(--color-qe-card-border)", margin: "10px 0" }} />
       <SectionLabel>STRATEGY PARAMETERS</SectionLabel>
-      {currentStrat?.param_grid &&
-        Object.entries(currentStrat.param_grid)
-          .filter(([key]) => key !== "bar_agg")
-          .map(([key, cfg]) => (
-            <ParamInput key={key} label={cfg.label || key}>
-              <NumericInput
-                value={params[key] ?? 0}
-                step={cfg.type === "int" ? 1 : 0.1}
-                onChange={(v) => setParam(key, v)}
-                disabled={disabled}
-                className="w-full rounded px-1.5 py-1 text-[11px]"
-                style={inputStyle}
-              />
-            </ParamInput>
-          ))}
+      <ParamJsonButton disabled={disabled} />
     </Sidebar>
   );
 }
