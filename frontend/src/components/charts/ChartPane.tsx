@@ -29,6 +29,8 @@ export interface VolumeData {
 export interface ChartPaneHandle {
   chart: () => IChartApi | null;
   firstSeries: () => ISeriesApi<any> | null;
+  /** Append new candles + volume incrementally without full setData(). */
+  appendBars: (newCandles: CandleData[], newVolume?: VolumeData[]) => void;
 }
 
 interface ChartPaneProps {
@@ -84,6 +86,18 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
   useImperativeHandle(ref, () => ({
     chart: () => chartRef.current,
     firstSeries: () => candleSeriesRef.current ?? extraSeriesRef.current[0] ?? null,
+    appendBars: (newCandles: CandleData[], newVolume?: VolumeData[]) => {
+      if (!candleSeriesRef.current) return;
+      for (const c of newCandles) {
+        try { candleSeriesRef.current.update(c as any); } catch { /* ok */ }
+      }
+      if (volSeriesRef.current && newVolume) {
+        for (const v of newVolume) {
+          try { volSeriesRef.current.update(v as any); } catch { /* ok */ }
+        }
+      }
+      prevCandleLengthRef.current += newCandles.length;
+    },
   }));
 
   const handleVisibleRangeChange = useCallback((range: any) => {
@@ -112,12 +126,21 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
         horzLines: { color: colors.grid },
       },
       crosshair: { mode: 0 },
-      rightPriceScale: { borderColor: colors.cardBorder },
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+      handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true, axisDoubleClickReset: true },
+      rightPriceScale: {
+        borderColor: colors.cardBorder,
+        autoScale: false,
+        scaleMargins: { top: 0.06, bottom: 0.06 },
+      },
       timeScale: {
         borderColor: colors.cardBorder,
         visible: showTimeScale,
         timeVisible: timeframeMinutes < 1440,
         secondsVisible: false,
+        rightOffset: 12,
+        fixLeftEdge: false,
+        fixRightEdge: false,
         tickMarkFormatter: (time: any) => {
           const fn = tickFormatterRef.current;
           if (!fn) return null;
@@ -223,15 +246,26 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
           extraSeriesRef.current.push(s);
         }
       }
+      const isFirstLoad = prevCandleLengthRef.current === 0 && candleLen > 0;
       prevCandleLengthRef.current = candleLen;
       if (savedRange && prependedCount > 0) {
         chart.timeScale().setVisibleLogicalRange({
           from: savedRange.from + prependedCount,
           to: savedRange.to + prependedCount,
         });
-      } else {
-        chart.timeScale().fitContent();
+      } else if (isFirstLoad) {
+        // First load: auto-fit then unlock for free vertical pan
+        chart.priceScale("right").applyOptions({ autoScale: true });
+        const showBars = Math.min(candleLen, 200);
+        chart.timeScale().setVisibleLogicalRange({
+          from: candleLen - showBars - 1,
+          to: candleLen + 5,
+        });
+        requestAnimationFrame(() => {
+          chart.priceScale("right").applyOptions({ autoScale: false });
+        });
       }
+      // On subsequent refreshes: don't touch the visible range (preserve user zoom/pan)
     } catch {
       /* lightweight-charts assertion errors are non-fatal here */
     }

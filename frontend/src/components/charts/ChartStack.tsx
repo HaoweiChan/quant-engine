@@ -310,9 +310,35 @@ export function ChartStack({
     return () => { clearTimeout(timer); cleanSubs(); };
   }, [bars.length, secondaryId]);
 
-  if (bars.length === 0) return null;
+  const handleFit = () => {
+    const chart = primaryRef.current?.chart();
+    if (!chart || candles.length === 0) return;
+    // Fixed number of bars for readability
+    const FIT_BARS = 120;
+    const showBars = Math.min(candles.length, FIT_BARS);
+    const range = {
+      from: candles.length - showBars - 1,
+      to: candles.length + 3,
+    };
+    chart.timeScale().setVisibleLogicalRange(range);
+    // Force vertical auto-scale to enclose all visible bars
+    chart.priceScale("right").applyOptions({
+      autoScale: true,
+      scaleMargins: { top: 0.05, bottom: 0.05 },
+    });
+    // Sync secondary pane
+    const sec = secondaryRef.current?.chart();
+    if (sec) {
+      sec.timeScale().setVisibleLogicalRange(range);
+      sec.priceScale("right").applyOptions({
+        autoScale: true,
+        scaleMargins: { top: 0.05, bottom: 0.05 },
+      });
+    }
+  };
 
   const showHeader = headerLabel || onTimeframeChange || expandable;
+  const noBars = bars.length === 0;
 
   return (
     <div ref={chartCardRef} style={expandable ? { background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 } : undefined}>
@@ -329,6 +355,16 @@ export function ChartStack({
                 {o.label}
               </button>
             ))}
+            <button
+              onClick={handleFit}
+              className="p-1 rounded cursor-pointer border-none flex items-center justify-center"
+              style={{ background: "rgba(90,138,242,0.12)", color: colors.text }}
+              title="Fit to view"
+            >
+              <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M2 5V2h3M11 2h3v3M14 11v3h-3M5 14H2v-3" />
+              </svg>
+            </button>
             {expandable && (
               <button
                 onClick={toggleExpand}
@@ -432,6 +468,17 @@ export function ChartStack({
         </div>
       )}
       <div style={{ position: "relative" }}>
+        {noBars && (
+          <div style={{
+            position: "absolute", inset: 0, zIndex: 20,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: colors.card,
+          }}>
+            <span className="text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+              Loading bars...
+            </span>
+          </div>
+        )}
         {hoverBar && (
           <div
             style={{
