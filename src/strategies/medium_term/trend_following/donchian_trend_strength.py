@@ -1,26 +1,26 @@
-"""Donchian Trend-Strength Strategy (intraday trend following).
+"""Donchian Trend-Strength Strategy (medium-term trend following).
 
 Pullback entry within a trending regime identified by Donchian Channels
-and VWAP alignment, with structural RSI/ADX confirmation per the
-Seed Strategy Architecture.
+and VWAP alignment. Designed for multi-hour to multi-day holds on
+aggregated bars (5m/15m/1h).
 
 Entry:
 - Long when VWAP confirms uptrend (above channel mid), price pulls back
-  to/below the Donchian mid, and RSI shows cooling momentum (< 55).
+  to/below the Donchian mid, and volume confirms interest.
 - Short when VWAP confirms downtrend (below channel mid), price rallies
-  to/above the Donchian mid, and RSI shows elevated momentum (> 45).
+  to/above the Donchian mid, and volume confirms interest.
 
 Exit:
 - ATR-based trailing stop that ratchets favorably
 - ATR-based take profit
-- Force close at session boundaries / max hold bars
+- Max hold bars timeout
 
 Filters:
 - ADX regime filter: only enter when ADX > threshold (trending market)
 - VWAP directional alignment (institutional baseline vs channel midline)
-- RSI structural filter (momentum direction, period <= 7)
-- Day session (09:00-13:15) or night session (15:15-04:30)
-- Time gate for low-edge windows
+- Volume confirmation: entry bar volume > vol_mult * rolling average
+- Optional RSI structural filter
+- Optional time gate for low-edge windows
 """
 
 from __future__ import annotations
@@ -29,9 +29,10 @@ from collections import deque
 from datetime import datetime, time
 from typing import TYPE_CHECKING
 
-from src.core.policies import EntryPolicy, NoAddPolicy, StopPolicy
+from src.core.policies import AddPolicy, EntryPolicy, NoAddPolicy, StopPolicy
 from src.core.types import (
     AccountState,
+    AddDecision,
     EngineConfig,
     EngineState,
     EntryDecision,
@@ -40,7 +41,7 @@ from src.core.types import (
     Position,
 )
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
-from src.strategies._session_utils import in_day_session, in_force_close, in_night_session
+from src.strategies._session_utils import in_day_session, in_night_session
 
 if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
@@ -49,11 +50,11 @@ if TYPE_CHECKING:
 PARAM_SCHEMA: dict[str, dict] = {
     "lookback_period": {
         "type": "int",
-        "default": 15,
-        "min": 10,
-        "max": 30,
-        "description": "Donchian Channel lookback period (bars).",
-        "grid": [10, 15, 20, 25, 30],
+        "default": 20,
+        "min": 5,
+        "max": 100,
+        "description": "Donchian Channel lookback period (bars on signal TF).",
+        "grid": [10, 15, 20, 30, 50],
     },
     "adx_len": {
         "type": "int",
@@ -66,93 +67,142 @@ PARAM_SCHEMA: dict[str, dict] = {
     "adx_threshold": {
         "type": "float",
         "default": 20.0,
-        "min": 15.0,
+        "min": 0.0,
         "max": 40.0,
-        "description": "ADX above this = trending (allow entries).",
-        "grid": [15, 20, 25, 30],
+        "description": "ADX above this = trending (0=disabled).",
+        "grid": [0, 15, 20, 25, 30],
     },
     "rsi_len": {
         "type": "int",
         "default": 5,
         "min": 2,
-        "max": 7,
+        "max": 14,
         "description": "RSI period for structural momentum filter.",
-        "grid": [3, 4, 5],
+        "grid": [3, 5, 7],
     },
     "rsi_long_thresh": {
         "type": "float",
         "default": 55.0,
         "min": 40.0,
-        "max": 65.0,
-        "description": "RSI must be below this for long entries (cooling pullback).",
-        "grid": [45, 50, 55, 60],
+        "max": 100.0,
+        "description": "RSI must be below this for long entries (100=disabled).",
+        "grid": [45, 50, 55, 100],
     },
     "rsi_short_thresh": {
         "type": "float",
         "default": 45.0,
-        "min": 35.0,
+        "min": 0.0,
         "max": 60.0,
-        "description": "RSI must be above this for short entries (heated rally).",
-        "grid": [40, 45, 50, 55],
+        "description": "RSI must be above this for short entries (0=disabled).",
+        "grid": [0, 40, 45, 50],
+    },
+    "vol_mult": {
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "max": 3.0,
+        "description": "Volume confirmation: bar vol > vol_mult * rolling avg (0=disabled).",
+        "grid": [0, 0.5, 1.0, 1.5],
     },
     "atr_sl_multi": {
         "type": "float",
-        "default": 0.5,
-        "min": 0.1,
-        "max": 2.0,
+        "default": 1.5,
+        "min": 0.3,
+        "max": 4.0,
         "description": "Stop loss as fraction of daily ATR.",
-        "grid": [0.3, 0.5, 0.8, 1.0],
+        "grid": [0.5, 1.0, 1.5, 2.0, 3.0],
     },
     "atr_tp_multi": {
         "type": "float",
-        "default": 1.0,
-        "min": 0.3,
-        "max": 3.0,
+        "default": 3.0,
+        "min": 0.5,
+        "max": 6.0,
         "description": "Take profit as fraction of daily ATR.",
-        "grid": [0.8, 1.0, 1.5, 2.0],
+        "grid": [1.5, 2.0, 3.0, 4.0],
     },
     "trail_atr_multi": {
         "type": "float",
-        "default": 1.5,
-        "min": 0.3,
-        "max": 2.5,
+        "default": 2.0,
+        "min": 0.5,
+        "max": 4.0,
         "description": "Trailing stop distance as fraction of daily ATR.",
-        "grid": [0.8, 1.0, 1.5, 2.0],
+        "grid": [1.0, 1.5, 2.0, 3.0],
     },
     "time_gate": {
         "type": "int",
-        "default": 1,
+        "default": 0,
         "min": 0,
         "max": 1,
         "description": "Block entries during low-edge windows (1=enabled, 0=disabled).",
     },
     "max_hold_bars": {
         "type": "int",
-        "default": 60,
-        "min": 30,
-        "max": 300,
+        "default": 120,
+        "min": 20,
+        "max": 500,
         "description": "Max bars to hold before time-exit.",
-        "grid": [30, 45, 60, 90, 120],
+        "grid": [40, 60, 90, 120, 200],
+    },
+    "min_channel_atr": {
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "max": 3.0,
+        "description": "Min Donchian width as fraction of daily ATR to enter (0=disabled).",
+        "grid": [0, 0.5, 1.0, 1.5, 2.0],
+    },
+    "pyramid_max_levels": {
+        "type": "int",
+        "default": 1,
+        "min": 1,
+        "max": 4,
+        "description": "Max positions: 1=no pyramid, 2-4=anti-martingale adds into winners.",
+        "grid": [1, 2, 3],
+    },
+    "pyramid_trigger_atr": {
+        "type": "float",
+        "default": 1.0,
+        "min": 0.5,
+        "max": 3.0,
+        "description": "Profit threshold per add level in daily ATR units.",
+        "grid": [0.5, 1.0, 1.5, 2.0],
+    },
+    "pyramid_gamma": {
+        "type": "float",
+        "default": 0.5,
+        "min": 0.2,
+        "max": 1.0,
+        "description": "Size decay: add_lots = base_lots * gamma^level (0.5 = halving).",
+        "grid": [0.3, 0.5, 0.7],
+    },
+    "bar_agg": {
+        "type": "int",
+        "default": 15,
+        "min": 1,
+        "max": 60,
+        "description": "Bar aggregation: 1m->Nm. Overrides signal_timeframe.",
+        "grid": [5, 15, 30, 60],
     },
 }
 
 STRATEGY_META: dict = {
     "category": StrategyCategory.TREND_FOLLOWING,
-    "signal_timeframe": SignalTimeframe.ONE_MIN,
+    "signal_timeframe": SignalTimeframe.FIFTEEN_MIN,
     "holding_period": HoldingPeriod.MEDIUM_TERM,
-    "stop_architecture": StopArchitecture.INTRADAY,
-    "expected_duration_minutes": (180, 720),
+    "stop_architecture": StopArchitecture.SWING,
+    "force_close_mode": "disabled",
+    "expected_duration_minutes": (240, 7200),
     "tradeable_sessions": ["day", "night"],
-    "bars_per_day": 1050,
+    "bars_per_day": 70,
     "presets": {
-        "quick": {"n_bars": 21000, "note": "~1 month"},
-        "standard": {"n_bars": 63000, "note": "~3 months"},
-        "full_year": {"n_bars": 264600, "note": "~1 year"},
+        "quick": {"n_bars": 1400, "note": "~1 month"},
+        "standard": {"n_bars": 4200, "note": "~3 months"},
+        "full_year": {"n_bars": 17640, "note": "~1 year"},
     },
     "description": (
-        "Donchian Trend-Strength is an intraday trend-following strategy. "
-        "Uses Donchian Channels with VWAP-based trend detection and pullback "
-        "entries at the channel midline. RSI and ADX structural confirmation."
+        "Donchian Trend-Strength: medium-term trend-following on 15m bars. "
+        "Donchian Channel pullback entries with VWAP direction + volume "
+        "confirmation. Designed for multi-hour to multi-day holds."
     ),
 }
 
@@ -166,7 +216,7 @@ def _in_low_edge_window(t: time) -> bool:
 
 
 class _Indicators:
-    """Rolling indicators: Donchian, VWAP, RSI, ADX."""
+    """Rolling indicators: Donchian, VWAP, RSI, ADX, volume average."""
 
     def __init__(
         self,
@@ -179,6 +229,7 @@ class _Indicators:
         self._rsi_len = rsi_len
         self._adx_alpha = 2.0 / (adx_len + 1)
         self._closes: deque[float] = deque(maxlen=lookback_period + 1)
+        self._volumes: deque[float] = deque(maxlen=lookback_period)
         self._last_ts: datetime | None = None
         self._bar_count: int = 0
         self._prev_price: float | None = None
@@ -198,6 +249,9 @@ class _Indicators:
         self.vwap: float | None = None
         self.rsi: float | None = None
         self.adx: float = 0.0
+        self.bar_volume: float = 0.0
+        self.avg_volume: float = 0.0
+        self.channel_width: float = 0.0
 
     def update(
         self,
@@ -212,6 +266,9 @@ class _Indicators:
         self._closes.append(price)
         self.daily_atr = daily_atr
         self._bar_count += 1
+        self.bar_volume = volume
+        self._volumes.append(volume)
+        self.avg_volume = sum(self._volumes) / len(self._volumes) if self._volumes else 0.0
         self._update_adx(price)
         self._update_rsi(price)
         self._update_vwap(price, volume, timestamp)
@@ -283,6 +340,7 @@ class _Indicators:
         self.donchian_upper = max(window)
         self.donchian_lower = min(window)
         self.donchian_mid = (self.donchian_upper + self.donchian_lower) / 2.0
+        self.channel_width = self.donchian_upper - self.donchian_lower
 
 
 class DonchianTrendStrengthEntry(EntryPolicy):
@@ -294,9 +352,11 @@ class DonchianTrendStrengthEntry(EntryPolicy):
         adx_threshold: float = 20.0,
         rsi_long_thresh: float = 55.0,
         rsi_short_thresh: float = 45.0,
-        atr_sl_multi: float = 0.5,
-        atr_tp_multi: float = 1.0,
-        time_gate: bool = True,
+        vol_mult: float = 0.0,
+        min_channel_atr: float = 0.0,
+        atr_sl_multi: float = 1.5,
+        atr_tp_multi: float = 3.0,
+        time_gate: bool = False,
     ) -> None:
         self._ind = indicators
         self._lots = lots
@@ -304,6 +364,8 @@ class DonchianTrendStrengthEntry(EntryPolicy):
         self._adx_threshold = adx_threshold
         self._rsi_long_thresh = rsi_long_thresh
         self._rsi_short_thresh = rsi_short_thresh
+        self._vol_mult = vol_mult
+        self._min_channel_atr = min_channel_atr
         self._atr_sl_multi = atr_sl_multi
         self._atr_tp_multi = atr_tp_multi
         self._time_gate = time_gate
@@ -318,8 +380,6 @@ class DonchianTrendStrengthEntry(EntryPolicy):
         if engine_state.mode == "halted":
             return None
         t = snapshot.timestamp.time()
-        if in_force_close(t):
-            return None
         if not (in_day_session(t) or in_night_session(t)):
             return None
         if self._time_gate and _in_low_edge_window(t):
@@ -327,17 +387,29 @@ class DonchianTrendStrengthEntry(EntryPolicy):
         daily_atr = snapshot.atr.get("daily", 0.0)
         self._ind.update(snapshot.price, snapshot.timestamp, snapshot.volume, daily_atr)
         ind = self._ind
-        if ind.donchian_mid is None or ind.vwap is None or ind.rsi is None:
+        if ind.donchian_mid is None or ind.vwap is None:
             return None
         if daily_atr <= 0:
             return None
-        if ind.adx < self._adx_threshold:
+        # ADX filter (0 = disabled)
+        if self._adx_threshold > 0 and ind.adx < self._adx_threshold:
             return None
+        # Channel width regime filter: only trade when channel is wide (trending)
+        if self._min_channel_atr > 0 and daily_atr > 0:
+            if ind.channel_width < self._min_channel_atr * daily_atr:
+                return None
+        # Volume confirmation (0 = disabled)
+        if self._vol_mult > 0 and ind.avg_volume > 0:
+            if ind.bar_volume < self._vol_mult * ind.avg_volume:
+                return None
         price = snapshot.price
         sl_pts = daily_atr * self._atr_sl_multi
         uptrend = ind.vwap > ind.donchian_mid
         downtrend = ind.vwap < ind.donchian_mid
-        if uptrend and price <= ind.donchian_mid and ind.rsi < self._rsi_long_thresh:
+        # RSI filter: rsi_long_thresh >= 100 disables it
+        rsi_long_ok = ind.rsi is None or self._rsi_long_thresh >= 100 or ind.rsi < self._rsi_long_thresh
+        rsi_short_ok = ind.rsi is None or self._rsi_short_thresh <= 0 or ind.rsi > self._rsi_short_thresh
+        if uptrend and price <= ind.donchian_mid and rsi_long_ok:
             return EntryDecision(
                 lots=self._lots,
                 contract_type=self._contract_type,
@@ -346,10 +418,12 @@ class DonchianTrendStrengthEntry(EntryPolicy):
                 metadata={
                     "atr_tp_multi": self._atr_tp_multi,
                     "adx": round(ind.adx, 1),
-                    "rsi": round(ind.rsi, 1),
+                    "rsi": round(ind.rsi, 1) if ind.rsi is not None else 0,
+                    "vol_ratio": round(ind.bar_volume / max(ind.avg_volume, 1), 2),
+                    "ch_width_atr": round(ind.channel_width / max(daily_atr, 1), 2),
                 },
             )
-        if downtrend and price >= ind.donchian_mid and ind.rsi > self._rsi_short_thresh:
+        if downtrend and price >= ind.donchian_mid and rsi_short_ok:
             return EntryDecision(
                 lots=self._lots,
                 contract_type=self._contract_type,
@@ -358,20 +432,72 @@ class DonchianTrendStrengthEntry(EntryPolicy):
                 metadata={
                     "atr_tp_multi": self._atr_tp_multi,
                     "adx": round(ind.adx, 1),
-                    "rsi": round(ind.rsi, 1),
+                    "rsi": round(ind.rsi, 1) if ind.rsi is not None else 0,
+                    "vol_ratio": round(ind.bar_volume / max(ind.avg_volume, 1), 2),
+                    "ch_width_atr": round(ind.channel_width / max(daily_atr, 1), 2),
                 },
             )
         return None
+
+
+class DonchianTrendStrengthAdd(AddPolicy):
+    """Anti-martingale pyramid: add into winners at ATR-based profit thresholds.
+    Size_k = base_lots * gamma^k. Existing positions move to breakeven on each add.
+    """
+    def __init__(
+        self,
+        indicators: _Indicators,
+        max_levels: int = 3,
+        trigger_atr: float = 1.0,
+        gamma: float = 0.5,
+        base_lots: float = 1.0,
+    ) -> None:
+        self._ind = indicators
+        self._max_levels = max_levels
+        self._trigger_atr = trigger_atr
+        self._gamma = gamma
+        self._base_lots = base_lots
+
+    def should_add(
+        self,
+        snapshot: MarketSnapshot,
+        signal: MarketSignal | None,
+        engine_state: EngineState,
+    ) -> AddDecision | None:
+        if engine_state.mode == "halted":
+            return None
+        if engine_state.pyramid_level >= self._max_levels:
+            return None
+        if not engine_state.positions:
+            return None
+        daily_atr = snapshot.atr.get("daily", 0.0)
+        if daily_atr <= 0:
+            return None
+        pos = engine_state.positions[0]
+        if pos.direction == "long":
+            floating_profit = snapshot.price - pos.entry_price
+        else:
+            floating_profit = pos.entry_price - snapshot.price
+        level = engine_state.pyramid_level
+        trigger = level * self._trigger_atr * daily_atr
+        if floating_profit < trigger:
+            return None
+        lots = max(self._base_lots * (self._gamma ** level), 0.25)
+        return AddDecision(
+            lots=lots,
+            contract_type=pos.contract_type,
+            move_existing_to_breakeven=True,
+        )
 
 
 class DonchianTrendStrengthStop(StopPolicy):
     def __init__(
         self,
         indicators: _Indicators,
-        atr_sl_multi: float = 0.5,
-        atr_tp_multi: float = 1.0,
-        trail_atr_multi: float = 1.5,
-        max_hold_bars: int = 60,
+        atr_sl_multi: float = 1.5,
+        atr_tp_multi: float = 3.0,
+        trail_atr_multi: float = 2.0,
+        max_hold_bars: int = 120,
     ) -> None:
         self._ind = indicators
         self._atr_sl_multi = atr_sl_multi
@@ -408,10 +534,9 @@ class DonchianTrendStrengthStop(StopPolicy):
             daily_atr,
         )
         price = snapshot.price
-        t = snapshot.timestamp.time()
         pid = position.position_id
         self._bar_counts[pid] = self._bar_counts.get(pid, 0) + 1
-        if in_force_close(t) or self._bar_counts[pid] >= self._max_hold:
+        if self._bar_counts[pid] >= self._max_hold:
             self._bar_counts.pop(pid, None)
             return price
         entry = position.entry_price
@@ -432,17 +557,24 @@ def create_donchian_trend_strength_engine(
     max_loss: float = 500_000.0,
     lots: float = 1.0,
     contract_type: str = "large",
-    lookback_period: int = 15,
+    lookback_period: int = 20,
     adx_len: int = 14,
     adx_threshold: float = 20.0,
     rsi_len: int = 5,
     rsi_long_thresh: float = 55.0,
     rsi_short_thresh: float = 45.0,
-    atr_sl_multi: float = 0.5,
-    atr_tp_multi: float = 1.0,
-    trail_atr_multi: float = 1.5,
-    time_gate: int = 1,
-    max_hold_bars: int = 60,
+    vol_mult: float = 0.0,
+    min_channel_atr: float = 0.0,
+    atr_sl_multi: float = 1.5,
+    atr_tp_multi: float = 3.0,
+    trail_atr_multi: float = 2.0,
+    time_gate: int = 0,
+    max_hold_bars: int = 120,
+    pyramid_max_levels: int = 1,
+    pyramid_trigger_atr: float = 1.0,
+    pyramid_gamma: float = 0.5,
+    bar_agg: int = 15,
+    **kwargs,
 ) -> "PositionEngine":
     from src.core.position_engine import PositionEngine
 
@@ -451,6 +583,16 @@ def create_donchian_trend_strength_engine(
         adx_len=adx_len,
         rsi_len=rsi_len,
     )
+    if pyramid_max_levels > 1:
+        add_policy = DonchianTrendStrengthAdd(
+            indicators=indicators,
+            max_levels=pyramid_max_levels,
+            trigger_atr=pyramid_trigger_atr,
+            gamma=pyramid_gamma,
+            base_lots=lots,
+        )
+    else:
+        add_policy = NoAddPolicy()
     config = EngineConfig(max_loss=max_loss)
     return PositionEngine(
         entry_policy=DonchianTrendStrengthEntry(
@@ -460,11 +602,13 @@ def create_donchian_trend_strength_engine(
             adx_threshold=adx_threshold,
             rsi_long_thresh=rsi_long_thresh,
             rsi_short_thresh=rsi_short_thresh,
+            vol_mult=vol_mult,
+            min_channel_atr=min_channel_atr,
             atr_sl_multi=atr_sl_multi,
             atr_tp_multi=atr_tp_multi,
             time_gate=bool(time_gate),
         ),
-        add_policy=NoAddPolicy(),
+        add_policy=add_policy,
         stop_policy=DonchianTrendStrengthStop(
             indicators=indicators,
             atr_sl_multi=atr_sl_multi,
