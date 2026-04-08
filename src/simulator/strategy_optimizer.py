@@ -28,6 +28,9 @@ from src.core.adapter import BaseAdapter
 from src.core.position_engine import PositionEngine
 from src.simulator.backtester import BacktestRunner
 import multiprocessing
+import os
+import pickle
+import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from src.simulator.fill_model import FillModel, MarketImpactFillModel
 from src.simulator.types import (
@@ -45,12 +48,46 @@ _OBJECTIVE_DIRECTIONS: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Bar sharing: dump to temp file once, each worker reads it back.
+# Avoids re-pickling the full bar list per pool.submit() call.
+# ---------------------------------------------------------------------------
+
+_BAR_CACHE: dict[str, tuple[list, list, set | None]] = {}
+
+
+def _dump_bars(
+    bars: list[dict[str, Any]],
+    timestamps: list[datetime],
+    force_flat_indices: set[int] | None,
+) -> str:
+    """Write bars + timestamps to a temp file. Returns the file path."""
+    fd, path = tempfile.mkstemp(suffix=".bars.pkl")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            pickle.dump((bars, timestamps, force_flat_indices), f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        os.close(fd)
+        raise
+    return path
+
+
+def _load_bars(path: str) -> tuple[list, list, set | None]:
+    """Load bars from temp file, with per-process caching."""
+    cached = _BAR_CACHE.get(path)
+    if cached is not None:
+        return cached
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+    _BAR_CACHE[path] = data
+    return data
+
+
+# ---------------------------------------------------------------------------
 # Module-level worker (must be picklable for ProcessPoolExecutor)
 # ---------------------------------------------------------------------------
 
 def _run_single_trial(
-    bars: list[dict[str, Any]],
-    timestamps: list[datetime],
+    bars_path: str,
     factory_module: str,
     factory_name: str,
     params: dict[str, Any],
@@ -59,9 +96,10 @@ def _run_single_trial(
     adapter_kwargs: dict[str, Any],
     initial_equity: float,
     slippage: float,
-    force_flat_indices: set[int] | None = None,
 ) -> dict[str, Any]:
     """Picklable worker: reconstruct adapter + factory, run one backtest trial."""
+    bars, timestamps, force_flat_indices = _load_bars(bars_path)
+
     mod = importlib.import_module(factory_module)
     factory = getattr(mod, factory_name)
     engine = factory(**params)
@@ -85,8 +123,7 @@ def _run_single_trial(
 
 
 def _run_single_trial_callable(
-    bars: list[dict[str, Any]],
-    timestamps: list[datetime],
+    bars_path: str,
     factory_pickle: bytes,
     params: dict[str, Any],
     adapter_module: str,
@@ -94,9 +131,10 @@ def _run_single_trial_callable(
     adapter_kwargs: dict[str, Any],
     initial_equity: float,
     slippage: float,
-    force_flat_indices: set[int] | None = None,
 ) -> dict[str, Any]:
     """Picklable worker for callable factory objects (e.g. _PicklableEngineFactory)."""
+    bars, timestamps, force_flat_indices = _load_bars(bars_path)
+
     import pickle as _pickle
     factory = _pickle.loads(factory_pickle)
     engine = factory(**params)
@@ -450,10 +488,12 @@ class StrategyOptimizer:
                 for p in param_list
             ]
 
-        # Parallel path
+        # Parallel path — dump bars to temp file once, workers read it back.
+        # This avoids re-pickling the full bar list per pool.submit() call.
         a_mod = inspect.getmodule(self._adapter).__name__  # type: ignore[union-attr]
         a_cls = type(self._adapter).__name__
 
+        bars_path = _dump_bars(bars, timestamps, force_flat_indices)
         futures_map = {}
         # Use pre-initialized pool if provided; otherwise create one per-call.
         # The pre-initialized pool is forked before asyncio starts, avoiding
@@ -473,11 +513,10 @@ class StrategyOptimizer:
                 for params in param_list:
                     f = pool.submit(
                         _run_single_trial,
-                        bars, timestamps,
+                        bars_path,
                         mod_name, fn_name, params,
                         a_mod, a_cls, {},
                         self._initial_equity, self._slippage,
-                        force_flat_indices,
                     )
                     futures_map[f] = params
             else:
@@ -487,11 +526,10 @@ class StrategyOptimizer:
                 for params in param_list:
                     f = pool.submit(
                         _run_single_trial_callable,
-                        bars, timestamps,
+                        bars_path,
                         factory_pickle, params,
                         a_mod, a_cls, {},
                         self._initial_equity, self._slippage,
-                        force_flat_indices,
                     )
                     futures_map[f] = params
 
@@ -504,6 +542,11 @@ class StrategyOptimizer:
                     rows.append({**params, "_error": str(exc)})
             return rows
         finally:
+            # Clean up temp bar file
+            try:
+                os.unlink(bars_path)
+            except OSError:
+                pass
             if _owned_pool is not None:
                 _owned_pool.shutdown(wait=False)
 
