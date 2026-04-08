@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import type { AccountInfo } from "@/lib/api";
 
 interface Position {
@@ -31,52 +32,60 @@ interface TradingState {
   setActiveAccountId: (id: string | null) => void;
 }
 
-export const useTradingStore = create<TradingState>((set) => ({
-  accounts: [],
-  wsConnected: false,
-  positions: [],
-  riskAlerts: [],
-  warRoomData: null,
-  activeAccountId: null,
-  setAccounts: (accounts) => set({ accounts }),
-  setWsConnected: (wsConnected) => set({ wsConnected }),
-  setPositions: (positions) => set({ positions }),
-  addRiskAlert: (alert) => set((s) => ({ riskAlerts: [alert, ...s.riskAlerts].slice(0, 100) })),
-  setWarRoomData: (warRoomData) => {
-    set((state) => {
-      let nextActiveId = state.activeAccountId;
-      // Auto-select logic if activeAccountId is null
-      if (!nextActiveId && warRoomData && warRoomData.accounts) {
-        const accts = Object.entries(warRoomData.accounts as Record<string, any>);
-        if (accts.length > 0) {
-          // Find account with highest margin utilization
-          let highestMargin = -1;
-          let highestMarginId: string | null = null;
-          let firstConnectedId: string | null = null;
+export const useTradingStore = create<TradingState>()(
+  persist(
+    (set) => ({
+      accounts: [],
+      wsConnected: false,
+      positions: [],
+      riskAlerts: [],
+      warRoomData: null,
+      activeAccountId: null,
+      setAccounts: (accounts) => set({ accounts }),
+      setWsConnected: (wsConnected) => set({ wsConnected }),
+      setPositions: (positions) => set({ positions }),
+      addRiskAlert: (alert) => set((s) => ({ riskAlerts: [alert, ...s.riskAlerts].slice(0, 100) })),
+      setWarRoomData: (warRoomData) => {
+        set((state) => {
+          let nextActiveId = state.activeAccountId;
+          // Auto-select logic if activeAccountId is null
+          if (!nextActiveId && warRoomData && warRoomData.accounts) {
+            const accts = Object.entries(warRoomData.accounts as Record<string, any>);
+            if (accts.length > 0) {
+              // Find account with highest margin utilization
+              let highestMargin = -1;
+              let highestMarginId: string | null = null;
+              let firstConnectedId: string | null = null;
 
-          for (const [id, info] of accts) {
-            if (info.connected && !firstConnectedId) {
-              firstConnectedId = id;
-            }
-            if (info.margin_used !== undefined && info.margin_available !== undefined) {
-              const total = info.margin_used + info.margin_available;
-              if (total > 0) {
-                const util = info.margin_used / total;
-                if (util > highestMargin) {
-                  highestMargin = util;
-                  highestMarginId = id;
+              for (const [id, info] of accts) {
+                if (info.connected && !firstConnectedId) {
+                  firstConnectedId = id;
+                }
+                if (info.margin_used !== undefined && info.margin_available !== undefined) {
+                  const total = info.margin_used + info.margin_available;
+                  if (total > 0) {
+                    const util = info.margin_used / total;
+                    if (util > highestMargin) {
+                      highestMargin = util;
+                      highestMarginId = id;
+                    }
+                  }
                 }
               }
+              nextActiveId = highestMarginId ?? firstConnectedId ?? accts[0][0];
             }
           }
-          nextActiveId = highestMarginId ?? firstConnectedId ?? accts[0][0];
-        }
-      }
-      return { warRoomData, activeAccountId: nextActiveId };
-    });
-  },
-  setActiveAccountId: (activeAccountId) => set({ activeAccountId }),
-}));
+          return { warRoomData, activeAccountId: nextActiveId };
+        });
+      },
+      setActiveAccountId: (activeAccountId) => set({ activeAccountId }),
+    }),
+    {
+      name: "qe-trading-store",
+      partialize: (state) => ({ activeAccountId: state.activeAccountId }),
+    },
+  ),
+);
 
 // Selectors
 export const selectActiveSessions = (state: TradingState) => {

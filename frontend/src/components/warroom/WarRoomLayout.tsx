@@ -32,6 +32,10 @@ const TF_OPTIONS = [
   { label: "D", value: 1440 },
 ];
 
+const CHART_SYMBOLS = [
+  "TX", "MTX", "TE", "TF", "XIF", "GTF", "RHF", "GDF",
+];
+
 const POLL_MS = 15_000;
 const BAR_REFRESH_MS = 15_000;
 
@@ -54,7 +58,10 @@ export function WarRoomLayout() {
   const lastLiveTick = useStore(warRoomStore, (s) => s.lastLiveTick);
   const setBars = useStore(warRoomStore, (s) => s.setBars);
   const [tfMinutes, setTf] = useState(60);
+  const [chartSymbolOverride, setChartSymbolOverride] = useState<string | null>(null);
   const [crawling, setCrawling] = useState(false);
+  const [barError, setBarError] = useState<string | null>(null);
+  const [fallbackSymbol, setFallbackSymbol] = useState<string | null>(null);
   const crawlPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Live feed → isolated store
@@ -78,16 +85,42 @@ export function WarRoomLayout() {
     return sessions[0];
   }, [selectedSessionId, sessions]);
 
-  const chartSymbol = selectedSession?.symbol ?? "TX";
+  const chartSymbol = chartSymbolOverride ?? selectedSession?.symbol ?? "TX";
 
-  // Bar loading
-  const loadBars = useCallback((tf: number, symbol: string, afterCrawl = false) => {
+  // Bar loading — initial fetch loads ~3000 bars at the active timeframe.
+  // Periodic refresh only fetches bars after the latest cached bar (incremental).
+  const CACHE_BARS = 3000;
+  const loadBars = useCallback((tf: number, symbol: string, incremental = false) => {
     const today = new Date().toISOString().slice(0, 10);
-    const lookback = tf >= 1440 ? 365 : tf >= 60 ? 60 : 14;
-    const start = new Date(Date.now() - lookback * 86400000).toISOString().slice(0, 10);
+    const cached = warRoomStore.getState().bars;
+    let start: string;
+
+    if (incremental && cached.length > 0) {
+      // Only fetch bars newer than our latest cached bar
+      const lastTs = cached[cached.length - 1].timestamp;
+      start = lastTs.slice(0, 10);
+    } else {
+      // Full fetch: lookback ~3000 bars at given timeframe
+      const lookbackDays = Math.max(1, Math.ceil((CACHE_BARS * tf) / 1440));
+      start = new Date(Date.now() - lookbackDays * 86400000).toISOString().slice(0, 10);
+    }
+
     fetchOHLCV(symbol, start, today, tf).then((r) => {
-      setBars(r.bars);
-      if (afterCrawl || r.bars.length === 0) return;
+      setBarError(null);
+      setFallbackSymbol(r.fallback_symbol ?? null);
+      if (incremental && cached.length > 0 && r.bars.length > 0) {
+        // Merge: keep existing bars, append only truly new ones
+        const lastCachedTs = cached[cached.length - 1].timestamp;
+        const newBars = r.bars.filter((b) => b.timestamp > lastCachedTs);
+        if (newBars.length > 0) {
+          setBars([...cached, ...newBars]);
+        }
+        // No change needed if no new bars
+      } else {
+        setBars(r.bars);
+      }
+      if (incremental || r.bars.length === 0) return;
+      // Check for stale data and auto-crawl
       const lastTs = r.bars[r.bars.length - 1].timestamp;
       const lastDate = new Date(lastTs.includes("T") ? lastTs : lastTs.replace(" ", "T") + "+08:00");
       const taipeiNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Taipei" }));
@@ -103,14 +136,14 @@ export function WarRoomLayout() {
                 if (crawlPollRef.current) clearInterval(crawlPollRef.current);
                 crawlPollRef.current = null;
                 setCrawling(false);
-                loadBars(tf, symbol, true);
+                loadBars(tf, symbol, false);
               }
             }).catch(() => {});
           }, 2000);
         }).catch(() => setCrawling(false));
       }
-    }).catch(() => {});
-  }, [setBars]);
+    }).catch(() => { setBarError("Failed to load bars"); });
+  }, [setBars, warRoomStore]);
 
   useEffect(() => { return () => { if (crawlPollRef.current) clearInterval(crawlPollRef.current); }; }, []);
 
@@ -120,8 +153,8 @@ export function WarRoomLayout() {
     loadBars(tf, chartSymbol);
   };
 
-  // Load bars when symbol or timeframe changes
-  useEffect(() => { loadBars(tfMinutes, chartSymbol); }, [chartSymbol, tfMinutes, loadBars]);
+  // Full load on symbol or timeframe change; incremental refresh every 15s
+  useEffect(() => { loadBars(tfMinutes, chartSymbol, false); }, [chartSymbol, tfMinutes, loadBars]);
   useEffect(() => {
     const timer = setInterval(() => {
       if (!crawling) loadBars(tfMinutes, chartSymbol, true);
@@ -257,20 +290,47 @@ export function WarRoomLayout() {
           {activeAccountId && activeAccountData ? (
             <>
               {/* Chart — 60% of area, clipped to contain ChartStack */}
-              <div className="overflow-hidden" style={{ flex: "0 0 60%" }}>
-                <ChartStack
-                  key={`${activeAccountId}-${chartSymbol}`}
-                  bars={marketBars}
-                  activeIndicators={[]}
-                  timeframeMinutes={tfMinutes}
-                  showVolume={true}
-                  liveTick={lastLiveTick}
-                  onTimeframeChange={handleTfChange}
-                  timeframeOptions={TF_OPTIONS}
-                  expandable={true}
-                  showOverlayControls={true}
-                  headerLabel={`${chartSymbol} LIVE`}
-                />
+              <div className="overflow-hidden flex flex-col" style={{ flex: "0 0 60%" }}>
+                {/* Symbol selector bar */}
+                <div className="flex items-center gap-1.5 px-2 py-1" style={{ borderBottom: `1px solid ${colors.cardBorder}`, background: colors.card }}>
+                  <span className="text-[8px] font-semibold tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+                    CONTRACT
+                  </span>
+                  {CHART_SYMBOLS.map((sym) => (
+                    <button
+                      key={sym}
+                      onClick={() => setChartSymbolOverride(sym === (selectedSession?.symbol ?? "TX") ? null : sym)}
+                      className="px-1.5 py-0.5 rounded text-[8px] cursor-pointer border-none"
+                      style={{
+                        fontFamily: "var(--font-mono)",
+                        background: chartSymbol === sym ? "rgba(90,138,242,0.25)" : "transparent",
+                        color: chartSymbol === sym ? colors.blue : colors.dim,
+                      }}
+                    >
+                      {sym}
+                    </button>
+                  ))}
+                  {barError && (
+                    <span className="text-[8px] ml-auto" style={{ color: colors.red, fontFamily: "var(--font-mono)" }}>
+                      {barError}
+                    </span>
+                  )}
+                </div>
+                <div className="flex-1 min-h-0 overflow-hidden">
+                  <ChartStack
+                    key={`${activeAccountId}-${chartSymbol}`}
+                    bars={marketBars}
+                    activeIndicators={[]}
+                    timeframeMinutes={tfMinutes}
+                    showVolume={true}
+                    liveTick={lastLiveTick}
+                    onTimeframeChange={handleTfChange}
+                    timeframeOptions={TF_OPTIONS}
+                    expandable={true}
+                    showOverlayControls={true}
+                    headerLabel={`${chartSymbol} LIVE${fallbackSymbol ? ` (${fallbackSymbol} data)` : ""}`}
+                  />
+                </div>
               </div>
 
               {/* Positions + Equity — remaining 40% */}

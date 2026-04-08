@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 
 type BottomTab = "blotter" | "trades" | "activity";
 
@@ -15,15 +16,23 @@ interface WarRoomUiState {
   closeParamDrawer: () => void;
 }
 
-export const useWarRoomStore = create<WarRoomUiState>((set) => ({
-  bottomTab: "blotter",
-  setBottomTab: (bottomTab) => set({ bottomTab }),
-  bindingsExpanded: true,
-  toggleBindings: () => set((s) => ({ bindingsExpanded: !s.bindingsExpanded })),
-  selectedSessionId: null,
-  setSelectedSessionId: (selectedSessionId) => set({ selectedSessionId }),
-  paramDrawerOpen: false,
-  paramDrawerStrategy: null,
-  openParamDrawer: (strategy) => set({ paramDrawerOpen: true, paramDrawerStrategy: strategy }),
-  closeParamDrawer: () => set({ paramDrawerOpen: false, paramDrawerStrategy: null }),
-}));
+export const useWarRoomStore = create<WarRoomUiState>()(
+  persist(
+    (set) => ({
+      bottomTab: "blotter",
+      setBottomTab: (bottomTab) => set({ bottomTab }),
+      bindingsExpanded: true,
+      toggleBindings: () => set((s) => ({ bindingsExpanded: !s.bindingsExpanded })),
+      selectedSessionId: null,
+      setSelectedSessionId: (selectedSessionId) => set({ selectedSessionId }),
+      paramDrawerOpen: false,
+      paramDrawerStrategy: null,
+      openParamDrawer: (strategy) => set({ paramDrawerOpen: true, paramDrawerStrategy: strategy }),
+      closeParamDrawer: () => set({ paramDrawerOpen: false, paramDrawerStrategy: null }),
+    }),
+    {
+      name: "qe-warroom-store",
+      partialize: (state) => ({ selectedSessionId: state.selectedSessionId }),
+    },
+  ),
+);

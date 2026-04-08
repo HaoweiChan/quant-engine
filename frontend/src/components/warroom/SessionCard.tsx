@@ -14,23 +14,36 @@ export function SessionCard({ session, onAction }: SessionCardProps) {
   const setSelectedSessionId = useWarRoomStore((s) => s.setSelectedSessionId);
   const openParamDrawer = useWarRoomStore((s) => s.openParamDrawer);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const isSelected = selectedSessionId === session.session_id;
   const isRunning = session.status === "active" || session.status === "paused";
+  const isStuck = session.status === "halted" || session.status === "flattening";
   const snap = session.snapshot;
 
   const statusColor = session.status === "active" ? colors.green
     : session.status === "paused" ? colors.gold
+    : isStuck ? colors.orange
     : colors.dim;
-  const statusIcon = session.status === "active" || session.status === "paused" ? "●" : "○";
+  const statusIcon = isRunning ? "●" : isStuck ? "▲" : "○";
 
   const handleToggle = async (e: React.MouseEvent) => {
     e.stopPropagation();
     setLoading(true);
+    setError(null);
     try {
-      if (isRunning) await stopSession(session.session_id);
-      else await startSession(session.session_id);
+      if (isRunning) {
+        await stopSession(session.session_id);
+      } else if (isStuck) {
+        // Recover: stop first, then start
+        await stopSession(session.session_id);
+        await startSession(session.session_id);
+      } else {
+        await startSession(session.session_id);
+      }
       onAction();
-    } catch { /* silently fail */ }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Action failed");
+    }
     setLoading(false);
   };
 
@@ -82,20 +95,27 @@ export function SessionCard({ session, onAction }: SessionCardProps) {
         </div>
       )}
 
+      {/* Error feedback */}
+      {error && (
+        <div className="text-[7px] px-1.5 py-0.5 rounded mb-1" style={{ background: "rgba(255,82,82,0.12)", color: colors.red, fontFamily: "var(--font-mono)" }}>
+          {error}
+        </div>
+      )}
+
       {/* Action buttons */}
       <div className="flex gap-1.5">
         <button
           onClick={handleToggle}
-          disabled={loading || (!isRunning && !session.deployed_candidate_id)}
+          disabled={loading}
           className="flex-1 text-[7px] font-semibold py-1 rounded text-white cursor-pointer border-none"
           style={{
-            background: isRunning ? colors.red : (session.deployed_candidate_id ? colors.green : colors.dim),
+            background: isRunning ? colors.red : isStuck ? colors.orange : colors.green,
             letterSpacing: "0.5px",
             opacity: loading ? 0.6 : 1,
           }}
-          title={!isRunning && !session.deployed_candidate_id ? "Deploy params first" : ""}
+          title={isStuck ? "Click to recover" : ""}
         >
-          {loading ? "..." : isRunning ? "STOP" : "START"}
+          {loading ? "..." : isRunning ? "STOP" : isStuck ? "RECOVER" : "START"}
         </button>
         <button
           onClick={handleParams}
