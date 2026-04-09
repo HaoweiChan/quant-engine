@@ -1,15 +1,17 @@
 import { useState } from "react";
 import { colors } from "@/lib/theme";
-import { startSession, stopSession } from "@/lib/api";
+import { startSession, stopSession, updateAccountStrategies } from "@/lib/api";
 import { useWarRoomStore } from "@/stores/warRoomStore";
 import type { WarRoomSession } from "@/lib/api";
 
 interface SessionCardProps {
   session: WarRoomSession;
+  allBindings?: { slug: string; symbol: string }[];
+  accountId?: string;
   onAction: () => void;
 }
 
-export function SessionCard({ session, onAction }: SessionCardProps) {
+export function SessionCard({ session, allBindings, accountId, onAction }: SessionCardProps) {
   const selectedSessionId = useWarRoomStore((s) => s.selectedSessionId);
   const setSelectedSessionId = useWarRoomStore((s) => s.setSelectedSessionId);
   const openParamDrawer = useWarRoomStore((s) => s.openParamDrawer);
@@ -52,6 +54,25 @@ export function SessionCard({ session, onAction }: SessionCardProps) {
     openParamDrawer(session.strategy_slug);
   };
 
+  const handleRemove = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!accountId || !allBindings) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const updated = allBindings.filter(
+        (b) => !(b.slug === session.strategy_slug && b.symbol === session.symbol),
+      );
+      await updateAccountStrategies(accountId, updated);
+      onAction();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Remove failed");
+    }
+    setLoading(false);
+  };
+
+  const hasParams = session.deployed_candidate_id != null;
+
   return (
     <div
       onClick={() => setSelectedSessionId(session.session_id)}
@@ -73,11 +94,24 @@ export function SessionCard({ session, onAction }: SessionCardProps) {
             &middot; {session.symbol}
           </span>
         </div>
-        {session.is_stale && (
-          <span className="text-[7px] px-1 py-0.5 rounded" style={{ background: "rgba(255,165,0,0.12)", color: colors.orange, fontFamily: "var(--font-mono)" }}>
-            NEW
-          </span>
-        )}
+        <div className="flex items-center gap-1">
+          {session.is_stale && (
+            <span className="text-[7px] px-1 py-0.5 rounded" style={{ background: "rgba(255,165,0,0.12)", color: colors.orange, fontFamily: "var(--font-mono)" }}>
+              NEW
+            </span>
+          )}
+          {accountId && allBindings && (
+            <button
+              onClick={handleRemove}
+              disabled={loading}
+              className="cursor-pointer border-none bg-transparent text-[10px] leading-none px-0.5"
+              style={{ color: colors.dim }}
+              title="Remove strategy"
+            >
+              ×
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Metrics line */}
@@ -121,13 +155,14 @@ export function SessionCard({ session, onAction }: SessionCardProps) {
           onClick={handleParams}
           className="flex-1 text-[7px] font-semibold py-1 rounded cursor-pointer border-none"
           style={{
-            background: "rgba(90,138,242,0.1)",
-            color: colors.blue,
+            background: hasParams ? "rgba(90,138,242,0.25)" : "rgba(90,138,242,0.1)",
+            color: hasParams ? "#fff" : colors.blue,
             letterSpacing: "0.5px",
             fontFamily: "var(--font-mono)",
+            border: hasParams ? `1px solid ${colors.blue}` : "none",
           }}
         >
-          PARAMS
+          PARAMS {hasParams && "✓"}
         </button>
       </div>
     </div>

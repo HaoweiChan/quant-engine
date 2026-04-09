@@ -108,15 +108,18 @@ export function WarRoomLayout() {
     fetchOHLCV(symbol, start, today, tf).then((r) => {
       setBarError(null);
       setFallbackSymbol(r.fallback_symbol ?? null);
-      if (incremental && cached.length > 0 && r.bars.length > 0) {
-        // Merge: keep existing bars, append only truly new ones
-        const lastCachedTs = cached[cached.length - 1].timestamp;
-        const newBars = r.bars.filter((b) => b.timestamp > lastCachedTs);
-        if (newBars.length > 0) {
-          setBars([...cached, ...newBars]);
+      if (incremental && cached.length > 0) {
+        // Incremental refresh: only append strictly-newer bars, never replace cached data
+        if (r.bars.length > 0) {
+          const lastCachedTs = cached[cached.length - 1].timestamp;
+          const newBars = r.bars.filter((b) => b.timestamp > lastCachedTs);
+          if (newBars.length > 0) {
+            setBars([...cached, ...newBars]);
+          }
         }
-        // No change needed if no new bars
+        // Otherwise keep cached bars untouched
       } else {
+        // Full load (initial or timeframe/symbol change)
         setBars(r.bars);
       }
       if (incremental || r.bars.length === 0) return;
@@ -259,22 +262,25 @@ export function WarRoomLayout() {
       <div className="flex flex-1 min-h-0">
         {/* LEFT PANEL */}
         <div className="flex flex-col shrink-0" style={{ width: 300, borderRight: `1px solid ${colors.cardBorder}`, background: colors.sidebar }}>
-          {/* Session Grid */}
-          <div className="flex-1 min-h-0 overflow-y-auto">
-            <div className="text-[8px] font-semibold tracking-wider px-3 pt-2 pb-1" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+          {/* Session header + add binding */}
+          <div className="px-2 pt-2 pb-1">
+            <div className="text-[8px] font-semibold tracking-wider px-1 mb-1.5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
               SESSIONS
             </div>
-            <SessionGrid sessions={sessions} onAction={poll} />
+            {activeAccountId && (
+              <StrategyBindings
+                accountId={activeAccountId}
+                bindings={accountBindings}
+                onUpdate={poll}
+                compact
+              />
+            )}
           </div>
 
-          {/* Strategy Bindings */}
-          {activeAccountId && (
-            <StrategyBindings
-              accountId={activeAccountId}
-              bindings={accountBindings}
-              onUpdate={poll}
-            />
-          )}
+          {/* Session Grid */}
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <SessionGrid sessions={sessions} bindings={accountBindings} accountId={activeAccountId ?? undefined} onAction={poll} />
+          </div>
 
           {/* Risk Guards */}
           <div style={{ borderTop: `1px solid ${colors.cardBorder}` }} className="p-2">
