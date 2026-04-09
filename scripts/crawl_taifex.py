@@ -22,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = PROJECT_ROOT / "data" / "taifex_data.db"
+DB_PATH = PROJECT_ROOT / "data" / "market.db"
 
 SYMBOLS = ["Futures.TXF.TXFR1", "Futures.MXF.MXFR1"]
 SYMBOL_SHORT = {"Futures.TXF.TXFR1": "TX", "Futures.MXF.MXFR1": "MTX"}

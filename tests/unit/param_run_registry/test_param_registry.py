@@ -1031,3 +1031,160 @@ class TestHashMetadataInQueries:
         history = registry.get_run_history("test_strat")
         assert len(history) >= 1
         assert history[0]["strategy_hash"] == "xyz789"
+
+
+class TestResultCacheMigration:
+    def test_result_json_column_exists(self, registry: ParamRegistry) -> None:
+        cols = [
+            r[1] for r in registry._conn.execute("PRAGMA table_info(param_runs)").fetchall()
+        ]
+        assert "result_json" in cols
+
+
+class TestGetCachedResult:
+    def test_returns_none_when_no_match(self, registry: ParamRegistry) -> None:
+        result = registry.get_cached_result(
+            strategy_hash="abc123",
+            symbol="TX",
+            start="2025-01-01",
+            end="2025-06-01",
+            notes="p=deadbeef; tf=5min|intraday",
+        )
+        assert result is None
+
+    def test_returns_none_when_result_json_is_null(self, registry: ParamRegistry) -> None:
+        """A run saved before caching was added has no result_json."""
+        registry.save_backtest_run(
+            strategy="atr_mean_reversion",
+            symbol="TX",
+            params={"kc_len": 20},
+            metrics={"sharpe": 1.2, "trade_count": 50},
+            source="test",
+            start="2025-01-01",
+            end="2025-06-01",
+            timeframe="5min|intraday",
+            notes="p=deadbeef",
+            strategy_hash="abc123",
+        )
+        result = registry.get_cached_result(
+            strategy_hash="abc123",
+            symbol="TX",
+            start="2025-01-01",
+            end="2025-06-01",
+            notes="p=deadbeef; tf=5min|intraday",
+        )
+        assert result is None
+
+    def test_returns_cached_result_when_present(self, registry: ParamRegistry) -> None:
+        cached_payload = {"equity_curve": [2000000, 2100000], "metrics": {"sharpe": 1.5}}
+        registry.save_backtest_run(
+            strategy="atr_mean_reversion",
+            symbol="TX",
+            params={"kc_len": 20},
+            metrics={"sharpe": 1.5, "trade_count": 50},
+            source="test",
+            start="2025-01-01",
+            end="2025-06-01",
+            timeframe="5min|intraday",
+            notes="p=deadbeef",
+            strategy_hash="abc123",
+            result_json=json.dumps(cached_payload),
+        )
+        result = registry.get_cached_result(
+            strategy_hash="abc123",
+            symbol="TX",
+            start="2025-01-01",
+            end="2025-06-01",
+            notes="p=deadbeef; tf=5min|intraday",
+        )
+        assert result is not None
+        assert result["equity_curve"] == [2000000, 2100000]
+        assert result["metrics"]["sharpe"] == 1.5
+
+    def test_cache_miss_on_different_hash(self, registry: ParamRegistry) -> None:
+        cached_payload = {"equity_curve": [2000000, 2100000]}
+        registry.save_backtest_run(
+            strategy="atr_mean_reversion",
+            symbol="TX",
+            params={"kc_len": 20},
+            metrics={"sharpe": 1.5, "trade_count": 50},
+            source="test",
+            start="2025-01-01",
+            end="2025-06-01",
+            timeframe="5min|intraday",
+            notes="p=deadbeef",
+            strategy_hash="abc123",
+            result_json=json.dumps(cached_payload),
+        )
+        result = registry.get_cached_result(
+            strategy_hash="different_hash",
+            symbol="TX",
+            start="2025-01-01",
+            end="2025-06-01",
+            notes="p=deadbeef; tf=5min|intraday",
+        )
+        assert result is None
+
+    def test_returns_none_when_strategy_hash_is_none(self, registry: ParamRegistry) -> None:
+        result = registry.get_cached_result(
+            strategy_hash=None,
+            symbol="TX",
+            start="2025-01-01",
+            end="2025-06-01",
+            notes="p=deadbeef; tf=5min|intraday",
+        )
+        assert result is None
+
+
+class TestResultCacheBackfill:
+    def test_backfill_result_json_on_dedup_hit(self, registry: ParamRegistry) -> None:
+        """When a dedup match exists with NULL result_json, backfill it."""
+        run_id = registry.save_backtest_run(
+            strategy="atr_mean_reversion",
+            symbol="TX",
+            params={"kc_len": 20},
+            metrics={"sharpe": 1.5, "trade_count": 50},
+            source="test",
+            start="2025-01-01",
+            end="2025-06-01",
+            timeframe="5min|intraday",
+            notes="p=deadbeef",
+            strategy_hash="abc123",
+        )
+        # First save has no result_json
+        row = registry._conn.execute(
+            "SELECT result_json FROM param_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        assert row["result_json"] is None
+
+        # Second save with same key triggers dedup, but backfills result_json
+        payload = json.dumps({"equity_curve": [2000000, 2100000]})
+        dedup_id = registry.save_backtest_run(
+            strategy="atr_mean_reversion",
+            symbol="TX",
+            params={"kc_len": 20},
+            metrics={"sharpe": 1.5, "trade_count": 50},
+            source="test",
+            start="2025-01-01",
+            end="2025-06-01",
+            timeframe="5min|intraday",
+            notes="p=deadbeef",
+            strategy_hash="abc123",
+            result_json=payload,
+        )
+        assert dedup_id == run_id  # same run
+        row = registry._conn.execute(
+            "SELECT result_json FROM param_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        assert row["result_json"] == payload
+
+        # Now get_cached_result should find it
+        cached = registry.get_cached_result(
+            strategy_hash="abc123",
+            symbol="TX",
+            start="2025-01-01",
+            end="2025-06-01",
+            notes="p=deadbeef; tf=5min|intraday",
+        )
+        assert cached is not None
+        assert cached["equity_curve"] == [2000000, 2100000]

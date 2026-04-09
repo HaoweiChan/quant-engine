@@ -112,8 +112,6 @@ export function StrategyParamSidebar() {
   const locked = useStrategyStore((s) => s.locked);
   const backtestLoading = useBacktestStore((s) => s.loading);
   const disabled = storeLoading || backtestLoading || locked;
-  const currentStrat = strategies.find((s) => s.slug === strategy);
-
   useEffect(() => {
     if (strategies.length === 0) loadStrategies();
   }, []);

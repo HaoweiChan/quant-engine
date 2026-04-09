@@ -22,6 +22,9 @@ export function useLiveFeed(
       retryRef.current = 0;
       setWsConnected(true);
     };
+    ws.onerror = () => {
+      ws.close();
+    };
     ws.onclose = () => {
       setWsConnected(false);
       if (!shouldReconnectRef.current) return;

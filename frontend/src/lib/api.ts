@@ -121,7 +121,7 @@ export async function fetchOHLCV(
   start: string,
   end: string,
   tfMinutes: number,
-): Promise<{ bars: OHLCVBar[]; count: number }> {
+): Promise<{ bars: OHLCVBar[]; count: number; fallback_symbol?: string }> {
   const params = new URLSearchParams({
     symbol,
     start,
@@ -394,7 +394,7 @@ export interface WarRoomSession {
   account_id: string;
   strategy_slug: string;
   symbol: string;
-  status: "active" | "paused" | "stopped";
+  status: "active" | "paused" | "stopped" | "halted" | "flattening";
   deployed_candidate_id: number | null;
   deployed_params: Record<string, number> | null;
   backtest_metrics: Record<string, number> | null;

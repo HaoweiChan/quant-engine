@@ -138,6 +138,7 @@ class ParamRegistry:
         self._migrate_add_code_hash()
         self._migrate_add_alpha()
         self._migrate_add_governance_columns()
+        self._migrate_add_result_cache()
 
     def _migrate_add_governance_columns(self) -> None:
         cols = [r[1] for r in self._conn.execute("PRAGMA table_info(param_runs)").fetchall()]
@@ -162,6 +163,13 @@ class ParamRegistry:
                 "ALTER TABLE param_runs ADD COLUMN promotable INTEGER NOT NULL DEFAULT 0"
             )
         self._conn.commit()
+
+    def _migrate_add_result_cache(self) -> None:
+        """Add result_json column to param_runs for caching full backtest results."""
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(param_runs)").fetchall()]
+        if "result_json" not in cols:
+            self._conn.execute("ALTER TABLE param_runs ADD COLUMN result_json TEXT")
+            self._conn.commit()
 
     def _migrate_add_code_hash(self) -> None:
         """Add strategy_hash and strategy_code columns if missing (idempotent)."""
@@ -246,12 +254,14 @@ class ParamRegistry:
         strategy_hash: str | None = None,
         strategy_code: str | None = None,
         objective: str = "sortino",
+        result_json: str | None = None,
     ) -> int:
         """Persist a single backtest result (not a full sweep). Returns run_id or -1 on error.
 
         Deduplicates by (strategy_hash, symbol, train_start, train_end, notes).
         Notes include timeframe AND cost info, so different costs = different runs.
         Returns existing run_id if a matching run already exists.
+        If result_json is provided and the existing row has no cached result, backfills it.
         """
         self._validate_strategy_slug(strategy)
         try:
@@ -260,22 +270,28 @@ class ParamRegistry:
             combined_notes = "; ".join(filter(None, [notes, tf_notes]))
             if strategy_hash and start and end and timeframe:
                 existing = self._conn.execute(
-                    """SELECT r.id FROM param_runs r
+                    """SELECT r.id, r.result_json FROM param_runs r
                        WHERE r.strategy_hash = ? AND r.symbol = ?
                          AND r.train_start = ? AND r.train_end = ?
                          AND r.notes = ?""",
                     (strategy_hash, symbol, start, end, combined_notes or None),
                 ).fetchone()
                 if existing:
-                    return existing[0]
+                    if result_json and not existing["result_json"]:
+                        self._conn.execute(
+                            "UPDATE param_runs SET result_json = ? WHERE id = ?",
+                            (result_json, existing["id"]),
+                        )
+                        self._conn.commit()
+                    return existing["id"]
             now = datetime.now(_TAIPEI_TZ).isoformat(timespec="seconds")
             run_tag = tag or f"tool:{tool}"
             cur = self._conn.execute(
                 """INSERT INTO param_runs
                    (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
                     objective, is_fraction, n_trials, search_type, source, tag, notes,
-                    initial_capital, strategy_hash, strategy_code)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'single', ?, ?, ?, ?, ?, ?)""",
+                    initial_capital, strategy_hash, strategy_code, result_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'single', ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     now,
                     strategy,
@@ -292,6 +308,7 @@ class ParamRegistry:
                     initial_capital,
                     strategy_hash,
                     strategy_code,
+                    result_json,
                 ),
             )
             run_id = cur.lastrowid
@@ -327,6 +344,32 @@ class ParamRegistry:
         except Exception:
             logger.exception("save_backtest_run_failed", strategy=strategy, symbol=symbol)
             return -1
+
+    def get_cached_result(
+        self,
+        strategy_hash: str | None,
+        symbol: str,
+        start: str,
+        end: str,
+        notes: str | None,
+    ) -> dict[str, Any] | None:
+        """Return cached backtest result dict if found, else None."""
+        if not strategy_hash:
+            return None
+        row = self._conn.execute(
+            """SELECT result_json FROM param_runs
+               WHERE strategy_hash = ? AND symbol = ?
+                 AND train_start = ? AND train_end = ?
+                 AND notes = ?
+                 AND result_json IS NOT NULL""",
+            (strategy_hash, symbol, start, end, notes or None),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["result_json"])
+        except (json.JSONDecodeError, TypeError):
+            return None
 
     # -- save_run ---------------------------------------------------------
 

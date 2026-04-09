@@ -90,3 +90,4 @@ node_modules/
 # Playwright CLI session artifacts
 .playwright-cli/
 frontend/.playwright-cli/
+.playwright-mcp/

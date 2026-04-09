@@ -50,6 +50,8 @@ _VALID_TRANSITIONS: dict[str, set[str]] = {
     "stopped": {"active"},
     "active": {"paused", "stopped"},
     "paused": {"active", "stopped"},
+    "halted": {"stopped"},
+    "flattening": {"stopped"},
 }
 
 

@@ -504,7 +504,7 @@ def run_backtest_realdata_for_mcp(
 
     import numpy as np
 
-    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "taifex_data.db"
+    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "market.db"
     if not db_path.exists():
         return {"error": f"Database not found at {db_path}"}
 
@@ -529,6 +529,36 @@ def run_backtest_realdata_for_mcp(
     from src.strategies.registry import get_bar_agg
     meta_bar_agg = get_bar_agg(resolved_slug)
     bar_agg = int((strategy_params or {}).get("bar_agg", meta_bar_agg))
+
+    # -- Cache key computation (must happen before runner) --
+    strategy_hash, strategy_code = _compute_code_hash(resolved_slug)
+    _sp = strategy_params or {}
+    _slip_bps = _sp.get("slippage_bps", 0)
+    _comm_fixed = _sp.get("commission_fixed_per_contract", 0)
+    _cost_note = f"sbps={_slip_bps}|cfix={_comm_fixed}" if (_slip_bps or _comm_fixed) else None
+    import hashlib, json as _json
+    _p_str = _json.dumps(_sp, sort_keys=True)
+    _p_hash = hashlib.md5(_p_str.encode()).hexdigest()[:8]
+    _cost_note = f"p={_p_hash}" + (f"|{_cost_note}" if _cost_note else "")
+    _timeframe_str = f"{bar_agg}min{'|intraday' if intraday else ''}"
+    _tf_notes = f"tf={_timeframe_str}"
+    _combined_notes = "; ".join(filter(None, [_cost_note, _tf_notes]))
+
+    # -- Cache lookup (before loading bars to avoid wasted I/O on cache hit) --
+    if strategy_hash:
+        from src.strategies.param_registry import ParamRegistry
+        _cache_reg = ParamRegistry()
+        cached = _cache_reg.get_cached_result(
+            strategy_hash=strategy_hash,
+            symbol=symbol,
+            start=start,
+            end=end,
+            notes=_combined_notes,
+        )
+        _cache_reg.close()
+        if cached is not None:
+            cached["cache_hit"] = True
+            return cached
 
     # Load bars — use pre-aggregated table when available (5m, 1h),
     # fall back to 1m + Python aggregation for other timeframes.
@@ -690,7 +720,6 @@ def run_backtest_realdata_for_mcp(
     base["equity_timestamps"] = ts_epochs
     base["param_warnings"] = param_warnings
     base["intraday"] = intraday
-    strategy_hash, strategy_code = _compute_code_hash(resolved_slug)
     if strategy_hash is not None:
         base["strategy_hash"] = strategy_hash
     try:
@@ -698,16 +727,21 @@ def run_backtest_realdata_for_mcp(
 
         registry = ParamRegistry()
         save_metrics = {**base.get("metrics", {}), "total_pnl": base.get("total_pnl"), "alpha": alpha}
-        # Build notes with cost setup and params fingerprint for dedup
-        _sp = strategy_params or {}
-        _slip_bps = _sp.get("slippage_bps", 0)
-        _comm_fixed = _sp.get("commission_fixed_per_contract", 0)
-        cost_note = f"sbps={_slip_bps}|cfix={_comm_fixed}" if (_slip_bps or _comm_fixed) else None
-        # Include a short hash of params so different params = different runs
-        import hashlib, json as _json
-        _p_str = _json.dumps(_sp, sort_keys=True)
-        _p_hash = hashlib.md5(_p_str.encode()).hexdigest()[:8]
-        cost_note = f"p={_p_hash}" + (f"|{cost_note}" if cost_note else "")
+        # Serialize result for cache — convert numpy arrays to lists
+        _cache_base = dict(base)
+        for _k in ("daily_returns", "bnh_returns"):
+            if _k in _cache_base and hasattr(_cache_base[_k], "tolist"):
+                _cache_base[_k] = _cache_base[_k].tolist()
+        import json as _json
+
+        def _np_default(obj):
+            if hasattr(obj, "item"):
+                return obj.item()
+            if hasattr(obj, "tolist"):
+                return obj.tolist()
+            return str(obj)
+
+        _result_json_str = _json.dumps(_cache_base, default=_np_default)
         run_id = registry.save_backtest_run(
             strategy=resolved_slug,
             symbol=symbol,
@@ -717,11 +751,12 @@ def run_backtest_realdata_for_mcp(
             tool="run_backtest_realdata",
             start=start,
             end=end,
-            timeframe=f"{bar_agg}min{'|intraday' if intraday else ''}",
-            notes=cost_note,
+            timeframe=_timeframe_str,
+            notes=_cost_note,
             initial_capital=initial_equity,
             strategy_hash=strategy_hash,
             strategy_code=strategy_code,
+            result_json=_result_json_str,
         )
         registry.close()
         if run_id > 0:
@@ -1161,7 +1196,7 @@ def run_sweep_for_mcp(
                     "for real-data evaluation"
                 )
             }
-        db_path = Path(__file__).resolve().parent.parent.parent / "data" / "taifex_data.db"
+        db_path = Path(__file__).resolve().parent.parent.parent / "data" / "market.db"
         if not db_path.exists():
             return {"error": f"Database not found at {db_path}"}
         db = Database(f"sqlite:///{db_path}")
@@ -1659,7 +1694,7 @@ def run_walk_forward_for_mcp(
             "error": "Walk-forward requires symbol, start, and end for real-data evaluation"
         }
 
-    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "taifex_data.db"
+    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "market.db"
     if not db_path.exists():
         return {"error": f"Database not found at {db_path}"}
 
