@@ -251,8 +251,34 @@ def _bars_from_path(
     return _path_to_bars(path, config)
 
 
+def _load_bars_for_tf(db, symbol: str, start, end, bar_agg: int):
+    """Load bars at the right timeframe, using pre-aggregated tables when available.
+
+    Routing:
+      bar_agg=1  → ohlcv_bars (raw 1m)
+      bar_agg=5  → ohlcv_5m (pre-aggregated, session-correct)
+      bar_agg=60 → ohlcv_1h (pre-aggregated, session-correct)
+      other      → load 1m + _aggregate_bars() fallback
+    """
+    if bar_agg in (5, 60):
+        raw = db.get_ohlcv_tf(symbol, start, end, minutes=bar_agg)
+        if raw:
+            return raw
+        # Table empty — fall through to 1m + aggregation
+
+    raw = db.get_ohlcv(symbol, start, end)
+    if bar_agg <= 1 or not raw:
+        return raw
+    return _aggregate_bars(raw, bar_agg)
+
+
 def _aggregate_bars(raw, bar_agg: int):
-    """Aggregate 1-min OHLCVBar objects into N-min bars."""
+    """Aggregate 1-min OHLCVBar objects into N-min bars (fallback).
+
+    Prefer pre-aggregated tables via _load_bars_for_tf() when available.
+    This function does NOT respect session boundaries — it uses simple
+    epoch bucketing. Only used when pre-aggregated tables are empty.
+    """
     from src.data.db import OHLCVBar
 
     if bar_agg <= 1 or not raw:
@@ -487,10 +513,6 @@ def run_backtest_realdata_for_mcp(
     db = Database(f"sqlite:///{db_path}")
     start_dt = datetime.fromisoformat(start)
     end_dt = datetime.fromisoformat(end)
-    raw = db.get_ohlcv(symbol, start_dt, end_dt)
-    if not raw:
-        return {"error": f"No data for {symbol} in {start}–{end}"}
-
     resolved_slug = resolve_strategy_slug(strategy)
 
     # Auto-detect intraday mode from strategy metadata (slug prefix or StrategyTimeframe)
@@ -522,7 +544,7 @@ def run_backtest_realdata_for_mcp(
     _tf_notes = f"tf={_timeframe_str}"
     _combined_notes = "; ".join(filter(None, [_cost_note, _tf_notes]))
 
-    # -- Cache lookup --
+    # -- Cache lookup (before loading bars to avoid wasted I/O on cache hit) --
     if strategy_hash:
         from src.strategies.param_registry import ParamRegistry
         _cache_reg = ParamRegistry()
@@ -538,7 +560,13 @@ def run_backtest_realdata_for_mcp(
             cached["cache_hit"] = True
             return cached
 
-    # Compute true daily ATR from daily high-low ranges, not 1-min bar ranges
+    # Load bars — use pre-aggregated table when available (5m, 1h),
+    # fall back to 1m + Python aggregation for other timeframes.
+    raw = _load_bars_for_tf(db, symbol, start_dt, end_dt, bar_agg)
+    if not raw:
+        return {"error": f"No data for {symbol} in {start}–{end}"}
+
+    # Compute true daily ATR from bar high-low ranges
     _daily_hl: dict[str, tuple[float, float]] = {}
     for b in raw:
         d = b.timestamp.date() if hasattr(b.timestamp, "date") else str(b.timestamp)[:10]
@@ -549,10 +577,6 @@ def run_backtest_realdata_for_mcp(
             _daily_hl[d] = (max(prev[0], b.high), min(prev[1], b.low))
     daily_ranges = [hi - lo for hi, lo in _daily_hl.values() if hi > lo]
     daily_atr = _mean(daily_ranges) if daily_ranges else _mean(b.high - b.low for b in raw)
-
-    # Aggregate 1-min bars into N-min bars when bar_agg > 1
-    if bar_agg > 1:
-        raw = _aggregate_bars(raw, bar_agg)
 
     trading_days = len(_daily_hl)
     bars_per_day = len(raw) / max(trading_days, 1)
@@ -1176,11 +1200,15 @@ def run_sweep_for_mcp(
         if not db_path.exists():
             return {"error": f"Database not found at {db_path}"}
         db = Database(f"sqlite:///{db_path}")
-        raw = db.get_ohlcv(symbol, datetime.fromisoformat(start), datetime.fromisoformat(end))
+        # Load bars — use pre-aggregated table when available
+        raw = _load_bars_for_tf(
+            db, symbol,
+            datetime.fromisoformat(start), datetime.fromisoformat(end),
+            sweep_bar_agg,
+        )
         if not raw:
             return {"error": f"No data for {symbol} in {start}–{end}"}
-        # Compute true daily ATR from daily high-low ranges (matching
-        # run_backtest_realdata), NOT per-bar ranges.
+        # Compute true daily ATR from bar high-low ranges
         _daily_hl_sweep: dict[str, tuple[float, float]] = {}
         for b in raw:
             d = b.timestamp.date() if hasattr(b.timestamp, "date") else str(b.timestamp)[:10]
@@ -1205,22 +1233,6 @@ def run_sweep_for_mcp(
             }
             for b in raw
         ]
-        if sweep_bar_agg > 1:
-            raw = _aggregate_bars(raw, sweep_bar_agg)
-            bars = [
-                {
-                    "symbol": symbol,
-                    "price": b.close,
-                    "open": b.open,
-                    "high": b.high,
-                    "low": b.low,
-                    "close": b.close,
-                    "volume": float(b.volume),
-                    "daily_atr": daily_atr,
-                    "timestamp": b.timestamp,
-                }
-                for b in raw
-            ]
         timestamps = [b.timestamp for b in raw]
         source_label = f"real:{symbol}:{start}:{end}"
     else:
@@ -1691,19 +1703,18 @@ def run_walk_forward_for_mcp(
     db = Database(f"sqlite:///{db_path}")
     start_dt = _dt.fromisoformat(start)
     end_dt = _dt.fromisoformat(end)
-    raw = db.get_ohlcv(symbol, start_dt, end_dt)
-    if not raw:
-        return {"error": f"No data for {symbol} in {start}–{end}"}
-
     from src.strategies.registry import get_bar_agg
     meta_bar_agg = get_bar_agg(resolved_slug)
     bar_agg = int((strategy_params or {}).get("bar_agg", meta_bar_agg))
-    if bar_agg > 1:
-        raw = _aggregate_bars(raw, bar_agg)
+
+    # Load bars — use pre-aggregated table when available
+    raw = _load_bars_for_tf(db, symbol, start_dt, end_dt, bar_agg)
+    if not raw:
+        return {"error": f"No data for {symbol} in {start}–{end}"}
 
     from statistics import mean as _mean
 
-    # Compute true daily ATR from daily high-low ranges (matching
+    # Compute true daily ATR from bar high-low ranges (matching
     # run_backtest_realdata), NOT per-bar ranges which are ~6-8x smaller
     # for intraday bars and produce impossibly tight stops.
     _daily_hl: dict[str, tuple[float, float]] = {}
