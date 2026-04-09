@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { colors } from "@/lib/theme";
 import { useWarRoomStore } from "@/stores/warRoomStore";
-import { fetchParamRuns, compareRuns, activateCandidate, deleteParamRun, deployToAccount } from "@/lib/api";
+import { fetchParamRuns, activateCandidate, deleteParamRun, deployToAccount } from "@/lib/api";
 import type { ParamRun, WarRoomSession } from "@/lib/api";
 
 interface ParamCompareDrawerProps {
@@ -17,8 +17,6 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
   const [runs, setRuns] = useState<ParamRun[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
-  const [comparison, setComparison] = useState<Record<string, unknown>[] | null>(null);
-  const [comparing, setComparing] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState("");
 
@@ -50,18 +48,13 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
       if (prev.length >= 3) return prev;
       return [...prev, runId];
     });
-    setComparison(null);
   };
 
-  const handleCompare = async () => {
-    if (selectedIds.length < 2) return;
-    setComparing(true);
-    try {
-      const result = await compareRuns(selectedIds);
-      setComparison(result);
-    } catch { setError("Compare failed"); }
-    setComparing(false);
-  };
+  // Build comparison from already-loaded runs (no extra API call)
+  const selectedRuns = useMemo(
+    () => selectedIds.map((id) => runs.find((r) => r.run_id === id)).filter(Boolean) as ParamRun[],
+    [selectedIds, runs],
+  );
 
   const handleActivate = async (candidateId: number) => {
     setActionLoading(`activate-${candidateId}`);
@@ -100,7 +93,6 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
     try {
       await deleteParamRun(runId);
       setSelectedIds((prev) => prev.filter((id) => id !== runId));
-      setComparison(null);
       loadRuns();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed");
@@ -150,21 +142,77 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
           </div>
         )}
 
+        {/* Comparison — pinned above the run list so it's always visible */}
+        {selectedRuns.length >= 2 && (
+          <div className="px-4 py-3 border-b" style={{ borderColor: colors.cardBorder, background: colors.card }}>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[9px] font-semibold tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+                COMPARISON ({selectedRuns.length})
+              </span>
+              <button
+                onClick={() => setSelectedIds([])}
+                className="text-[8px] cursor-pointer border-none bg-transparent"
+                style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}
+              >
+                clear
+              </button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[8px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
+                    <th className="text-left py-1 pr-3" style={{ color: colors.dim }}>Metric</th>
+                    {selectedRuns.map((r) => (
+                      <th key={r.run_id} className="text-right py-1 px-2" style={{ color: colors.blue }}>
+                        #{r.run_id}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {["sharpe", "sortino", "total_pnl", "win_rate", "max_drawdown_pct", "profit_factor", "trade_count"].map((metric) => {
+                    const values = selectedRuns.map((r) => (r.best_metrics as any)?.[metric] ?? 0);
+                    const best = metric === "max_drawdown_pct"
+                      ? Math.min(...values)
+                      : Math.max(...values);
+                    return (
+                      <tr key={metric} style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
+                        <td className="py-1 pr-3" style={{ color: colors.muted }}>{metric.replace(/_/g, " ")}</td>
+                        {selectedRuns.map((r, i) => {
+                          const val = (r.best_metrics as any)?.[metric] ?? 0;
+                          const isBest = values.length > 1 && val === best;
+                          const display = metric === "win_rate" ? `${(val * 100).toFixed(1)}%`
+                            : metric === "total_pnl" ? `$${Math.round(val).toLocaleString()}`
+                            : metric === "trade_count" ? String(Math.round(val))
+                            : val.toFixed(2);
+                          return (
+                            <td key={i} className="text-right py-1 px-2" style={{
+                              color: isBest ? colors.green : colors.text,
+                              fontWeight: isBest ? 600 : 400,
+                            }}>
+                              {display}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {/* Run history */}
         <div className="flex-1 overflow-y-auto px-4 py-3">
           <div className="flex items-center justify-between mb-2">
             <span className="text-[9px] font-semibold tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
               OPTIMIZATION RUNS
             </span>
-            {selectedIds.length >= 2 && (
-              <button
-                onClick={handleCompare}
-                disabled={comparing}
-                className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none text-white font-semibold"
-                style={{ background: colors.blue, fontFamily: "var(--font-mono)" }}
-              >
-                {comparing ? "Comparing..." : `Compare (${selectedIds.length})`}
-              </button>
+            {selectedIds.length > 0 && (
+              <span className="text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+                {selectedIds.length} selected
+              </span>
             )}
           </div>
 
@@ -183,7 +231,8 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
                 return (
                   <div
                     key={r.run_id}
-                    className="rounded-md p-2.5"
+                    className="rounded-md p-2.5 cursor-pointer"
+                    onClick={() => toggleSelect(r.run_id)}
                     style={{
                       background: isDeployed ? "rgba(105,240,174,0.06)" : colors.card,
                       border: `1px solid ${isSelected ? colors.blue : isDeployed ? `${colors.green}40` : colors.cardBorder}`,
@@ -191,13 +240,6 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
                   >
                     <div className="flex items-center justify-between mb-1">
                       <div className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => toggleSelect(r.run_id)}
-                          className="cursor-pointer"
-                          style={{ accentColor: colors.blue }}
-                        />
                         <span className="text-[9px] font-semibold" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
                           #{r.run_id}
                         </span>
@@ -210,7 +252,7 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
                           {r.run_at?.slice(0, 10)}
                         </span>
                       </div>
-                      <div className="flex gap-1">
+                      <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
                         {r.best_candidate_id != null && !isDeployed && (
                           <button
                             onClick={() => handleDeploy(r.best_candidate_id!)}
@@ -275,57 +317,6 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
             </div>
           )}
 
-          {/* Comparison section */}
-          {comparison && comparison.length > 0 && (
-            <div className="mt-4">
-              <div className="text-[9px] font-semibold tracking-wider mb-2" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-                COMPARISON
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-[8px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }}>
-                  <thead>
-                    <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
-                      <th className="text-left py-1 pr-3" style={{ color: colors.dim }}>Metric</th>
-                      {comparison.map((c: any) => (
-                        <th key={c.run_id} className="text-right py-1 px-2" style={{ color: colors.text }}>
-                          #{c.run_id}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {["sharpe", "sortino", "total_pnl", "win_rate", "max_drawdown_pct", "profit_factor", "trade_count"].map((metric) => {
-                      const values = comparison.map((c: any) => c.best_metrics?.[metric] ?? 0);
-                      const best = metric === "max_drawdown_pct"
-                        ? Math.min(...values)
-                        : Math.max(...values);
-                      return (
-                        <tr key={metric} style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
-                          <td className="py-1 pr-3" style={{ color: colors.muted }}>{metric.replace(/_/g, " ")}</td>
-                          {comparison.map((c: any, i: number) => {
-                            const val = c.best_metrics?.[metric] ?? 0;
-                            const isBest = val === best;
-                            const display = metric === "win_rate" ? `${(val * 100).toFixed(1)}%`
-                              : metric === "total_pnl" ? `$${Math.round(val).toLocaleString()}`
-                              : metric === "trade_count" ? String(Math.round(val))
-                              : val.toFixed(2);
-                            return (
-                              <td key={i} className="text-right py-1 px-2" style={{
-                                color: isBest ? colors.green : colors.text,
-                                fontWeight: isBest ? 600 : 400,
-                              }}>
-                                {display}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </>
