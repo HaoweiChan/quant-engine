@@ -8,6 +8,19 @@ Production quantitative trading system for TAIFEX Taiwan Index Futures (TX/MTX).
 - **Infrastructure**: Python backend on netcup Germany server; React+Vite+FastAPI frontend (migrating from Plotly Dash)
 - **Broker API**: shioaji (Sinopac)
 
+### Prod vs Dev environments
+
+Two environments run side by side on the same server, sharing the DB:
+
+| Env  | Frontend | Backend | Script                 | Branch rule |
+|------|----------|---------|------------------------|-------------|
+| Prod | `:5173`  | `:8000` | `scripts/run-prod.sh`  | **main only** — script refuses other branches |
+| Dev  | `:5174`  | `:8001` | `scripts/run-dev.sh`   | any branch, with `--reload` and HMR |
+
+Only launch the production site from the `main` branch. For any other
+branch (feature work, hotfixes, experiments), use the dev runner. The
+dev script refuses to bind production ports as a safety net.
+
 ---
 
 ## Repository Layout
