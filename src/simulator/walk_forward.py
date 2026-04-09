@@ -229,8 +229,9 @@ def evaluate_quality_gates(
     for f in folds:
         if mdd_max is not None and f.oos_mdd_pct > mdd_max:
             reasons.append(f"Fold {f.fold_index}: MDD {f.oos_mdd_pct:.1f}% > {mdd_max}%")
-        if not (wr_min <= f.oos_win_rate <= wr_max):
-            reasons.append(f"Fold {f.fold_index}: Win rate {f.oos_win_rate:.1f}% outside {wr_min:.0f}-{wr_max:.0f}%")
+        oos_wr_pct = f.oos_win_rate * 100
+        if not (wr_min <= oos_wr_pct <= wr_max):
+            reasons.append(f"Fold {f.fold_index}: Win rate {oos_wr_pct:.1f}% outside {wr_min:.0f}-{wr_max:.0f}%")
         if f.oos_n_trades < min_trades:
             reasons.append(f"Fold {f.fold_index}: {f.oos_n_trades} trades < {min_trades}")
         if f.oos_profit_factor < pf_floor:

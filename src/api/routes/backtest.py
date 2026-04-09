@@ -36,6 +36,17 @@ def _run_backtest_in_worker(
 ) -> dict:
     """Runs inside a forked child process — free of GIL contention."""
     import numpy as np
+
+    # Forked workers may hold a stale strategy registry / factory cache from
+    # the moment they were forked — new strategies added since won't be
+    # visible. Invalidate both caches on every call so the worker always
+    # re-discovers strategies from disk.
+    from src.strategies.registry import invalidate as _invalidate_registry
+    from src.mcp_server import facade as _facade
+
+    _invalidate_registry()
+    _facade._factory_cache.clear()
+
     from src.api.helpers import run_strategy_backtest
 
     result = run_strategy_backtest(

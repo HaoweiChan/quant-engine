@@ -139,6 +139,9 @@ class PositionEngine:
         orders: list[Order] = []
         triggered: list[int] = []
         for i, pos in enumerate(self._positions):
+            # min_hold_lots: skip base position (level 0) so it acts as permanent B&H
+            if self._config.min_hold_lots > 0 and pos.pyramid_level == 0:
+                continue
             hit = (
                 snapshot.price <= pos.stop_level
                 if pos.direction == "long"

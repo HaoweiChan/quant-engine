@@ -226,6 +226,7 @@ class EngineConfig:
     disaster_atr_mult: float = 4.5
     disaster_stop_enabled: bool = False
     require_account_for_entry: bool = False
+    min_hold_lots: float = 0.0
 
     def __post_init__(self) -> None:
         if self.max_loss <= 0:

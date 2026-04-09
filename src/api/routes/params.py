@@ -14,7 +14,6 @@ async def get_active_params(strategy: str) -> dict:
 
     registry = ParamRegistry()
     detail = registry.get_active_detail(strategy)
-    registry.close()
     if detail:
         code_changed = None
         try:
@@ -24,7 +23,10 @@ async def get_active_params(strategy: str) -> dict:
             code_changed = registry.check_code_hash_match(strategy, current_hash) is False
         except FileNotFoundError:
             code_changed = None
+        finally:
+            registry.close()
         return {**detail, "source": "registry", "code_changed": code_changed}
+    registry.close()
     # Fallback to schema defaults
     try:
         from src.strategies.registry import get_defaults

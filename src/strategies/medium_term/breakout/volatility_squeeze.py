@@ -12,6 +12,12 @@ Squeeze detection on 1h bars:
     Long  : 1h close > BB_upper + volume > vol_mult * SMA(vol, 20)
     Short : 1h close < BB_lower + volume > vol_mult * SMA(vol, 20)
 
+Optional structural filters (recommended):
+  VWAP filter  : long only if price > VWAP, short only if price < VWAP.
+                  Session-reset aware. Ensures trade aligns with institutional flow.
+  Momentum     : close - SMA(close, N) on signal TF. Long only if momentum > 0,
+                  short only if momentum < 0. Confirms directional energy on release.
+
 Exit logic (StopPolicy)
 -----------------------
   Initial stop  : entry ± atr_sl_mult x ATR
@@ -23,6 +29,7 @@ Design rationale: Markets cycle between volatility contraction and expansion.
 The squeeze (BB inside KC) marks extreme contraction. The breakout from squeeze
 catches the expansion move early, which on hourly timeframes tends to produce
 strong directional moves with positive skewness (~40-45% WR, high payoff ratio).
+VWAP alignment filters out squeeze releases that fight institutional order flow.
 """
 from __future__ import annotations
 
@@ -137,6 +144,11 @@ PARAM_SCHEMA: dict[str, dict] = {
         "description": "Minimum consecutive 1h bars in squeeze before entry allowed.",
         "grid": [1, 2, 3, 5],
     },
+    "release_window": {
+        "type": "int", "default": 1, "min": 1, "max": 16,
+        "description": "Entry TF bars after squeeze release during which entries are allowed.",
+        "grid": [1, 2, 4, 8],
+    },
     "max_hold_bars": {
         "type": "int", "default": 200, "min": 20, "max": 400,
         "description": "Max 15m bars to hold before time-exit (200 bars = ~50h).",
@@ -145,6 +157,26 @@ PARAM_SCHEMA: dict[str, dict] = {
     "allow_night": {
         "type": "int", "default": 1, "min": 0, "max": 1,
         "description": "Allow entries during night session (0=day only, 1=day+night).",
+    },
+    "vwap_filter": {
+        "type": "int", "default": 1, "min": 0, "max": 1,
+        "description": "Require VWAP alignment: long only above VWAP, short only below (0=off, 1=on).",
+        "grid": [0, 1],
+    },
+    "momentum_len": {
+        "type": "int", "default": 12, "min": 5, "max": 30,
+        "description": "Lookback for momentum histogram (close - SMA) on signal TF.",
+        "grid": [8, 12, 20],
+    },
+    "momentum_filter": {
+        "type": "int", "default": 1, "min": 0, "max": 1,
+        "description": "Require momentum confirmation: long if mom>0, short if mom<0 (0=off, 1=on).",
+        "grid": [0, 1],
+    },
+    "trend_ema_len": {
+        "type": "int", "default": 50, "min": 0, "max": 200,
+        "description": "Trend-context EMA on signal TF. Long only above EMA, short only below. 0=disabled.",
+        "grid": [0, 20, 50, 100],
     },
     "max_pyramid_levels": {
         "type": "int", "default": 4, "min": 1, "max": 4,
@@ -206,6 +238,9 @@ class _Indicators:
         bar_agg_trend: int = 4,
         adx_len: int = 14,
         atr_pct_len: int = 100,
+        momentum_len: int = 12,
+        release_window: int = 1,
+        trend_ema_len: int = 0,
     ) -> None:
         self._bb_len = bb_len
         self._bb_std = bb_std
@@ -215,9 +250,11 @@ class _Indicators:
         self._atr_len = atr_len
         self._bar_agg = max(bar_agg_trend, 1)
         self._agg_count = 0
+        self._momentum_len = momentum_len
+        self._release_window = max(release_window, 1)
 
         # Signal TF (1h aggregated) buffers
-        max_sig = max(bb_len, kc_len) + 2
+        max_sig = max(bb_len, kc_len, momentum_len) + 2
         self._sig_closes: deque[float] = deque(maxlen=max_sig + 1)
         self._sig_volumes: deque[float] = deque(maxlen=max(vol_len, 1) + 1)
 
@@ -228,6 +265,26 @@ class _Indicators:
         self._last_ts: datetime | None = None
         self._kc_ema: float | None = None
         self._kc_alpha = 2.0 / (kc_len + 1)
+
+        # Release window: countdown in entry TF bars after squeeze releases
+        self._release_countdown: int = 0
+        self._raw_release: bool = False
+        self.saved_squeeze_duration: int = 0
+
+        # VWAP — session-reset cumulative price*volume / cumulative volume
+        self._vwap_cum_pv: float = 0.0
+        self._vwap_cum_vol: float = 0.0
+        self._vwap_session_date: str | None = None
+        self.vwap: float | None = None
+
+        # Momentum histogram on signal TF: close - SMA(close, N)
+        self.momentum: float | None = None
+
+        # Trend-context EMA on signal TF — prevents counter-trend entries
+        self._trend_ema_len = trend_ema_len
+        self._trend_ema_alpha = 2.0 / (max(trend_ema_len, 1) + 1) if trend_ema_len > 0 else 0
+        self._trend_ema_raw: float | None = None
+        self.trend_ema: float | None = None
 
         # ADX on signal TF — EMA-smoothed (same as atr_mean_reversion)
         self._adx_len = adx_len
@@ -265,6 +322,17 @@ class _Indicators:
             return
         self._last_ts = ts
 
+        # VWAP — reset on session boundary (new calendar date or day→night gap)
+        session_key = ts.strftime("%Y-%m-%d") + ("N" if ts.hour >= 15 or ts.hour < 5 else "D")
+        if self._vwap_session_date != session_key:
+            self._vwap_cum_pv = 0.0
+            self._vwap_cum_vol = 0.0
+            self._vwap_session_date = session_key
+        if volume > 0:
+            self._vwap_cum_pv += price * volume
+            self._vwap_cum_vol += volume
+            self.vwap = self._vwap_cum_pv / self._vwap_cum_vol
+
         # Entry TF: every bar
         self._entry_closes.append(price)
         self._compute_entry_atr()
@@ -276,6 +344,16 @@ class _Indicators:
             self._sig_closes.append(price)
             self._sig_volumes.append(volume)
             self._compute_signal(price, volume)
+            if self._raw_release:
+                self._release_countdown = self._release_window
+                self._raw_release = False
+
+        # Release window: allow entries for N entry-TF bars after squeeze release
+        if self._release_countdown > 0:
+            self.squeeze_released = True
+            self._release_countdown -= 1
+        else:
+            self.squeeze_released = False
 
     def _compute_entry_atr(self) -> None:
         closes = list(self._entry_closes)
@@ -372,8 +450,9 @@ class _Indicators:
             if self.squeeze_on:
                 self.squeeze_count += 1
             else:
-                # Squeeze just released (was in squeeze, now out)
-                self.squeeze_released = self._prev_squeeze and not self.squeeze_on
+                if self._prev_squeeze:
+                    self._raw_release = True
+                    self.saved_squeeze_duration = self.squeeze_count
                 self.squeeze_count = 0
 
         # Volume ratio
@@ -387,6 +466,23 @@ class _Indicators:
         else:
             self.vol_ratio = None
 
+        # Momentum histogram: close - SMA(close, N) on signal TF
+        if n >= self._momentum_len:
+            sma = _mean(closes[-self._momentum_len:])
+            self.momentum = price - sma
+        else:
+            self.momentum = None
+
+        # Trend-context EMA on signal TF
+        if self._trend_ema_len > 0:
+            if self._trend_ema_raw is None:
+                if n >= self._trend_ema_len:
+                    self._trend_ema_raw = _mean(closes[-self._trend_ema_len:])
+            else:
+                self._trend_ema_raw = (self._trend_ema_alpha * price
+                                       + (1 - self._trend_ema_alpha) * self._trend_ema_raw)
+            self.trend_ema = self._trend_ema_raw
+
         # Regime filters (on signal TF)
         self._update_adx(price)
         self._update_atr_percentile()
@@ -399,6 +495,9 @@ class _Indicators:
             "kc_upper": self.kc_upper,
             "kc_mid": self.kc_mid,
             "kc_lower": self.kc_lower,
+            "vwap": self.vwap,
+            "momentum": self.momentum,
+            "trend_ema": self.trend_ema,
         }
 
     def indicator_meta(self) -> dict[str, dict]:
@@ -409,6 +508,9 @@ class _Indicators:
             "kc_upper":  {"panel": "price", "color": "#4ECDC4", "label": "KC Upper"},
             "kc_mid":    {"panel": "price", "color": "#95E1D3", "label": "KC Mid"},
             "kc_lower":  {"panel": "price", "color": "#4ECDC4", "label": "KC Lower"},
+            "vwap":      {"panel": "price", "color": "#FFA726", "label": "VWAP"},
+            "momentum":  {"panel": "sub1", "color": "#7E57C2", "label": "Momentum"},
+            "trend_ema": {"panel": "price", "color": "#FF4081", "label": "Trend EMA"},
         }
 
 
@@ -417,7 +519,7 @@ class _Indicators:
 # ---------------------------------------------------------------------------
 
 class VolatilitySqueezeEntry(EntryPolicy):
-    """Enter on squeeze release with volume confirmation."""
+    """Enter on squeeze release with volume, VWAP, and momentum confirmation."""
 
     def __init__(
         self,
@@ -433,12 +535,17 @@ class VolatilitySqueezeEntry(EntryPolicy):
         atr_len: int = 14,
         atr_sl_mult: float = 2.0,
         min_squeeze_bars: int = 2,
+        release_window: int = 1,
         allow_night: int = 1,
         adx_len: int = 14,
         adx_min: float = 20.0,
         atr_pct_len: int = 100,
         atr_pct_min: float = 25.0,
         atr_pct_max: float = 85.0,
+        vwap_filter: int = 1,
+        momentum_len: int = 12,
+        momentum_filter: int = 1,
+        trend_ema_len: int = 0,
     ) -> None:
         self._lots = lots
         self._contract_type = contract_type
@@ -449,15 +556,19 @@ class VolatilitySqueezeEntry(EntryPolicy):
         self._adx_min = adx_min
         self._atr_pct_min = atr_pct_min
         self._atr_pct_max = atr_pct_max
+        self._vwap_filter = bool(vwap_filter)
+        self._momentum_filter = bool(momentum_filter)
+        self._trend_ema_len = trend_ema_len
         self.ind = _Indicators(
             bb_len=bb_len, bb_std=bb_std,
             kc_len=kc_len, kc_mult=kc_mult,
             vol_len=vol_len, atr_len=atr_len,
             bar_agg_trend=bar_agg_trend,
             adx_len=adx_len, atr_pct_len=atr_pct_len,
+            momentum_len=momentum_len,
+            release_window=release_window,
+            trend_ema_len=trend_ema_len,
         )
-        # Track squeeze duration (how many 1h bars were in squeeze before release)
-        self._last_squeeze_duration: int = 0
 
     def should_enter(
         self,
@@ -475,20 +586,15 @@ class VolatilitySqueezeEntry(EntryPolicy):
             return None
 
         price = snapshot.price
-        # Track squeeze count before update (for min_squeeze_bars check)
-        prev_count = self.ind.squeeze_count
         self.ind.update(price, snapshot.timestamp, snapshot.volume)
         ind = self.ind
 
         if not ind.squeeze_released:
             return None
-        # Reset squeeze_released flag after reading it
-        ind.squeeze_released = False
 
         # Must have been in squeeze for minimum duration
-        if prev_count < self._min_squeeze_bars:
+        if ind.saved_squeeze_duration < self._min_squeeze_bars:
             return None
-        self._last_squeeze_duration = prev_count
 
         atr = ind.atr
         if atr is None or atr <= 0:
@@ -511,15 +617,28 @@ class VolatilitySqueezeEntry(EntryPolicy):
             if self._atr_pct_max < 100 and ind.atr_percentile > self._atr_pct_max:
                 return None
 
+        # Trend-context: only trade in direction of trend EMA
+        trend_long_ok = True
+        trend_short_ok = True
+        if self._trend_ema_len > 0 and ind.trend_ema is not None:
+            trend_long_ok = price > ind.trend_ema
+            trend_short_ok = price < ind.trend_ema
+
         sl_pts = atr * self._atr_sl_mult
 
         # Direction: which side of BB did price break?
         _meta = {
-            "atr": atr, "squeeze_bars": self._last_squeeze_duration,
+            "atr": atr, "squeeze_bars": ind.saved_squeeze_duration,
             "vol_ratio": ind.vol_ratio, "adx": ind.adx,
-            "atr_pct": ind.atr_percentile, "strategy": "mt_volatility_squeeze",
+            "atr_pct": ind.atr_percentile, "vwap": ind.vwap,
+            "momentum": ind.momentum, "trend_ema": ind.trend_ema,
+            "strategy": "mt_volatility_squeeze",
         }
-        if price > ind.bb_upper:
+        if price > ind.bb_upper and trend_long_ok:
+            if self._vwap_filter and ind.vwap is not None and price < ind.vwap:
+                return None
+            if self._momentum_filter and ind.momentum is not None and ind.momentum <= 0:
+                return None
             return EntryDecision(
                 lots=self._lots,
                 contract_type=self._contract_type,
@@ -527,7 +646,11 @@ class VolatilitySqueezeEntry(EntryPolicy):
                 direction="long",
                 metadata={**_meta, "bb_upper": ind.bb_upper},
             )
-        if price < ind.bb_lower:
+        if price < ind.bb_lower and trend_short_ok:
+            if self._vwap_filter and ind.vwap is not None and price > ind.vwap:
+                return None
+            if self._momentum_filter and ind.momentum is not None and ind.momentum >= 0:
+                return None
             return EntryDecision(
                 lots=self._lots,
                 contract_type=self._contract_type,
@@ -619,6 +742,7 @@ def create_volatility_squeeze_engine(
     atr_sl_mult: float = 2.0,
     chandelier_atr_mult: float = 2.5,
     min_squeeze_bars: int = 2,
+    release_window: int = 1,
     max_hold_bars: int = 200,
     allow_night: int = 1,
     max_pyramid_levels: int = 4,
@@ -629,6 +753,10 @@ def create_volatility_squeeze_engine(
     atr_pct_len: int = 100,
     atr_pct_min: float = 25.0,
     atr_pct_max: float = 85.0,
+    vwap_filter: int = 1,
+    momentum_len: int = 12,
+    momentum_filter: int = 1,
+    trend_ema_len: int = 0,
 ) -> "PositionEngine":
     """Build a PositionEngine wired with the Volatility Squeeze strategy."""
     from src.core.position_engine import PositionEngine
@@ -642,9 +770,14 @@ def create_volatility_squeeze_engine(
         vol_len=vol_len, vol_mult=vol_mult,
         atr_len=atr_len, atr_sl_mult=atr_sl_mult,
         min_squeeze_bars=min_squeeze_bars,
+        release_window=release_window,
         allow_night=allow_night,
         adx_len=adx_len, adx_min=adx_min,
         atr_pct_len=atr_pct_len, atr_pct_min=atr_pct_min, atr_pct_max=atr_pct_max,
+        vwap_filter=vwap_filter,
+        momentum_len=momentum_len,
+        momentum_filter=momentum_filter,
+        trend_ema_len=trend_ema_len,
     )
     stop = VolatilitySqueezeStop(
         indicators=entry.ind,

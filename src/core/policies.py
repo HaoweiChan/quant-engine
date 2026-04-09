@@ -142,6 +142,8 @@ class PyramidAddPolicy(AddPolicy):
     def __init__(self, config: PyramidConfig) -> None:
         self._config = config
         self._price_history: deque[float] = deque(maxlen=config.internal_atr_len + 1)
+        self._last_add_price: float | None = None
+        self._prev_pyramid_level: int = 0
 
     def should_add(
         self,
@@ -154,9 +156,16 @@ class PyramidAddPolicy(AddPolicy):
         if engine_state.pyramid_level >= self._config.max_levels:
             return None
         if not engine_state.positions:
+            self._last_add_price = None
+            self._prev_pyramid_level = 0
             return None
 
-        entry_price = engine_state.positions[0].entry_price
+        # Detect stop-out: pyramid level dropped since last call
+        if engine_state.pyramid_level < self._prev_pyramid_level:
+            # Reset reference to highest remaining position's entry
+            self._last_add_price = engine_state.positions[-1].entry_price
+        self._prev_pyramid_level = engine_state.pyramid_level
+
         direction = engine_state.positions[0].direction
 
         # Configurable ATR key with internal fallback
@@ -171,11 +180,12 @@ class PyramidAddPolicy(AddPolicy):
             else:
                 return None
 
-        # Direction-aware floating profit
+        # Reference price: last add entry (or base entry for first add)
+        ref_price = self._last_add_price or engine_state.positions[0].entry_price
         if direction == "long":
-            floating_profit = snapshot.price - entry_price
+            floating_profit = snapshot.price - ref_price
         else:
-            floating_profit = entry_price - snapshot.price
+            floating_profit = ref_price - snapshot.price
 
         trigger_idx = engine_state.pyramid_level - 1
         if trigger_idx < 0 or trigger_idx >= len(self._config.add_trigger_atr):
@@ -188,11 +198,12 @@ class PyramidAddPolicy(AddPolicy):
         # Gamma-based sizing when configured, else lot_schedule
         if self._config.gamma is not None:
             level = engine_state.pyramid_level
-            lots = max(self._config.base_lots * (self._config.gamma ** level), 1.0)
+            lots = self._config.base_lots * (self._config.gamma ** level)
         else:
             lot_spec = self._config.lot_schedule[engine_state.pyramid_level]
             lots = float(sum(lot_spec))
 
+        self._last_add_price = snapshot.price
         return AddDecision(
             lots=lots,
             contract_type="large",
