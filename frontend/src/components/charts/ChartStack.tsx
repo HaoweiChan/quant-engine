@@ -321,19 +321,23 @@ export function ChartStack({
       to: candles.length + 3,
     };
     chart.timeScale().setVisibleLogicalRange(range);
-    // Force vertical auto-scale to enclose all visible bars
-    chart.priceScale("right").applyOptions({
-      autoScale: true,
-      scaleMargins: { top: 0.05, bottom: 0.05 },
-    });
+    // Force vertical auto-scale via the series price scale (avoids LWC v5 pane-index errors)
+    try {
+      primaryRef.current?.firstSeries()?.priceScale().applyOptions({
+        autoScale: true,
+        scaleMargins: { top: 0.05, bottom: 0.05 },
+      });
+    } catch { /* ok */ }
     // Sync secondary pane
     const sec = secondaryRef.current?.chart();
     if (sec) {
       sec.timeScale().setVisibleLogicalRange(range);
-      sec.priceScale("right").applyOptions({
-        autoScale: true,
-        scaleMargins: { top: 0.05, bottom: 0.05 },
-      });
+      try {
+        secondaryRef.current?.firstSeries()?.priceScale().applyOptions({
+          autoScale: true,
+          scaleMargins: { top: 0.05, bottom: 0.05 },
+        });
+      } catch { /* ok */ }
     }
   };
 

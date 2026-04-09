@@ -255,14 +255,16 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
         });
       } else if (isFirstLoad) {
         // First load: auto-fit then unlock for free vertical pan
-        chart.priceScale("right").applyOptions({ autoScale: true });
+        // Use the series' own priceScale() to avoid LWC v5 pane-index errors
+        const priceSeries = candleSeriesRef.current ?? extraSeriesRef.current[0];
+        try { priceSeries?.priceScale().applyOptions({ autoScale: true }); } catch { /* ok */ }
         const showBars = Math.min(candleLen, 200);
         chart.timeScale().setVisibleLogicalRange({
           from: candleLen - showBars - 1,
           to: candleLen + 5,
         });
         requestAnimationFrame(() => {
-          chart.priceScale("right").applyOptions({ autoScale: false });
+          try { priceSeries?.priceScale().applyOptions({ autoScale: false }); } catch { /* ok */ }
         });
       }
       // On subsequent refreshes: don't touch the visible range (preserve user zoom/pan)
