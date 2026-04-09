@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 logger = structlog.get_logger(__name__)
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "taifex_data.db"
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "market.db"
 NIGHT_START_MIN = 15 * 60
 NIGHT_END_MIN = 5 * 60
 DAY_START_MIN = 8 * 60 + 45

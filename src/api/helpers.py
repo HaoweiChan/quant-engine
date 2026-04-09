@@ -19,7 +19,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "taifex_data.db"
+_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "market.db"
 
 # ── TAIFEX Futures Continuous Contract Registry ─────────────────────────────
 # Maps (display_name) -> (db_symbol, shioaji_contract_path)

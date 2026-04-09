@@ -28,9 +28,10 @@ interface StrategyBindingsProps {
   accountId: string;
   bindings: { slug: string; symbol: string }[];
   onUpdate: () => void;
+  compact?: boolean;
 }
 
-export function StrategyBindings({ accountId, bindings, onUpdate }: StrategyBindingsProps) {
+export function StrategyBindings({ accountId, bindings, onUpdate, compact = false }: StrategyBindingsProps) {
   const expanded = useWarRoomStore((s) => s.bindingsExpanded);
   const toggle = useWarRoomStore((s) => s.toggleBindings);
   const [strategies, setStrategies] = useState<StrategyInfo[]>([]);
@@ -58,17 +59,46 @@ export function StrategyBindings({ accountId, bindings, onUpdate }: StrategyBind
     setSaving(false);
   };
 
-  const handleRemove = async (slug: string, symbol: string) => {
-    setSaving(true);
-    setError("");
-    try {
-      await updateAccountStrategies(accountId, bindings.filter((b) => !(b.slug === slug && b.symbol === symbol)));
-      onUpdate();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
-    }
-    setSaving(false);
-  };
+  const addRow = (
+    <div className="flex gap-1">
+      {error && <div className="text-[8px] mb-1" style={{ color: colors.red, fontFamily: "var(--font-mono)" }}>{error}</div>}
+      <select
+        value={newSlug}
+        onChange={(e) => setNewSlug(e.target.value)}
+        disabled={saving}
+        className="flex-1 rounded px-1 py-0.5 text-[8px]"
+        style={inputStyle}
+      >
+        <option value="">Strategy...</option>
+        {strategies.map((s) => (
+          <option key={s.slug} value={s.slug}>{s.name}</option>
+        ))}
+      </select>
+      <select
+        value={newSymbol}
+        onChange={(e) => setNewSymbol(e.target.value)}
+        disabled={saving}
+        className="w-14 rounded px-1 py-0.5 text-[8px]"
+        style={inputStyle}
+      >
+        {TAIFEX_SYMBOLS.map((s) => (
+          <option key={s.value} value={s.value}>{s.value}</option>
+        ))}
+      </select>
+      <button
+        onClick={handleAdd}
+        disabled={saving || !newSlug}
+        className="px-2 py-0.5 rounded text-[7px] cursor-pointer border-none text-white font-semibold"
+        style={{ background: saving || !newSlug ? colors.dim : "#2A6A4A", fontFamily: "var(--font-mono)" }}
+      >
+        +
+      </button>
+    </div>
+  );
+
+  if (compact) {
+    return addRow;
+  }
 
   return (
     <div style={{ borderTop: `1px solid ${colors.cardBorder}` }}>
@@ -82,63 +112,7 @@ export function StrategyBindings({ accountId, bindings, onUpdate }: StrategyBind
       </button>
       {expanded && (
         <div className="px-2 pb-2">
-          {error && <div className="text-[8px] mb-1" style={{ color: colors.red, fontFamily: "var(--font-mono)" }}>{error}</div>}
-          {bindings.length > 0 && (
-            <div className="flex flex-wrap gap-1 mb-1.5">
-              {bindings.map((b) => (
-                <div
-                  key={`${b.slug}:${b.symbol}`}
-                  className="flex items-center gap-1 px-1.5 py-0.5 rounded"
-                  style={{ background: colors.sidebar, border: `1px solid ${colors.cardBorder}` }}
-                >
-                  <span className="text-[8px]" style={{ color: colors.text, fontFamily: "var(--font-mono)" }}>
-                    {b.slug.split("/").pop()} · {b.symbol}
-                  </span>
-                  <button
-                    onClick={() => handleRemove(b.slug, b.symbol)}
-                    disabled={saving}
-                    className="cursor-pointer border-none bg-transparent text-[9px]"
-                    style={{ color: colors.red }}
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="flex gap-1">
-            <select
-              value={newSlug}
-              onChange={(e) => setNewSlug(e.target.value)}
-              disabled={saving}
-              className="flex-1 rounded px-1 py-0.5 text-[8px]"
-              style={inputStyle}
-            >
-              <option value="">Strategy...</option>
-              {strategies.map((s) => (
-                <option key={s.slug} value={s.slug}>{s.name}</option>
-              ))}
-            </select>
-            <select
-              value={newSymbol}
-              onChange={(e) => setNewSymbol(e.target.value)}
-              disabled={saving}
-              className="w-14 rounded px-1 py-0.5 text-[8px]"
-              style={inputStyle}
-            >
-              {TAIFEX_SYMBOLS.map((s) => (
-                <option key={s.value} value={s.value}>{s.value}</option>
-              ))}
-            </select>
-            <button
-              onClick={handleAdd}
-              disabled={saving || !newSlug}
-              className="px-2 py-0.5 rounded text-[7px] cursor-pointer border-none text-white font-semibold"
-              style={{ background: saving || !newSlug ? colors.dim : "#2A6A4A", fontFamily: "var(--font-mono)" }}
-            >
-              +
-            </button>
-          </div>
+          {addRow}
         </div>
       )}
     </div>

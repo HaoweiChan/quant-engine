@@ -9,6 +9,9 @@ from src.api.helpers import load_ohlcv
 
 router = APIRouter(prefix="/api", tags=["data"])
 
+# MTX tracks the same TAIEX index as TX — use TX bars when MTX data is missing.
+_CHART_FALLBACK: dict[str, str] = {"MTX": "TX"}
+
 
 @router.get("/ohlcv")
 async def get_ohlcv(
@@ -24,10 +27,17 @@ async def get_ohlcv(
         from fastapi import HTTPException
         raise HTTPException(status_code=422, detail=f"Invalid date format: {exc}")
     df = load_ohlcv(symbol, start_dt, end_dt, tf_minutes)
+    fallback_used = None
+    if df.empty and symbol in _CHART_FALLBACK:
+        fallback_used = _CHART_FALLBACK[symbol]
+        df = load_ohlcv(fallback_used, start_dt, end_dt, tf_minutes)
     if df.empty:
         return {"bars": [], "count": 0}
     bars = df.to_dict(orient="records")
     for bar in bars:
         if "timestamp" in bar:
             bar["timestamp"] = str(bar["timestamp"])
-    return {"bars": bars, "count": len(bars)}
+    result: dict = {"bars": bars, "count": len(bars)}
+    if fallback_used:
+        result["fallback_symbol"] = fallback_used
+    return result
