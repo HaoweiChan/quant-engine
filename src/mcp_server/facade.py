@@ -513,6 +513,83 @@ def run_backtest_for_mcp(
     return out
 
 
+class _CacheKey:
+    """Cache key components for a real-data backtest."""
+
+    __slots__ = ("strategy_hash", "combined_notes", "cost_note", "timeframe_str")
+
+    def __init__(self, strategy_hash: str | None, combined_notes: str,
+                 cost_note: str | None, timeframe_str: str):
+        self.strategy_hash = strategy_hash
+        self.combined_notes = combined_notes
+        self.cost_note = cost_note
+        self.timeframe_str = timeframe_str
+
+
+def _build_cache_key(
+    strategy: str,
+    strategy_params: dict[str, Any] | None = None,
+    intraday: bool = False,
+) -> _CacheKey:
+    """Compute cache key components for a real-data backtest."""
+    import hashlib
+
+    resolved_slug = resolve_strategy_slug(strategy)
+
+    if not intraday:
+        from src.strategies.registry import is_intraday_strategy
+        intraday = is_intraday_strategy(resolved_slug)
+
+    from src.strategies.registry import get_bar_agg
+    meta_bar_agg = get_bar_agg(resolved_slug)
+    bar_agg = int((strategy_params or {}).get("bar_agg", meta_bar_agg))
+
+    strategy_hash, _ = _compute_code_hash(resolved_slug)
+    _sp = strategy_params or {}
+    _slip_bps = _sp.get("slippage_bps", 0)
+    _comm_fixed = _sp.get("commission_fixed_per_contract", 0)
+    cost_note: str | None = f"sbps={_slip_bps}|cfix={_comm_fixed}" if (_slip_bps or _comm_fixed) else None
+    _p_str = _normalize_params_for_hash(_sp)
+    _p_hash = hashlib.md5(_p_str.encode()).hexdigest()[:8]
+    cost_note = f"p={_p_hash}" + (f"|{cost_note}" if cost_note else "")
+    timeframe_str = f"{bar_agg}min{'|intraday' if intraday else ''}"
+    _tf_notes = f"tf={timeframe_str}"
+    combined_notes = "; ".join(filter(None, [cost_note, _tf_notes]))
+    return _CacheKey(strategy_hash, combined_notes, cost_note, timeframe_str)
+
+
+def lookup_backtest_cache(
+    symbol: str,
+    start: str,
+    end: str,
+    strategy: str,
+    strategy_params: dict[str, Any] | None = None,
+    intraday: bool = False,
+) -> dict[str, Any] | None:
+    """Return cached backtest result if available, else None.
+
+    Runs the same cache key computation as run_backtest_realdata_for_mcp
+    without loading bars or running simulation. Fast (~10ms).
+    """
+    ck = _build_cache_key(strategy, strategy_params, intraday)
+    if not ck.strategy_hash:
+        return None
+
+    from src.strategies.param_registry import ParamRegistry
+    reg = ParamRegistry()
+    cached = reg.get_cached_result(
+        strategy_hash=ck.strategy_hash,
+        symbol=symbol,
+        start=start,
+        end=end,
+        notes=ck.combined_notes,
+    )
+    reg.close()
+    if cached is not None:
+        cached["cache_hit"] = True
+    return cached
+
+
 def run_backtest_realdata_for_mcp(
     symbol: str,
     start: str,
@@ -560,35 +637,19 @@ def run_backtest_realdata_for_mcp(
     meta_bar_agg = get_bar_agg(resolved_slug)
     bar_agg = int((strategy_params or {}).get("bar_agg", meta_bar_agg))
 
-    # -- Cache key computation (must happen before runner) --
-    strategy_hash, strategy_code = _compute_code_hash(resolved_slug)
-    _sp = strategy_params or {}
-    _slip_bps = _sp.get("slippage_bps", 0)
-    _comm_fixed = _sp.get("commission_fixed_per_contract", 0)
-    _cost_note = f"sbps={_slip_bps}|cfix={_comm_fixed}" if (_slip_bps or _comm_fixed) else None
-    import hashlib, json as _json
-    _p_str = _normalize_params_for_hash(_sp)
-    _p_hash = hashlib.md5(_p_str.encode()).hexdigest()[:8]
-    _cost_note = f"p={_p_hash}" + (f"|{_cost_note}" if _cost_note else "")
-    _timeframe_str = f"{bar_agg}min{'|intraday' if intraday else ''}"
-    _tf_notes = f"tf={_timeframe_str}"
-    _combined_notes = "; ".join(filter(None, [_cost_note, _tf_notes]))
-
-    # -- Cache lookup (before loading bars to avoid wasted I/O on cache hit) --
+    # -- Cache key + lookup (reuses _build_cache_key) --
+    _ck = _build_cache_key(strategy, strategy_params, intraday)
+    strategy_hash = _ck.strategy_hash
+    _cost_note = _ck.cost_note
+    _timeframe_str = _ck.timeframe_str
+    _combined_notes = _ck.combined_notes
+    strategy_code: str | None = None
     if strategy_hash:
-        from src.strategies.param_registry import ParamRegistry
-        _cache_reg = ParamRegistry()
-        cached = _cache_reg.get_cached_result(
-            strategy_hash=strategy_hash,
-            symbol=symbol,
-            start=start,
-            end=end,
-            notes=_combined_notes,
-        )
-        _cache_reg.close()
-        if cached is not None:
-            cached["cache_hit"] = True
-            return cached
+        _, strategy_code = _compute_code_hash(resolved_slug)
+
+    cached = lookup_backtest_cache(symbol, start, end, strategy, strategy_params, intraday)
+    if cached is not None:
+        return cached
 
     # Load bars — use pre-aggregated table when available (5m, 1h),
     # fall back to 1m + Python aggregation for other timeframes.
