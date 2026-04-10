@@ -6,6 +6,7 @@ All functions accept flat dicts and return JSON-serializable dicts.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 from typing import Any
 
@@ -15,6 +16,26 @@ from src.simulator.types import PRESETS, PathConfig
 # Set QUANT_RELOAD_STRATEGY=1 to force reload (useful during dev).
 _factory_cache: dict[str, Any] = {}
 _RELOAD_STRATEGY = os.environ.get("QUANT_RELOAD_STRATEGY", "0") == "1"
+
+
+def _normalize_params_for_hash(params: dict[str, Any]) -> str:
+    """Normalize params for consistent hashing: all numeric values become floats.
+
+    Prevents int/float type mismatches (e.g. 20 vs 20.0) from producing
+    different hash values for logically identical parameter sets.
+    """
+    def _norm(v: Any) -> Any:
+        if isinstance(v, bool):
+            return v  # bool is a subclass of int; preserve it
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, dict):
+            return {k: _norm(val) for k, val in v.items()}
+        if isinstance(v, list):
+            return [_norm(i) for i in v]
+        return v
+
+    return json.dumps({k: _norm(v) for k, v in params.items()}, sort_keys=True)
 
 
 def _compute_force_flat_indices(timestamps: list) -> set[int]:
@@ -342,6 +363,11 @@ def _build_runner(
     merged.pop("bar_agg", None)
     if "max_loss" not in merged:
         merged["max_loss"] = 500_000
+    # Pass initial_capital to factories that accept it (e.g. vol_managed_bnh)
+    import inspect
+    _sig = inspect.signature(factory)
+    if "initial_capital" in _sig.parameters:
+        merged["initial_capital"] = initial_equity
     engine_factory = lambda: factory(**merged)  # noqa: E731
     return BacktestRunner(
         engine_factory,
@@ -382,7 +408,7 @@ def _format_backtest_result(
     return out
 
 
-def _extract_trade_pnls(trade_log) -> list[float]:
+def _extract_trade_pnls(trade_log, last_price: float | None = None) -> list[float]:
     """Pair entry/exit fills to compute per-trade PnL in price points * lots."""
     pnls: list[float] = []
     entry = None
@@ -394,6 +420,10 @@ def _extract_trade_pnls(trade_log) -> list[float]:
                 diff = (fill.fill_price - entry.fill_price) * entry.lots
                 pnls.append(diff if entry.side == "buy" else -diff)
                 entry = None
+    # Mark-to-market remaining open position
+    if entry is not None and last_price is not None:
+        diff = (last_price - entry.fill_price) * entry.lots
+        pnls.append(diff if entry.side == "buy" else -diff)
     return pnls
 
 
@@ -537,7 +567,7 @@ def run_backtest_realdata_for_mcp(
     _comm_fixed = _sp.get("commission_fixed_per_contract", 0)
     _cost_note = f"sbps={_slip_bps}|cfix={_comm_fixed}" if (_slip_bps or _comm_fixed) else None
     import hashlib, json as _json
-    _p_str = _json.dumps(_sp, sort_keys=True)
+    _p_str = _normalize_params_for_hash(_sp)
     _p_hash = hashlib.md5(_p_str.encode()).hexdigest()[:8]
     _cost_note = f"p={_p_hash}" + (f"|{_cost_note}" if _cost_note else "")
     _timeframe_str = f"{bar_agg}min{'|intraday' if intraday else ''}"
@@ -703,7 +733,8 @@ def run_backtest_realdata_for_mcp(
     base["bnh_returns"] = bnh_returns
     base["bnh_equity"] = bnh_eq.tolist()
     base["bars_count"] = len(bars)
-    base["trade_pnls"] = _extract_trade_pnls(result.trade_log)
+    _last_close = raw[-1].close if raw else None
+    base["trade_pnls"] = _extract_trade_pnls(result.trade_log, last_price=_last_close)
     base["trade_signals"] = _serialize_trade_log(result.trade_log)
     base["timeframe_minutes"] = bar_agg
     _ind_series = getattr(result, "indicator_series", {})
