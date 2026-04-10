@@ -1,12 +1,12 @@
 ## ADDED Requirements
 
 ### Requirement: SecretManager interface
-The system SHALL provide a `SecretManager` class that retrieves secrets from Google Secret Manager (GCP project `tx-collar-trader`) at runtime. No secrets SHALL ever be stored on disk or in environment variables.
+The system SHALL provide a `SecretManager` class that retrieves secrets from Google Secret Manager (GCP project `flash-realm-492814`) at runtime. No secrets SHALL ever be stored on disk or in environment variables.
 
 ```python
 @dataclass
 class SecretManager:
-    project_id: str = "tx-collar-trader"
+    project_id: str = "flash-realm-492814"
 
     def get(self, name: str, version: str = "latest") -> str: ...
     def get_batch(self, names: list[str]) -> dict[str, str]: ...
@@ -14,7 +14,7 @@ class SecretManager:
 
 #### Scenario: Retrieve a single secret
 - **WHEN** `SecretManager.get("SHIOAJI_API_KEY")` is called
-- **THEN** the system SHALL fetch the secret value from `projects/tx-collar-trader/secrets/SHIOAJI_API_KEY/versions/latest` and return it as a string
+- **THEN** the system SHALL fetch the secret value from `projects/flash-realm-492814/secrets/SHIOAJI_API_KEY/versions/latest` and return it as a string
 
 #### Scenario: Retrieve a batch of secrets
 - **WHEN** `SecretManager.get_batch(["SHIOAJI_API_KEY", "SHIOAJI_SECRET_KEY"])` is called

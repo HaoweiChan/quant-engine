@@ -2,7 +2,7 @@
 
 The quant-engine currently reads Sinopac broker credentials from environment variables (`SINOPAC_API_KEY`, `SINOPAC_SECRET_KEY`) in `quant_engine/data/connector.py`. This means secrets exist on disk (`.env` files, shell profiles) or in process environment. As the platform grows to support Schwab, Binance, and MLflow tracking, credential management needs a secure, centralized approach.
 
-All secrets are stored in Google Secret Manager under GCP project `tx-collar-trader`. The platform must fetch them at runtime with no fallback to env vars or disk.
+All secrets are stored in Google Secret Manager under GCP project `flash-realm-492814`. The platform must fetch them at runtime with no fallback to env vars or disk.
 
 ## Goals / Non-Goals
 

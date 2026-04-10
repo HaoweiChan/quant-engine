@@ -17,7 +17,7 @@
 
 ## 4. SecretManager Core
 
-- [x] 4.1 Implement `SecretManager.__init__(project_id="tx-collar-trader")` that creates the GSM client
+- [x] 4.1 Implement `SecretManager.__init__(project_id="flash-realm-492814")` that creates the GSM client
 - [x] 4.2 Implement `SecretManager.get(name, version="latest") -> str` that fetches a single secret from GSM
 - [x] 4.3 Implement `SecretManager.get_batch(names) -> dict[str, str]` that fetches multiple secrets
 - [x] 4.4 Implement `SecretManager.get_group(group) -> dict[str, str]` that resolves logical names from TOML and fetches all secrets in the group

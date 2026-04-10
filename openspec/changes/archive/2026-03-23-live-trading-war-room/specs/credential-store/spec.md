@@ -14,7 +14,7 @@ class SecretManager:
 
 #### Scenario: Create new secret
 - **WHEN** `set("BINANCE_API_KEY", "abc123")` is called and the secret does not exist in GSM
-- **THEN** it SHALL create a new secret in `projects/tx-collar-trader/secrets/BINANCE_API_KEY` and add the value as version 1
+- **THEN** it SHALL create a new secret in `projects/flash-realm-492814/secrets/BINANCE_API_KEY` and add the value as version 1
 
 #### Scenario: Update existing secret
 - **WHEN** `set("SINOPAC_API_KEY", "new_value")` is called and the secret already exists

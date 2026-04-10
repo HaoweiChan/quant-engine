@@ -1,6 +1,6 @@
 ## Why
 
-All secrets (broker API keys, future service credentials) are currently read from environment variables, which means they exist on disk or in shell history. The platform needs a centralized, secure secret management layer using Google Secret Manager (GSM) under GCP project `tx-collar-trader`. Secrets must never be stored on the machine — GSM is the single source of truth for all credentials.
+All secrets (broker API keys, future service credentials) are currently read from environment variables, which means they exist on disk or in shell history. The platform needs a centralized, secure secret management layer using Google Secret Manager (GSM) under GCP project `flash-realm-492814`. Secrets must never be stored on the machine — GSM is the single source of truth for all credentials.
 
 ## What Changes
 
@@ -28,4 +28,4 @@ All secrets (broker API keys, future service credentials) are currently read fro
 - **Modified**: `quant_engine/pipeline/config.py` — add secret name config loading
 - **New dependency**: `google-cloud-secret-manager>=2.20`
 - **Config**: `config/secrets.toml` mapping logical names to GSM secret IDs
-- **Operator action required**: populate GSM secrets in project `tx-collar-trader`
+- **Operator action required**: populate GSM secrets in project `flash-realm-492814`
