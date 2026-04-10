@@ -18,7 +18,7 @@ _singleton: SecretManager | None = None
 class SecretManager:
     """Read/write secrets from GSM with process-lifetime caching."""
 
-    def __init__(self, project_id: str = "tx-collar-trader") -> None:
+    def __init__(self, project_id: str = "flash-realm-492814") -> None:
         self._project_id = project_id
         self._client: SecretManagerServiceClient = SecretManagerServiceClient()
         self._cache: dict[str, str] = {}
@@ -117,7 +117,7 @@ class SecretManager:
         return {logical: self.get(gsm_id) for logical, gsm_id in mapping.items()}
 
 
-def get_secret_manager(project_id: str = "tx-collar-trader") -> SecretManager:
+def get_secret_manager(project_id: str = "flash-realm-492814") -> SecretManager:
     """Return a process-wide singleton SecretManager."""
     global _singleton  # noqa: PLW0603
     if _singleton is None:
