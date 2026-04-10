@@ -17,6 +17,17 @@ if [[ "$BACKEND_PORT" == "8000" || "$FRONTEND_PORT" == "5173" ]]; then
   exit 1
 fi
 
+kill_port() {
+  local port=$1
+  local pid
+  pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP '(?<=pid=)\d+' | head -1)
+  if [[ -n "$pid" ]]; then
+    echo "  [cleanup] Killed stale process $pid on :$port"
+    kill "$pid" 2>/dev/null || true
+    sleep 0.3
+  fi
+}
+
 echo "=== Quant Engine — DEV ==="
 echo "  branch:        $BRANCH"
 echo "  backend port:  $BACKEND_PORT"
@@ -24,10 +35,12 @@ echo "  frontend port: $FRONTEND_PORT"
 echo
 
 echo "[1/2] Starting backend on :$BACKEND_PORT (with --reload)..."
+kill_port "$BACKEND_PORT"
 uv run uvicorn src.api.main:app --host 127.0.0.1 --port "$BACKEND_PORT" --reload &
 BACKEND_PID=$!
 trap 'kill $BACKEND_PID 2>/dev/null || true' EXIT
 
 echo "[2/2] Starting frontend dev server on :$FRONTEND_PORT..."
+kill_port "$FRONTEND_PORT"
 cd frontend
 QE_BACKEND_PORT="$BACKEND_PORT" npm run dev -- --port "$FRONTEND_PORT" --host
