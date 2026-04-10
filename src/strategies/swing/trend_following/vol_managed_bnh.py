@@ -279,6 +279,7 @@ class _OverlayHub:
         # Public state (updated each tick)
         self.desired_overlay_lots: float = 0.0
         self.golden_cross_active: bool = False
+        self.base_lots: float = 1.0  # set by entry policy after risk-based sizing
         self.rv_value: float | None = None
         self.trend_sma_value: float | None = None
         self.boost_sma_fast_value: float | None = None
@@ -384,11 +385,12 @@ class _OverlayHub:
 # ---------------------------------------------------------------------------
 
 class InverseVolEntryPolicy(EntryPolicy):
-    """Enter 1 lot on first bar (permanent base). Tick overlay hub."""
+    """Enter risk-sized base position on first bar (permanent B&H). Tick overlay hub."""
 
-    def __init__(self, config: PyramidConfig, hub: _OverlayHub) -> None:
+    def __init__(self, config: PyramidConfig, hub: _OverlayHub, initial_capital: float = 2_000_000.0) -> None:
         self._config = config
         self.hub = hub
+        self._initial_capital = initial_capital
 
     def should_enter(
         self,
@@ -410,14 +412,32 @@ class InverseVolEntryPolicy(EntryPolicy):
             return None
 
         stop_distance = self._config.stop_atr_mult * atr
+        equity = account.equity if account is not None else self._initial_capital
+
+        # Use margin-based sizing: B&H base lot has a nominal stop that never
+        # triggers (protected by min_hold_lots), so stop-distance risk sizing
+        # is not meaningful. margin_fraction controls capital deployment.
+        from src.core.sizing import compute_margin_lots
+        base_lots = compute_margin_lots(
+            equity=equity,
+            margin_per_unit=snapshot.margin_per_unit,
+            margin_fraction=self._config.margin_limit * 0.20,  # 20% of margin budget for base
+            min_lot=snapshot.min_lot,
+        )
+        if base_lots <= 0:
+            return None
+        # Store on hub so add policy can scale overlay proportionally
+        self.hub.base_lots = base_lots
+
         return EntryDecision(
-            lots=snapshot.min_lot,
+            lots=base_lots,
             contract_type="large",
             initial_stop=snapshot.price - stop_distance,
             direction="long",
             metadata={
                 "rv": self.hub.rv_value,
                 "desired_overlay": self.hub.desired_overlay_lots,
+                "base_lots": base_lots,
             },
         )
 
@@ -473,10 +493,12 @@ class InverseVolAddPolicy(AddPolicy):
         if desired <= 0:
             return None
 
-        # Round to nearest 0.5 lot for practical sizing
-        lots = round(desired * 2) / 2
-        if lots < 0.5:
-            return None
+        # Scale overlay by base position size for contract-agnostic sizing.
+        # Hub computes desired lots as "units of exposure"; multiply by
+        # base_lots so MTX (4x base) gets proportionally more overlay lots.
+        lots = desired * self._hub.base_lots
+        # Round to nearest whole lot
+        lots = max(1.0, round(lots))
 
         return AddDecision(
             lots=lots,
@@ -527,6 +549,7 @@ class InverseVolStopPolicy(StopPolicy):
 
 def create_vol_managed_bnh_engine(
     max_loss: float = 500_000.0,
+    initial_capital: float = 2_000_000.0,
     # Vol overlay
     vol_lookback_days: int = 20,
     vol_target_annual: float = 0.15,
@@ -586,7 +609,7 @@ def create_vol_managed_bnh_engine(
         boost_lots=boost_lots,
     )
 
-    entry = InverseVolEntryPolicy(config, hub)
+    entry = InverseVolEntryPolicy(config, hub, initial_capital=initial_capital)
     add_policy: AddPolicy = InverseVolAddPolicy(hub)
     engine = PositionEngine(
         entry_policy=entry,
