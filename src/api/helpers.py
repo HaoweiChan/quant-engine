@@ -650,6 +650,10 @@ def run_strategy_backtest(
     )
     if "error" in result:
         raise ValueError(result["error"])
+    # Ensure numpy arrays are converted to lists for JSON serialization.
+    for key in ("daily_returns", "bnh_returns"):
+        if key in result and hasattr(result[key], "tolist"):
+            result[key] = result[key].tolist()
     if provenance:
         result["provenance"] = provenance
     return result
