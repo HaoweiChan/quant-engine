@@ -83,7 +83,7 @@ class TestWinRateAndProfitFactor:
             _fill("sell", 110.0, ts + timedelta(hours=1), reason="exit"),
         ]
         assert win_rate(log) == 1.0
-        assert profit_factor(log) == float("inf")
+        assert profit_factor(log) == 9999.0
 
     def test_mixed(self) -> None:
         ts = datetime(2024, 1, 2, 9, 0, tzinfo=UTC)

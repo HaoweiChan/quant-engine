@@ -248,7 +248,8 @@ class EventEngine:
                 self.run()
 
         dd_series = drawdown_series(equity_curve)
-        metrics = compute_all_metrics(equity_curve, trade_log, 252.0)
+        last_close = bars[-1].get("close") if bars else None
+        metrics = compute_all_metrics(equity_curve, trade_log, 252.0, last_price=last_close)
         m_returns = monthly_returns(equity_curve[1:], ts_list) if ts_list else {}
         y_returns = yearly_returns(equity_curve[1:], ts_list) if ts_list else {}
 

@@ -201,7 +201,8 @@ class BacktestRunner:
             equity_curve.append(equity)
 
         dd_series = drawdown_series(equity_curve)
-        metrics = compute_all_metrics(equity_curve, trade_log, self._periods_per_year)
+        last_close = bars[-1]["close"] if bars else None
+        metrics = compute_all_metrics(equity_curve, trade_log, self._periods_per_year, last_price=last_close)
         m_returns = monthly_returns(equity_curve[1:], ts_list) if ts_list else {}
         y_returns = yearly_returns(equity_curve[1:], ts_list) if ts_list else {}
         impact_report = self._build_impact_report(trade_log, equity_curve)
