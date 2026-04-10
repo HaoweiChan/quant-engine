@@ -79,24 +79,24 @@ def drawdown_series(equity_curve: list[float]) -> list[float]:
     return result
 
 
-def win_rate(trade_log: list[Fill]) -> float:
-    pnls = _trade_pnls(trade_log)
+def win_rate(trade_log: list[Fill], last_price: float | None = None) -> float:
+    pnls = _trade_pnls(trade_log, last_price)
     if not pnls:
         return 0.0
     return sum(1 for p in pnls if p > 0) / len(pnls)
 
 
-def profit_factor(trade_log: list[Fill]) -> float:
-    pnls = _trade_pnls(trade_log)
+def profit_factor(trade_log: list[Fill], last_price: float | None = None) -> float:
+    pnls = _trade_pnls(trade_log, last_price)
     gross_profit = sum(p for p in pnls if p > 0)
     gross_loss = abs(sum(p for p in pnls if p < 0))
     if gross_loss == 0:
-        return float("inf") if gross_profit > 0 else 0.0
+        return 9999.0 if gross_profit > 0 else 0.0
     return gross_profit / gross_loss
 
 
-def avg_win_loss(trade_log: list[Fill]) -> tuple[float, float]:
-    pnls = _trade_pnls(trade_log)
+def avg_win_loss(trade_log: list[Fill], last_price: float | None = None) -> tuple[float, float]:
+    pnls = _trade_pnls(trade_log, last_price)
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p < 0]
     avg_w = sum(wins) / len(wins) if wins else 0.0
@@ -166,6 +166,7 @@ def composite_fitness(
     min_trades: int = 100,
     min_expectancy: float = 0.0,
     holding_penalty_divisor: float = 10.0,
+    last_price: float | None = None,
 ) -> float:
     """Risk-adjusted composite fitness from Seed Strategy Architecture.
     Formula: (calmar * profit_factor) / duration_penalty
@@ -174,13 +175,13 @@ def composite_fitness(
     tc = trade_count(trade_log)
     if tc < min_trades:
         return -9999.0
-    avg_w, avg_l = avg_win_loss(trade_log)
-    wr = win_rate(trade_log)
+    avg_w, avg_l = avg_win_loss(trade_log, last_price)
+    wr = win_rate(trade_log, last_price)
     expectancy = (wr * avg_w) + ((1.0 - wr) * avg_l)
     if expectancy < min_expectancy:
         return -9999.0
     cal = calmar_ratio(equity_curve, periods_per_year)
-    pf = profit_factor(trade_log)
+    pf = profit_factor(trade_log, last_price)
     ahp = avg_holding_period(trade_log)
     duration_penalty = max(1.0, ahp / holding_penalty_divisor)
     return (cal * pf) / duration_penalty
@@ -190,25 +191,28 @@ def compute_all_metrics(
     equity_curve: list[float],
     trade_log: list[Fill],
     periods_per_year: float = 252.0,
+    last_price: float | None = None,
 ) -> dict[str, float]:
-    avg_w, avg_l = avg_win_loss(trade_log)
+    avg_w, avg_l = avg_win_loss(trade_log, last_price)
     return {
         "sharpe": sharpe_ratio(equity_curve, periods_per_year),
         "sortino": sortino_ratio(equity_curve, periods_per_year),
         "calmar": calmar_ratio(equity_curve, periods_per_year),
         "max_drawdown_abs": max_drawdown_abs(equity_curve),
         "max_drawdown_pct": max_drawdown_pct(equity_curve),
-        "win_rate": win_rate(trade_log),
-        "profit_factor": profit_factor(trade_log),
+        "win_rate": win_rate(trade_log, last_price),
+        "profit_factor": profit_factor(trade_log, last_price),
         "avg_win": avg_w,
         "avg_loss": avg_l,
         "trade_count": float(trade_count(trade_log)),
         "avg_holding_period": avg_holding_period(trade_log),
-        "composite_fitness": composite_fitness(equity_curve, trade_log, periods_per_year),
+        "composite_fitness": composite_fitness(
+            equity_curve, trade_log, periods_per_year, last_price=last_price,
+        ),
     }
 
 
-def _trade_pnls(trade_log: list[Fill]) -> list[float]:
+def _trade_pnls(trade_log: list[Fill], last_price: float | None = None) -> list[float]:
     pnls: list[float] = []
     # Track ALL entry/add fills per symbol to correctly handle pyramid positions.
     open_fills: dict[str, list[tuple[float, float, str]]] = {}  # symbol -> [(price, lots, side)]
@@ -225,5 +229,17 @@ def _trade_pnls(trade_log: list[Fill]) -> list[float]:
                     total_pnl += (fill.fill_price - ep) * elots
                 else:
                     total_pnl += (ep - fill.fill_price) * elots
+            pnls.append(total_pnl)
+    # Mark-to-market remaining open positions at last known price.
+    # Without this, strategies that hold permanent positions (e.g. vol_managed_bnh)
+    # show 0% win rate despite large unrealized gains reflected in the equity curve.
+    if last_price is not None:
+        for entries in open_fills.values():
+            total_pnl = 0.0
+            for ep, elots, eside in entries:
+                if eside == "buy":
+                    total_pnl += (last_price - ep) * elots
+                else:
+                    total_pnl += (ep - last_price) * elots
             pnls.append(total_pnl)
     return pnls
