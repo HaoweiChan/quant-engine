@@ -107,8 +107,6 @@ export function TearSheet() {
   const startDate = useStrategyStore((s) => s.startDate);
   const endDate = useStrategyStore((s) => s.endDate);
   const params = useStrategyStore((s) => s.params);
-  const maxLoss = useStrategyStore((s) => s.maxLoss);
-  const initialCapital = useStrategyStore((s) => s.initialCapital);
   const slippageBps = useStrategyStore((s) => s.slippageBps);
   const commissionBps = useStrategyStore((s) => s.commissionBps);
   const commissionFixed = useStrategyStore((s) => s.commissionFixed);
@@ -364,6 +362,21 @@ export function TearSheet() {
   }, [symbol, baseTfMin]);
 
   const handleRun = async () => {
+    // Read fresh store state so this can be called immediately after setParams/setDates
+    // without relying on stale React closure values (e.g. when auto-run from history click).
+    const ss = useStrategyStore.getState();
+    const runStrategy = ss.strategy;
+    const runSymbol = ss.symbol;
+    const runStart = ss.startDate;
+    const runEnd = ss.endDate;
+    const runParams = ss.params;
+    const runMaxLoss = ss.maxLoss;
+    const runInitCap = ss.initialCapital;
+    const runSlippageBps = ss.slippageBps;
+    const runCommBps = ss.commissionBps;
+    const runCommFixed = ss.commissionFixed;
+    const runIntraday = ss.intraday;
+
     startRun();
     setOhlcvBars([]);
     setDetailBars(null);
@@ -371,29 +384,34 @@ export function TearSheet() {
     setDetailLoading(false);
     try {
       const [paramHash, metaInfo] = await Promise.all([
-        computeParamHash(params),
+        computeParamHash(runParams),
         fetchMeta().catch(() => ({ git_commit: "unknown", version: "unknown" })),
       ]);
       const r = await runBacktest({
-        strategy, symbol, start: startDate, end: endDate, params,
-        max_loss: maxLoss, initial_capital: initialCapital,
-        slippage_bps: slippageBps, commission_bps: commissionBps,
-        commission_fixed_per_contract: commissionFixed,
-        intraday,
+        strategy: runStrategy, symbol: runSymbol, start: runStart, end: runEnd, params: runParams,
+        max_loss: runMaxLoss, initial_capital: runInitCap,
+        slippage_bps: runSlippageBps, commission_bps: runCommBps,
+        commission_fixed_per_contract: runCommFixed,
+        intraday: runIntraday,
         provenance: {
           param_hash: paramHash,
-          date_range: `${startDate}~${endDate}`,
-          cost_model: { slippage_bps: slippageBps, commission_fixed: commissionFixed },
+          date_range: `${runStart}~${runEnd}`,
+          cost_model: { slippage_bps: runSlippageBps, commission_fixed: runCommFixed },
           git_commit: metaInfo.git_commit,
         },
       });
+      // The streaming endpoint always returns 200; errors come as {detail: "..."}
+      if ((r as any).detail) {
+        setError((r as any).detail);
+        return;
+      }
       setResult(r);
       refreshAll();
-      const tfMin = r.timeframe_minutes ?? params.bar_agg ?? 1;
+      const tfMin = r.timeframe_minutes ?? runParams.bar_agg ?? 1;
       setBaseTfMin(tfMin);
       const chartTf = pickChartTf(r.bars_count ?? 0, tfMin);
       setOverviewTfMin(chartTf);
-      fetchOHLCV(symbol, startDate, endDate, chartTf)
+      fetchOHLCV(runSymbol, runStart, runEnd, chartTf)
         .then((d) => setOhlcvBars(d.bars))
         .catch(() => setOhlcvBars([]));
     } catch (e) {
