@@ -117,8 +117,7 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
     min_expectancy: float = float(cfg.get("min_expectancy", 0.0))
     min_oos_objective: float = float(cfg.get("min_oos_objective", 0.0))
 
-    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "taifex_data.db"
-    db = Database(f"sqlite:///{db_path}")
+    db = Database()
     raw = db.get_ohlcv(symbol, start_dt, end_dt)
 
     if not raw:

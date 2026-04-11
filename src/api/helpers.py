@@ -19,37 +19,15 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "market.db"
+from src.data.contracts import CONTRACTS, CONTRACTS_BY_SYMBOL, TaifexContract
+from src.data.db import DEFAULT_DB_PATH
 
-# ── TAIFEX Futures Continuous Contract Registry ─────────────────────────────
-# Maps (display_name) -> (db_symbol, shioaji_contract_path)
-@dataclass
-class FuturesContract:
-    display: str
-    db_symbol: str
-    shioaji_path: str
-    description: str
+_DB_PATH = DEFAULT_DB_PATH
 
-
-FUTURES_CONTRACTS: list[FuturesContract] = [
-    FuturesContract("TX (TAIEX)", "TX", "Futures.TXF.TXFR1", "台指期 · 大台"),
-    FuturesContract("MTX (Mini-TAIEX)", "MTX", "Futures.MXF.MXFR1", "小台指期 · 小台"),
-    FuturesContract("TMF (10Y Bond)", "TMF", "Futures.T5F.T5FR1", "十年期公債期貨"),
-    FuturesContract("TE (Electronics)", "TE", "Futures.TEF.TEFR1", "電子期貨"),
-    FuturesContract("TF (Finance)", "TF", "Futures.TFF.TFFR1", "金融期貨"),
-    FuturesContract("XIF (Non-Fin/Elec)", "XIF", "Futures.XIF.XIFR1", "非金電期貨"),
-    FuturesContract("GTF (OTC 200)", "GTF", "Futures.GTF.GTFR1", "櫃買期貨"),
-    FuturesContract("G2F (OTC Biotech)", "G2F", "Futures.G2F.G2FR1", "櫃買富櫃200期貨"),
-    FuturesContract("RHF (USD/TWD FX)", "RHF", "Futures.RHF.RHFR1", "美元兌台幣匯率期貨"),
-    FuturesContract("GDF (Gold)", "GDF", "Futures.GDF.GDFR1", "黃金期貨"),
-    FuturesContract("BTF (Brent Oil)", "BTF", "Futures.BTF.BTFR1", "布蘭特原油期貨"),
-    FuturesContract("SPF (S&P 500)", "SPF", "Futures.SPF.SPFR1", "美國標普500期貨"),
-    FuturesContract("UNF (DJIA)", "UNF", "Futures.UNF.UNFR1", "美國道瓊期貨"),
-    FuturesContract("UDF (Nasdaq 100)", "UDF", "Futures.UDF.UDFR1", "那斯達克100期貨"),
-    FuturesContract("F1F (Phila Semi)", "F1F", "Futures.F1F.F1FR1", "費城半導體期貨"),
-]
-
-FUTURES_BY_SYMBOL: dict[str, FuturesContract] = {c.db_symbol: c for c in FUTURES_CONTRACTS}
+# Re-export for backward compatibility with API routes that import from here
+FUTURES_CONTRACTS = CONTRACTS
+FUTURES_BY_SYMBOL = CONTRACTS_BY_SYMBOL
+FuturesContract = TaifexContract
 
 TIMEFRAMES: list[dict[str, str]] = [
     {"label": "1 min", "value": "1"},
@@ -125,7 +103,7 @@ def _crawl_worker(db_symbol: str, start_str: str, end_str: str) -> None:
             _crawl_state.finished = True
         return
 
-    _crawl_log(f"Crawl started: {contract.display} ({contract.shioaji_path})")
+    _crawl_log(f"Crawl started: {contract.display_name} ({contract.shioaji_path})")
     _crawl_log(f"Date range: {start_str} to {end_str}")
 
     try:
