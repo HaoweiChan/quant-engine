@@ -41,17 +41,17 @@ mini = 50.0
 symbol = "TMF"
 exchange = "TAIFEX"
 currency = "TWD"
-point_value = 2000.0
-margin_initial = 35000.0
-margin_maintenance = 27000.0
-min_tick = 0.001
+point_value = 10.0
+margin_initial = 17800.0
+margin_maintenance = 13650.0
+min_tick = 1.0
 fee_per_contract = 30.0
 tax_rate = 0.00002
 
 [contracts.TMF.lot_types]
-standard = 2000.0
+micro = 10.0
 
 [lot_translation]
 large = "TX"
 small = "MTX"
-micro = "MTX"
+micro = "TMF"

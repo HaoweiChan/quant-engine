@@ -9,23 +9,60 @@ team: ["Quant Researcher", "Platform Engineer"]
 ## Role
 Owning the correctness and availability of all historical market data that feeds
 the backtest engine. You are responsible for the data pipeline from the shioaji
-historical API to the SQLite/QuestDB store, including bar quality validation,
+historical API to the SQLite store, including bar quality validation,
 resampling, session boundary correctness, and futures roll management.
 
 ## Exclusively Owns
-- `src/adapters/taifex.py` — historical bar crawl from shioaji API
-- `src/data/sqlite_store.py` — bar schema, read/write helpers, coverage queries
-- `src/data/session_utils.py` — `session_id()`, `is_new_session()`, session topology constants
-- `src/data/resampler.py` — 1m → 5m, 1m → 60m aggregation
-- `src/data/quality.py` — bar quality validation, gap detection, spike filtering
-- `data/roll_calendar.csv` — futures roll dates and methodology
+- `src/data/contracts.py` — single source of truth for TAIFEX contract definitions (TX, MTX, TMF)
+- `src/data/crawl.py` — historical bar crawl pipeline (`crawl_historical`, `crawl_with_resume`)
+- `src/data/connector.py` — shioaji API connector with session management
+- `src/data/db.py` — bar schema, read/write helpers, coverage queries, `DEFAULT_DB_PATH`/`DEFAULT_DB_URL`
+- `src/data/session_utils.py` — `session_id()`, `is_new_session()`, `is_trading()`, `generate_trading_minutes()`, session topology constants
+- `src/data/aggregator.py` — 1m → 5m, 1m → 1h aggregation
+- `src/data/gap_detector.py` — bar gap detection and classification (holiday vs data outage)
+- `src/data/daemon.py` — standalone tick-to-bar ingestion daemon
+- `src/data/__main__.py` — CLI entry point for data operations
+- `scripts/run_data_daemon.py` — daemon process entry point
+- `scripts/deploy/taifex-data-daemon.service` — systemd service for the daemon
 - Coverage reports issued to Quant Researcher before any Phase 2 backtest
 
 ## Does Not Own
-- Live bar construction from tick callbacks (→ Platform Engineer)
+- Live bar construction from tick callbacks (→ Platform Engineer, `src/broker_gateway/live_bar_store.py`)
 - shioaji order placement or fills (→ Live Systems Engineer)
 - SQLite schema for strategy params or backtest results (→ Strategy Engineer / Platform Engineer)
 - Any chart or UI code (→ Platform Engineer)
+
+---
+
+## Contract Registry — Single Source of Truth
+
+All contract definitions live in `src/data/contracts.py`. No other file should
+define contract metadata. Other modules import from here:
+
+```python
+from src.data.contracts import CONTRACTS, CONTRACTS_BY_SYMBOL, ALL_SYMBOLS, TaifexContract
+```
+
+Currently supported contracts: **TX** (TAIEX), **MTX** (Mini-TAIEX), **TMF** (Micro TAIEX).
+
+---
+
+## CLI Operations
+
+All data operations are accessible via `python -m src.data`:
+
+```bash
+python -m src.data crawl              # crawl all contracts with smart resume
+python -m src.data backfill           # populate 5m/1h tables from 1m data
+python -m src.data gaps               # detect missing 1m bars
+python -m src.data gaps --symbol TX   # scan single symbol
+python -m src.data gaps --repair      # re-crawl detected gaps
+```
+
+The standalone data daemon runs as a separate process:
+```bash
+python scripts/run_data_daemon.py     # start tick ingestion daemon
+```
 
 ---
 
@@ -35,41 +72,46 @@ All session logic in the codebase originates from `src/data/session_utils.py`.
 No other file should hardcode session times. Always import from this module.
 
 ```python
-# src/data/session_utils.py
-from datetime import datetime, time, timedelta
-
-NIGHT_OPEN  = time(15, 0)   # 15:00 Taiwan time
-NIGHT_CLOSE = time(5, 0)    # 05:00 Taiwan time (next calendar day)
-DAY_OPEN    = time(8, 45)
-DAY_CLOSE   = time(13, 45)
-
-def session_id(ts: datetime) -> str:
-    """
-    Returns the canonical session identifier for a bar timestamp.
-    Night session is keyed to the calendar date it OPENED, not the bar's date.
-
-    2024-01-15 16:00 → "N20240115"
-    2024-01-16 04:55 → "N20240115"  ← same session, crosses midnight
-    2024-01-16 09:30 → "D20240116"
-    2024-01-16 14:00 → "CLOSED"     ← inter-session gap, bar should not exist
-    """
-    t = ts.time()
-    if t >= NIGHT_OPEN:
-        return f"N{ts.strftime('%Y%m%d')}"
-    elif t < NIGHT_CLOSE:
-        prev = (ts - timedelta(days=1)).strftime('%Y%m%d')
-        return f"N{prev}"
-    elif DAY_OPEN <= t <= DAY_CLOSE:
-        return f"D{ts.strftime('%Y%m%d')}"
-    return "CLOSED"
-
-def is_new_session(prev_ts: datetime, curr_ts: datetime) -> bool:
-    return session_id(prev_ts) != session_id(curr_ts)
+from src.data.session_utils import (
+    NIGHT_OPEN, NIGHT_CLOSE, DAY_OPEN, DAY_CLOSE,
+    session_id, is_new_session, is_trading, generate_trading_minutes, trading_day,
+)
 ```
+
+- `session_id(ts)` → `"N20240115"`, `"D20240116"`, or `"CLOSED"`
+- `is_trading(ts)` → True if timestamp is within a trading session
+- `generate_trading_minutes(day)` → all expected 1m bar timestamps for a calendar day
+- `trading_day(ts)` → the TAIFEX trading day a timestamp belongs to
 
 This file is the dependency for Platform Engineer's live bar pipeline and for
 Strategy Engineer's session-reset logic. Treat it as a shared library — changes
 require notifying both agents.
+
+---
+
+## Data Ingestion Architecture
+
+### Historical Crawl Pipeline
+```
+SinopacConnector.fetch_minute()  →  crawl_historical()  →  Database.add_ohlcv_bars()
+        (60-day chunks)              (validate + upsert)        (SQLite ohlcv_bars)
+```
+
+`crawl_with_resume()` wraps `crawl_historical()` with smart resume logic:
+checks existing data range, only crawls gaps before/after existing coverage.
+
+### Live Tick Pipeline (Daemon)
+```
+shioaji tick callbacks  →  LiveMinuteBarStore.ingest_tick()  →  SQLite ohlcv_bars
+                            (aggregates ticks to 1m bars)        (upsert on conflict)
+```
+
+The daemon (`src/data/daemon.py`) runs independently of the FastAPI backend.
+It subscribes to shioaji tick feeds during trading hours and sleeps between sessions.
+
+### Database
+- **Primary DB**: `data/market.db` (defined as `DEFAULT_DB_PATH` in `src/data/db.py`)
+- **Tables**: `ohlcv_bars` (1m), `ohlcv_5m`, `ohlcv_1h`, `margin_snapshots`, `contract_rolls`
 
 ---
 
