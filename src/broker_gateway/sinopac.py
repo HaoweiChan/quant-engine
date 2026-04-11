@@ -189,7 +189,7 @@ class SinopacGateway(BrokerGateway):
             volume = int(getattr(tick, "volume", 0))
             if price <= 0:
                 return
-            symbol = "TX" if code.startswith("TXF") else "MTX" if code.startswith("MXF") else code
+            symbol = "TX" if code.startswith("TXF") else "MTX" if code.startswith("MXF") else "TMF" if code.startswith("TMF") else code
             raw_ts = getattr(tick, "datetime", None)
             if isinstance(raw_ts, datetime):
                 tick_timestamp = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=ZoneInfo("Asia/Taipei"))
@@ -223,6 +223,7 @@ class SinopacGateway(BrokerGateway):
         futures_groups = [
             ("TX", "TXF"),
             ("MTX", "MXF"),
+            ("TMF", "TMF"),
         ]
         for symbol, group_name in futures_groups:
             if symbol in _SUBSCRIBED_CONTRACTS:
@@ -449,7 +450,7 @@ class SinopacGateway(BrokerGateway):
 
 def _point_value_for(code: str) -> float:
     """Quick point value lookup. Full logic in TaifexAdapter.get_point_value()."""
-    _PV = {"TXF": 200.0, "MXF": 50.0, "TEF": 4000.0, "TFF": 1000.0, "XIF": 100.0}
+    _PV = {"TXF": 200.0, "MXF": 50.0, "TMF": 10.0}
     for prefix, pv in _PV.items():
         if code.startswith(prefix):
             return pv

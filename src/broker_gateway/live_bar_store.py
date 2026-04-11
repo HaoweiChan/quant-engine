@@ -9,9 +9,10 @@ from zoneinfo import ZoneInfo
 from datetime import datetime
 from dataclasses import dataclass
 
+from src.data.db import DEFAULT_DB_PATH
+
 logger = structlog.get_logger(__name__)
 TAIPEI_TZ = ZoneInfo("Asia/Taipei")
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "data" / "market.db"
 NIGHT_START_MIN = 15 * 60
 NIGHT_END_MIN = 5 * 60
 DAY_START_MIN = 8 * 60 + 45
@@ -33,6 +34,9 @@ class LiveMinuteBarStore:
 
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = db_path or DEFAULT_DB_PATH
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._bars: dict[str, MinuteBar] = {}
         self._lock = threading.Lock()
 
@@ -73,23 +77,21 @@ class LiveMinuteBarStore:
         )
 
     def _upsert_locked(self, symbol: str, bar: MinuteBar) -> None:
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
         timestamp = bar.timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
-        with sqlite3.connect(str(self._db_path)) as conn:
-            conn.execute(
-                """
-                INSERT INTO ohlcv_bars (symbol, timestamp, open, high, low, close, volume)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(symbol, timestamp) DO UPDATE SET
-                    open = COALESCE(ohlcv_bars.open, excluded.open),
-                    high = MAX(ohlcv_bars.high, excluded.high),
-                    low = MIN(ohlcv_bars.low, excluded.low),
-                    close = excluded.close,
-                    volume = MAX(ohlcv_bars.volume, excluded.volume)
-                """,
-                (symbol, timestamp, bar.open, bar.high, bar.low, bar.close, bar.volume),
-            )
-            conn.commit()
+        self._conn.execute(
+            """
+            INSERT INTO ohlcv_bars (symbol, timestamp, open, high, low, close, volume)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol, timestamp) DO UPDATE SET
+                open = COALESCE(ohlcv_bars.open, excluded.open),
+                high = MAX(ohlcv_bars.high, excluded.high),
+                low = MIN(ohlcv_bars.low, excluded.low),
+                close = excluded.close,
+                volume = MAX(ohlcv_bars.volume, excluded.volume)
+            """,
+            (symbol, timestamp, bar.open, bar.high, bar.low, bar.close, bar.volume),
+        )
+        self._conn.commit()
         logger.debug(
             "live_minute_bar_upserted",
             symbol=symbol,
