@@ -199,7 +199,7 @@ def save_chart(df: pd.DataFrame, path: Path) -> None:
 
 
 def main():
-    db = Database("sqlite:///data/taifex_data.db")
+    db = Database()
     df = load_session_bars(db, "TX")
     df = decompose_returns(df)
     print_summary(df)

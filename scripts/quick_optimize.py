@@ -42,8 +42,7 @@ def p(s=""):
 
 
 def load_data(symbol, start, end):
-    db_path = Path(__file__).resolve().parent.parent / "data" / "taifex_data.db"
-    db = Database(f"sqlite:///{db_path}")
+    db = Database()
     raw = db.get_ohlcv(symbol, datetime.fromisoformat(start), datetime.fromisoformat(end))
     daily_ranges = [b.high - b.low for b in raw]
     daily_atr = _mean(daily_ranges) if daily_ranges else 0.0

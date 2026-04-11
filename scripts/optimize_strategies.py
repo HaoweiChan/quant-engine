@@ -16,8 +16,7 @@ from src.core.types import ImpactParams
 
 
 def load_data(symbol: str, start: str, end: str):
-    db_path = Path(__file__).resolve().parent.parent / "data" / "taifex_data.db"
-    db = Database(f"sqlite:///{db_path}")
+    db = Database()
     raw = db.get_ohlcv(symbol, datetime.fromisoformat(start), datetime.fromisoformat(end))
     if not raw:
         print(f"No data for {symbol} {start}-{end}")
