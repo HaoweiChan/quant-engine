@@ -79,6 +79,54 @@ def crawl_historical(
     return total_bars
 
 
+def crawl_with_resume(
+    contract_symbol: str,
+    db_symbol: str,
+    earliest_start: date,
+    db: Database,
+    connector: SinopacConnector,
+    delay: float = 2.0,
+) -> int:
+    """Smart crawl: only fetch date ranges not already in the DB.
+
+    Checks existing data range and crawls gaps before/after, avoiding
+    redundant API calls for dates already stored.
+    """
+    today = date.today()
+    existing = db.get_ohlcv_range(db_symbol)
+
+    if not existing:
+        logger.info("%s: no existing data — full crawl from %s", db_symbol, earliest_start)
+        return crawl_historical(
+            symbol=contract_symbol, start=earliest_start, end=today,
+            db=db, connector=connector, delay=delay, db_symbol=db_symbol,
+        )
+
+    existing_min, existing_max = existing
+    earliest_db = existing_min.date() if hasattr(existing_min, 'date') else existing_min
+    latest_db = existing_max.date() if hasattr(existing_max, 'date') else existing_max
+    logger.info("%s: existing data %s to %s", db_symbol, earliest_db, latest_db)
+
+    total = 0
+    # Backfill before existing data (skip overlap day — upsert handles dupes)
+    if earliest_start < earliest_db:
+        logger.info("%s: backfilling %s to %s", db_symbol, earliest_start, earliest_db)
+        total += crawl_historical(
+            symbol=contract_symbol, start=earliest_start, end=earliest_db,
+            db=db, connector=connector, delay=delay, db_symbol=db_symbol,
+        )
+    # Forward-fill after existing data
+    if latest_db < today:
+        logger.info("%s: forward-filling %s to %s", db_symbol, latest_db, today)
+        total += crawl_historical(
+            symbol=contract_symbol, start=latest_db, end=today,
+            db=db, connector=connector, delay=delay, db_symbol=db_symbol,
+        )
+    if total == 0:
+        logger.info("%s: data is up to date", db_symbol)
+    return total
+
+
 def create_crawl_pipeline(db: Database | None = None) -> tuple[SinopacConnector, Database]:
     """Create a ready-to-use connector (logged in via GSM) and database."""
     from src.pipeline.config import create_sinopac_connector

@@ -44,6 +44,42 @@ def is_new_session(prev_ts: datetime, curr_ts: datetime) -> bool:
     return session_id(prev_ts) != session_id(curr_ts)
 
 
+def is_trading(ts: datetime) -> bool:
+    """Return True if *ts* falls within a trading session."""
+    return session_id(ts) != "CLOSED"
+
+
+def generate_trading_minutes(day: date) -> list[datetime]:
+    """Generate all expected 1-minute bar timestamps for a calendar day.
+
+    Covers the after-midnight portion of the previous night session (00:00-04:59),
+    the day session (08:45-13:44), and the pre-midnight portion of the night
+    session opening on this day (15:00-23:59).
+    """
+    minutes: list[datetime] = []
+    # Night session after-midnight: 00:00 → last minute before NIGHT_CLOSE
+    last_night_min = (datetime.combine(day, NIGHT_CLOSE) - timedelta(minutes=1)).time()
+    t = datetime.combine(day, time(0, 0))
+    end = datetime.combine(day, last_night_min)
+    while t <= end:
+        minutes.append(t)
+        t += timedelta(minutes=1)
+    # Day session: DAY_OPEN → last minute before DAY_CLOSE
+    last_day_min = (datetime.combine(day, DAY_CLOSE) - timedelta(minutes=1)).time()
+    t = datetime.combine(day, DAY_OPEN)
+    end = datetime.combine(day, last_day_min)
+    while t <= end:
+        minutes.append(t)
+        t += timedelta(minutes=1)
+    # Night session pre-midnight: NIGHT_OPEN → 23:59
+    t = datetime.combine(day, NIGHT_OPEN)
+    end = datetime.combine(day, time(23, 59))
+    while t <= end:
+        minutes.append(t)
+        t += timedelta(minutes=1)
+    return minutes
+
+
 def trading_day(ts: datetime) -> date:
     """Map a TAIFEX timestamp to its trading day.
 

@@ -1,0 +1,17 @@
+[Unit]
+Description=TAIFEX Futures Data Ingestion Daemon (tick→1m bars)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+WorkingDirectory=__PROJECT_DIR__
+EnvironmentFile=-__PROJECT_DIR__/.env
+ExecStart=__UV_BIN__ run python scripts/run_data_daemon.py
+Restart=always
+RestartSec=30
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "market.db"
+DEFAULT_DB_URL = f"sqlite:///{DEFAULT_DB_PATH}"
 
 from sqlalchemy import (
     DateTime,
@@ -156,7 +161,7 @@ class ContractRoll(Base):
 
 
 class Database:
-    def __init__(self, url: str = "sqlite:///src.db") -> None:
+    def __init__(self, url: str = DEFAULT_DB_URL) -> None:
         self._engine = create_engine(url)
         Base.metadata.create_all(self._engine)
         self._session_factory = sessionmaker(bind=self._engine)
