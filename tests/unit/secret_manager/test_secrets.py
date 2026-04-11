@@ -14,12 +14,12 @@ from src.secrets.manager import SecretManager
 class TestLoadSecretNames:
     def test_parses_valid_toml(self, tmp_path: Path) -> None:
         f = tmp_path / "secrets.toml"
-        f.write_text('[sinopac]\napi_key = "SHIOAJI_API_KEY"\nsecret_key = "SHIOAJI_SECRET_KEY"\n')
+        f.write_text('[sinopac]\napi_key = "SHIOAJI_API_KEY"\nsecret_key = "SHIOAJI_API_SECRET"\n')
         result = load_secret_names(f)
         assert result == {
             "sinopac": {
                 "api_key": "SHIOAJI_API_KEY",
-                "secret_key": "SHIOAJI_SECRET_KEY",
+                "secret_key": "SHIOAJI_API_SECRET",
             }
         }
 
@@ -95,15 +95,15 @@ class TestSecretManagerGetBatch:
             return resp
 
         client.access_secret_version.side_effect = mock_access
-        result = sm.get_batch(["SHIOAJI_API_KEY", "SHIOAJI_SECRET_KEY"])
-        assert result == {"SHIOAJI_API_KEY": "key123", "SHIOAJI_SECRET_KEY": "secret456"}
+        result = sm.get_batch(["SHIOAJI_API_KEY", "SHIOAJI_API_SECRET"])
+        assert result == {"SHIOAJI_API_KEY": "key123", "SHIOAJI_API_SECRET": "secret456"}
         assert client.access_secret_version.call_count == 2
 
 
 class TestSecretManagerGetGroup:
     def test_group_resolution(self, tmp_path: Path) -> None:
         f = tmp_path / "secrets.toml"
-        f.write_text('[sinopac]\napi_key = "SHIOAJI_API_KEY"\nsecret_key = "SHIOAJI_SECRET_KEY"\n')
+        f.write_text('[sinopac]\napi_key = "SHIOAJI_API_KEY"\nsecret_key = "SHIOAJI_API_SECRET"\n')
         with patch(
             "src.secrets.manager.SecretManagerServiceClient"
         ) as mock_cls:
@@ -116,7 +116,7 @@ class TestSecretManagerGetGroup:
         client.access_secret_version.return_value = response
         with patch("src.secrets.manager.load_secret_names") as mock_load:
             mock_load.return_value = {
-                "sinopac": {"api_key": "SHIOAJI_API_KEY", "secret_key": "SHIOAJI_SECRET_KEY"}
+                "sinopac": {"api_key": "SHIOAJI_API_KEY", "secret_key": "SHIOAJI_API_SECRET"}
             }
             result = sm.get_group("sinopac")
         assert result == {"api_key": "fetched", "secret_key": "fetched"}

@@ -2,7 +2,7 @@
 E2E integration test: LiveExecutor against shioaji simulation environment.
 
 Run with:  pytest -m integration tests/test_live_executor_e2e.py -v
-Requires:  SHIOAJI_API_KEY and SHIOAJI_SECRET_KEY in Google Secret Manager
+Requires:  SHIOAJI_API_KEY and SHIOAJI_API_SECRET in Google Secret Manager
            (project: flash-realm-492814)
 
 Design rationale:

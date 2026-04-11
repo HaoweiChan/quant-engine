@@ -110,7 +110,7 @@ class TestZeroKnowledgeConstraint:
     FORBIDDEN_MODULES = {"position_engine", "risk_monitor", "execution", "risk", "simulator"}
 
     def test_no_forbidden_imports_static(self) -> None:
-        prediction_dir = Path(__file__).parent.parent / "src" / "prediction"
+        prediction_dir = Path(__file__).parent.parent.parent.parent / "src" / "prediction"
         for py_file in prediction_dir.glob("*.py"):
             source = py_file.read_text()
             tree = ast.parse(source)
