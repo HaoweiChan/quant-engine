@@ -36,7 +36,7 @@ echo
 
 echo "[1/2] Starting backend on :$BACKEND_PORT (with --reload)..."
 kill_port "$BACKEND_PORT"
-uv run uvicorn src.api.main:app --host 127.0.0.1 --port "$BACKEND_PORT" --reload &
+uv run uvicorn src.api.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload &
 BACKEND_PID=$!
 trap 'kill $BACKEND_PID 2>/dev/null || true' EXIT
 
