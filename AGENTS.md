@@ -5,7 +5,7 @@ Production quantitative trading system for TAIFEX Taiwan Index Futures (TX/MTX).
 - **Instrument**: TX (full-size) and MTX (mini) contracts on TAIFEX
 - **Timeframes**: 1m and 5m kbars; daily for regime detection
 - **Session**: Night 15:00→05:00+1d, Day 08:45→13:45 (TAIFEX; DO NOT confuse with equities)
-- **Infrastructure**: Python backend on netcup Germany server; React+Vite+FastAPI frontend (migrating from Plotly Dash)
+- **Infrastructure**: Python backend on netcup Germany server; React + Vite frontend + FastAPI backend
 - **Broker API**: shioaji (Sinopac)
 
 ### Prod vs Dev environments
@@ -26,23 +26,35 @@ dev script refuses to bind production ports as a safety net.
 ## Repository Layout
 ```
 src/
-  core/           # PositionEngine, types — DO NOT edit without Risk Auditor sign-off
-  strategies/     # Policy sandbox: EntryPolicy, AddPolicy, StopPolicy
-  simulator/      # Backtesting engine, Monte Carlo, report
-  mcp_server/     # MCP tools: run_backtest, run_monte_carlo, run_parameter_sweep
-  adapters/       # taifex.py broker adapter
-  data/           # Bar ingestion, session utils, resampling, QuestDB adapters
-  execution/      # Order routing, fill recording, kill-switch, reconciliation
-  live/           # Tick→bar pipeline, LiveBarBuilder, today's bar persistence
-  api/            # FastAPI endpoints, WebSocket handlers
-  dashboard/      # Plotly Dash (legacy, being migrated)
-frontend/         # React + Vite + TradingView Lightweight Charts
-configs/          # TOML param files per strategy
+  adapters/         # TAIFEX broker adapter shim
+  alerting/         # Alert dispatcher and formatters
+  api/              # FastAPI routes (src/api/routes/) and WebSocket handlers (src/api/ws/)
+  audit/            # Audit trail store for strategy and execution events
+  bar_simulator/    # Intra-bar price simulation used by the backtester
+  broker_gateway/   # Broker ABC, sinopac adapter, live_bar_store, account DB
+  core/             # PositionEngine, types, policies, sizing — DO NOT edit without Risk Auditor sign-off
+  data/             # Bar ingestion, crawl, daemon, session_utils, gap_detector, contracts, aggregator
+  execution/        # Execution engine ABC, live and paper engines, disaster stop monitor
+  indicators/       # 25+ technical indicators (ATR, EMA, RSI, Bollinger, MACD, …)
+  mcp_server/       # MCP tools, facade, validation, run history
+  monte_carlo/      # Block-bootstrap Monte Carlo
+  oms/              # Order management system and volume profiling
+  pipeline/         # Optimizer pipeline config and runner
+  prediction/       # ML prediction engine (regime, direction, volatility, combiner)
+  reconciliation/   # Broker/engine position reconciliation
+  risk/             # Risk monitor, portfolio risk, pre-trade checks, VaR engine
+  runtime/          # IPC, orchestrator, telemetry
+  secrets/          # Credential and secret management
+  simulator/        # Backtester, walk-forward, stress, optimizer, adversarial, metrics, risk report
+  strategies/       # Policy sandbox — organized by holding period (short_term/medium_term/swing)
+                    # × category (breakout/mean_reversion/trend_following) + registry.py
+  trading_session/  # Session manager, session DB, session store
+frontend/           # React + Vite + TradingView Lightweight Charts (War Room dashboard)
+config/             # Runtime TOML configs (engine, prediction, taifex, secrets, strategies/)
+scripts/            # Operational scripts (daemon runner, optimize, run-dev/prod, deploy/)
 .claude/
-  agents/         # Agent definition files
-  skills/         # Domain knowledge docs
-  research/       # Per-strategy research reports (hypothesis, phase1, phase2)
-  incidents/      # Post-mortem docs
+  agents/           # Agent definition files (this handbook)
+  skills/           # Domain knowledge skills
 ```
 
 ---
@@ -158,7 +170,7 @@ def compute_intraday_bnh(bars: list[Bar]) -> BenchmarkResult:
 
 ## MCP Tools Available
 
-All agents with research or implementation tasks can call the backtest MCP server (16 tools total):
+All agents with research or implementation tasks can call the backtest MCP server (17 tools total):
 
 **Core backtesting**
 - `run_backtest` — single path, quick parameter check on synthetic data
@@ -175,7 +187,7 @@ All agents with research or implementation tasks can call the backtest MCP serve
 - `run_risk_report` — unified 5-layer risk sign-off report (cost, sensitivity, regime MC, adversarial, walk-forward)
 
 **Strategy file I/O**
-- `read_strategy_file` — read strategy policy from registry
+- `read_strategy_file` — read strategy policy from registry (`__list__` returns all slugs)
 - `write_strategy_file` — write/validate strategy policy with syntax checking
 - `scaffold_strategy` — generate strategy boilerplate with correct Policy interfaces
 
@@ -185,6 +197,9 @@ All agents with research or implementation tasks can call the backtest MCP serve
 - `get_optimization_history` — session-local run history (avoid re-testing known combinations)
 - `get_active_params` — retrieve currently active optimized parameters for a strategy
 - `activate_candidate` — promote a parameter candidate to active status for live trading
+
+**Strategy promotion**
+- `promote_optimization_level` — advance a strategy to the next optimization level (L0→L1→L2→L3) with gate validation against holding-period-aware thresholds
 
 ### Default Cost Model
 
@@ -232,19 +247,18 @@ These are checked and signed by the Risk Auditor. No exceptions.
 
 ## Skill Files
 
-Read the relevant skill before starting any domain work. Skills are in `.claude/skills/`.
+Read the relevant skill before starting any domain work. Local skills live in `.claude/skills/`;
+OpenSpec-related skills are shipped as a plugin and invoked through the `Skill` tool.
 
 | Skill | Read when |
 |---|---|
 | `alpha-validation-protocol` | Before any backtest analysis or research report |
 | `taifex-chart-rendering` | Before any chart, dashboard, or time-display work |
 | `live-bar-construction` | Before any tick pipeline or today's data work |
-| `quant-trend-following` | Before designing or implementing any trend signal |
-| `quant-stop-diagnosis` | Before writing any StopPolicy |
-| `quant-overfitting` | Before any parameter sweep or sensitivity analysis |
-| `quant-pyramid-math` | Before any sizing or add-trigger work |
 | `optimize-strategy` | Before starting a parameter optimization session |
 | `add-new-strategy` | Before scaffolding a new strategy file |
+| `process-cleanup` | Before starting servers, after Cursor/editor crashes, or when the machine is slow |
+| `openspec-*` | When proposing, applying, verifying, or archiving an OpenSpec change |
 
 ---
 
@@ -252,13 +266,13 @@ Read the relevant skill before starting any domain work. Skills are in `.claude/
 
 | Agent | File | Owns |
 |---|---|---|
-| Orchestrator | `.claude/agents/orchestrator.md` | Sprint planning, task routing, quality gates |
-| Quant Researcher | `.claude/agents/quant-researcher.md` | Hypothesis, signal design, backtest analysis |
-| Strategy Engineer | `.claude/agents/strategy-engineer.md` | `src/strategies/`, MCP registration, unit tests |
-| Platform Engineer | `.claude/agents/platform-engineer.md` | React, FastAPI, live bar pipeline, server infra |
-| Market Data Engineer | `.claude/agents/market-data-engineer.md` | Historical ingestion, session utils, resampling |
-| Live Systems Engineer | `.claude/agents/live-systems-engineer.md` | Orders, fills, kill-switch, reconciliation |
-| Risk Auditor | `.claude/agents/risk-auditor.md` | Bias audits, promotion checklist, regression gates |
+| Orchestrator | `.claude/agents/orchestrator.md` | Sprint planning, task routing, promotion pipeline, quality gates |
+| Quant Researcher | `.claude/agents/quant-researcher.md` | Hypothesis, signal design, MCP-driven backtest analysis, Phase 1/2 research reports |
+| Strategy Engineer | `.claude/agents/strategy-engineer.md` | `src/strategies/`, `src/bar_simulator/`, `src/indicators/`, registry auto-discovery, unit tests |
+| Market Data Engineer | `.claude/agents/market-data-engineer.md` | `src/data/` (full): crawl, daemon, session_utils, contracts, gap detection, coverage reports |
+| Platform Engineer | `.claude/agents/platform-engineer.md` | `frontend/`, `src/api/`, `src/broker_gateway/live_bar_store.py`, `src/alerting/`, `src/audit/`, `src/runtime/`, `src/pipeline/`, `src/secrets/`, server infra |
+| Live Systems Engineer | `.claude/agents/live-systems-engineer.md` | `src/execution/`, `src/trading_session/`, `src/reconciliation/`, `src/oms/`, kill-switch routes |
+| Risk Auditor | `.claude/agents/risk-auditor.md` | Bias audits, promotion checklist, regression gates, overfitting review |
 
 ---
 

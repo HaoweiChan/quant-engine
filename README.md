@@ -17,35 +17,57 @@ Quant Engine is a market-oriented trading platform with:
 
 | Area | Path | Purpose |
 |---|---|---|
-| Backend package | `src/` | Core engine, API, runtime, risk, simulator, MCP tools |
-| Frontend app | `frontend/` | React + Vite dashboard |
-| Config | `config/` | Runtime TOML configs |
+| Backend package | `src/` | Core engine, API, data, runtime, risk, simulator, MCP tools |
+| Frontend app | `frontend/` | React + Vite dashboard (War Room) |
+| Config | `config/` | Runtime TOML configs (engine, strategies, taifex, prediction, secrets) |
+| Scripts | `scripts/` | Operational scripts: daemon runner, optimizer, run-dev/prod, deploy unit files |
 | Specs and change tracking | `openspec/` | Domain specs, active changes, archived changes |
 | Documentation | `docs/` | Architecture, operations, deployment, and reference notes |
 | Tests | `tests/` | Unit and e2e coverage |
 
 ## Key backend modules
 
-- `src/api/` - FastAPI app, routes, API helpers, websocket endpoints.
-- `src/core/` - core types, policies, position engine.
-- `src/simulator/` and `src/monte_carlo/` - backtesting and simulation workflows.
-- `src/risk/` and `src/reconciliation/` - risk controls and broker/state reconciliation.
-- `src/broker_gateway/` and `src/trading_session/` - gateway integration and session management.
-- `src/mcp_server/` - MCP facade, tools, validation, history.
-- `src/strategies/` - strategy implementations, registry, scaffold helpers.
+- `src/api/` — FastAPI app, REST routes (`src/api/routes/`), WebSocket handlers (`src/api/ws/`).
+- `src/core/` — types, policies, position engine, portfolio merger, sizing.
+- `src/strategies/` — strategy implementations, registry (auto-discovery), scaffold helpers, parameter loader.
+- `src/indicators/` — shared technical indicator library (ATR, EMA, RSI, Bollinger, MACD, …; 25+ indicators).
+- `src/simulator/` and `src/monte_carlo/` — backtester, walk-forward, stress, optimizer, adversarial, block-bootstrap MC.
+- `src/bar_simulator/` — intra-bar price simulation used by the backtester.
+- `src/prediction/` — ML prediction engine (regime, direction, volatility, combiner).
+- `src/data/` — historical crawl, data daemon, session utils, gap detection, contracts, aggregators.
+- `src/broker_gateway/` and `src/trading_session/` — gateway integration, live bar store, session management.
+- `src/execution/` — execution engine ABC, live/paper engines, disaster stop monitor.
+- `src/oms/` — order management system and volume profiling.
+- `src/reconciliation/` — broker/engine position reconciliation.
+- `src/risk/` — risk monitor, portfolio risk, pre-trade checks, VaR engine.
+- `src/alerting/` — alert dispatcher and formatters.
+- `src/audit/` — audit trail store.
+- `src/runtime/` — IPC, orchestrator, telemetry.
+- `src/secrets/` — credential/secret manager.
+- `src/pipeline/` — optimizer pipeline runner and config.
+- `src/mcp_server/` — MCP facade, tools, validation, run history.
 
 ## Strategy layout
 
 ```text
 src/strategies/
-├── daily/
-│   ├── breakout/
-│   └── trend_following/
-├── intraday/
+├── short_term/
+│   ├── breakout/       (ta_orb, structural_orb, keltner_vwap_breakout)
+│   ├── mean_reversion/ (atr_mean_reversion, bollinger_pinbar, vwap_statistical_deviation)
+│   └── trend_following/ (night_session_long)
+├── medium_term/
+│   ├── breakout/       (ta_orb, structural_orb, keltner_vwap_breakout, volatility_squeeze)
+│   ├── mean_reversion/ (bb_mean_reversion)
+│   └── trend_following/ (donchian_trend_strength, ema_trend_pullback)
+├── swing/
 │   ├── breakout/
 │   ├── mean_reversion/
-│   └── trend_following/
-└── registry.py
+│   └── trend_following/ (pyramid_wrapper, vol_managed_bnh)
+├── registry.py         # auto-discovery: scans for create_*_engine + PARAM_SCHEMA + STRATEGY_META
+├── scaffold.py         # strategy boilerplate generator
+├── param_loader.py     # parameter loading from config/strategies/<slug>.toml
+├── param_registry.py   # persisted optimization run registry
+└── __init__.py         # HoldingPeriod enum, OptimizationLevel L0-L3, quality gate matrix
 ```
 
 ## Quick start
