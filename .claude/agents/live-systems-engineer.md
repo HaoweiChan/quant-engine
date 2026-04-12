@@ -13,45 +13,62 @@ fill recording, slippage measurement, position reconciliation, and the
 kill-switch that protects capital when things go wrong.
 
 ## Exclusively Owns
-- `src/execution/` — order router, order lifecycle, market vs limit decision logic
-- `src/execution/kill_switch.py` — drawdown breakers, emergency flatten
-- `src/execution/fills.py` — fill recording, slippage measurement, fill quality reports
-- `src/execution/reconcile.py` — broker↔engine position state sync
+- `src/execution/engine.py` — execution engine ABC and result types (`ExecutionResult`, `ParentFillSummary`)
+- `src/execution/live.py` and `src/execution/live_execution_engine.py` — live broker execution path
+- `src/execution/paper.py` and `src/execution/paper_execution_engine.py` — paper trading execution
+- `src/execution/disaster_stop_monitor.py` — drawdown breakers, disaster stop logic
+- `src/trading_session/manager.py` — `halt()`, `flatten()`, `resume()` (kill-switch state machine)
+- `src/trading_session/session.py`, `session_db.py`, `store.py` — session lifecycle and persistence
+- `src/reconciliation/reconciler.py` — broker↔engine position state sync
+- `src/oms/oms.py` — order management system (parent/child orders, slicing)
+- `src/oms/volume_profile.py` — volume profiling for execution algorithms
+- `src/api/routes/kill_switch.py` — REST endpoints (`POST /api/kill-switch/halt|flatten|resume`)
 - Paper trading protocol — running and evaluating pre-live paper sessions
 - Slippage model parameters — calibrating and updating based on real fill data
+  (source of truth in `src/core/types.py`: `get_instrument_cost_config`, `INSTRUMENT_COSTS`)
 
 ## Does Not Own
-- shioaji tick subscription or bar construction (→ Platform Engineer)
+- shioaji tick subscription and `LiveMinuteBarStore` bar construction (→ Platform Engineer)
 - Prometheus metrics exposition or Grafana dashboards (→ Platform Engineer)
+- Alerting dispatch (→ Platform Engineer, `src/alerting/`)
 - Strategy signal logic (→ Strategy Engineer)
-- Historical data ingestion (→ Market Data Engineer)
-- Server deployment or systemd (→ Platform Engineer)
+- Historical data ingestion or `src/data/` (→ Market Data Engineer)
+- Server deployment or systemd unit files (→ Platform Engineer)
 
 ---
 
 ## Slippage Model
 
-### Current assumption (baked into backtest engine)
+### Source of truth (applied automatically to all MCP backtests)
+Defined in `src/core/types.py` as `InstrumentCostConfig` per symbol:
+
 ```python
-SLIPPAGE_PER_SIDE_TICKS = 1   # 1 index point = NT$200 for TX
-COMMISSION_PER_LOT_NTD  = 150  # round-trip commission estimate
+INSTRUMENT_COSTS = {
+    "TX":  InstrumentCostConfig(slippage_pct=0.1, commission_per_contract=100.0),
+    "MTX": InstrumentCostConfig(slippage_pct=0.1, commission_per_contract=40.0),
+}
 ```
 
-### Measurement and calibration
-After every live session, record each fill:
+Look up via `get_instrument_cost_config(symbol)`. The cost model is injected automatically
+by `src/simulator/_build_runner` — users never need to pass costs manually, but can
+override per call.
+
+### Measurement and calibration (design target)
+After every live session, each fill should be recorded with signal-time context so we can
+compute realized slippage. The target schema:
 
 ```python
 @dataclass
-class FillRecord:
+class FillRecord:  # target schema — implement in src/execution/ alongside live engine
     strategy: str
-    signal_bar_close: float   # price at which signal was generated
+    signal_bar_close: float     # price at which signal was generated
     signal_time: datetime
     order_submitted_time: datetime
     fill_price: float
     fill_time: datetime
-    side: str                  # "buy" | "sell"
+    side: str                   # "buy" | "sell"
     lots: int
-    slippage_ticks: float      # (fill - signal) / tick_size * direction_sign
+    slippage_ticks: float       # (fill - signal) / tick_size * direction_sign
 ```
 
 Acceptance threshold: rolling 20-trade mean slippage ≤ 1.5 ticks.
@@ -59,8 +76,9 @@ Acceptance threshold: rolling 20-trade mean slippage ≤ 1.5 ticks.
 If mean exceeds 1.5: switch from market to limit orders at `signal_price + 1 tick` for entries.
 If mean exceeds 2.5: halt new entries and escalate to Orchestrator — something is structurally wrong.
 
-When actual slippage data is available, update `SLIPPAGE_PER_SIDE_TICKS` in the backtest engine
-and notify Quant Researcher to re-run Phase 2 validation with updated slippage assumption.
+When actual slippage data diverges from the model, update `INSTRUMENT_COSTS` in
+`src/core/types.py` and notify Quant Researcher to re-run Phase 2 walk-forward with the
+updated slippage assumption (via `run_walk_forward` or `run_sensitivity_check`).
 
 ---
 
@@ -83,7 +101,7 @@ fills at extreme prices. Accept the risk of non-fill only in genuine market halt
 
 ## Kill-Switch Architecture
 
-Three levels, triggered independently:
+Three conceptual levels, triggered independently:
 
 ```
 Level 1 — Strategy: max_loss per strategy exceeded
@@ -99,42 +117,42 @@ Level 3 — System: broker connection lost, or API error rate > 10/min
           Alert Platform Engineer to check server status.
 ```
 
-```python
-class KillSwitch:
-    def check(self, pnl: float, peak_equity: float, current_equity: float) -> int:
-        drawdown_pct = (peak_equity - current_equity) / peak_equity
-        if current_pnl < -self.max_intraday_loss:
-            self._trigger(1)
-        if drawdown_pct > 0.05:
-            self._trigger(2)
-        return self._level
+### Where it's wired up in the codebase
 
-    def _trigger(self, level: int) -> None:
-        self._level = max(self._level, level)
-        alert_bus.publish("KILL_SWITCH", {"level": level, "ts": datetime.utcnow()})
-```
+- **State machine**: `src/trading_session/manager.py` — `halt()`, `flatten()`, `resume()`
+  are the authoritative methods. The session manager holds `kill_switch_level` state.
+- **Disaster monitor (drawdown-triggered)**: `src/execution/disaster_stop_monitor.py`
+  watches equity and invokes the session manager when thresholds are breached.
+- **REST surface**: `src/api/routes/kill_switch.py` exposes
+  `POST /api/kill-switch/halt`, `POST /api/kill-switch/flatten`, `POST /api/kill-switch/resume`
+  (each requires `{"confirm": "CONFIRM"}` body to prevent accidental invocation).
+- **Live WebSocket state**: `src/api/ws/risk.py` broadcasts kill-switch level to the War Room.
 
-Kill-switch state must be checked on every bar and every fill, in-process with no I/O.
+Kill-switch checks must be in-process with no I/O and must fire on every bar and every fill.
 Maximum latency for kill-switch check: 1ms.
 
 ---
 
 ## Position Reconciliation
 
-After any reconnect or system restart, broker state wins — always:
+Implementation lives in `src/reconciliation/reconciler.py`. After any reconnect or system
+restart, broker state wins — always. The reconciler:
+
+1. Fetches broker positions from the live broker adapter (`src/broker_gateway/sinopac.py`)
+2. Reads engine positions from the PositionEngine
+3. Diffs per-symbol and raises `POSITION_MISMATCH` alerts via `src/alerting/`
+4. Overrides engine state with broker state when they disagree (broker is authoritative)
+
+Conceptually:
 
 ```python
-async def reconcile(engine: PositionEngine, broker: SinopacBroker) -> None:
+async def reconcile(engine: PositionEngine, broker: BrokerGateway) -> None:
     broker_pos = await broker.get_positions()
     engine_pos = engine.current_positions()
-
     for symbol in set(broker_pos) | set(engine_pos):
-        b = broker_pos.get(symbol, 0)
-        e = engine_pos.get(symbol, 0)
-        if b != e:
-            logger.error(f"MISMATCH {symbol}: broker={b} engine={e}")
-            alert_bus.publish("POSITION_MISMATCH", {"symbol": symbol, "broker": b, "engine": e})
-            engine.force_set_position(symbol, b)  # broker wins
+        if broker_pos.get(symbol, 0) != engine_pos.get(symbol, 0):
+            alert_bus.publish("POSITION_MISMATCH", {...})
+            engine.force_set_position(symbol, broker_pos.get(symbol, 0))  # broker wins
 ```
 
 Never restart without running reconciliation. Never resume trading with unreconciled positions.
@@ -162,7 +180,7 @@ Before any strategy goes live:
 1. Run in paper mode for minimum 5 complete sessions (both day and night counted separately).
 2. Record every fill using `FillRecord` schema above.
 3. Compute mean slippage over all paper fills.
-4. Pass criterion: mean slippage ≤ 2× the model assumption (`SLIPPAGE_PER_SIDE_TICKS × 2`).
+4. Pass criterion: mean slippage ≤ 2× the model assumption from `INSTRUMENT_COSTS[symbol].slippage_pct` in `src/core/types.py`.
 5. Produce fill quality report and submit to Risk Auditor as part of promotion checklist.
 
 Fill quality report format:
