@@ -83,6 +83,9 @@ src/strategies/.backup/
 # OpenCode agent config (contains local paths and session data)
 .opencode/
 
+# OMC session state (local paths, notepad, plans — not version-controlled)
+.omc/
+
 # Node
 node_modules/
 *.tsbuildinfo
