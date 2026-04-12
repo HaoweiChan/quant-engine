@@ -668,10 +668,10 @@ export function TearSheet() {
             {paramRuns.length === 0 ? (
               <div className="text-[10px] py-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No run history for this strategy.</div>
             ) : (
-              <table className="w-full text-[10px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse", minWidth: 1040 }}>
+              <table className="w-full text-[10px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse", minWidth: 1080 }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid var(--color-qe-card-border)" }}>
-                    <th className="text-left py-1 pr-1" style={{ color: colors.dim, width: 16 }}></th>
+                    <th className="text-left py-1 pr-2" style={{ color: colors.dim, width: 40 }}>Run#</th>
                     <SortHeader label="Date" field="run_at" align="left" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
                     <SortHeader label="Symbol" field="symbol" align="left" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
                     <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>Period</th>
@@ -721,9 +721,10 @@ export function TearSheet() {
                         onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
                         onMouseLeave={(e) => { e.currentTarget.style.background = isSelected ? "rgba(90,138,242,0.08)" : "transparent"; }}
                       >
-                        <td className="py-1 pr-1 text-center" style={{ width: 24 }}>
-                          {isSelected && <span title="Loaded" style={{ color: "#4ade80", fontSize: 8, marginRight: 2 }}>●</span>}
-                          {isActive && <span title="Active params" style={{ color: colors.green, fontSize: 8 }}>★</span>}
+                        <td className="py-1 pr-2" style={{ color: colors.dim, width: 40, whiteSpace: "nowrap" }}>
+                          <span style={{ color: colors.muted }}>{run.run_id}</span>
+                          {isSelected && <span title="Loaded" style={{ color: "#4ade80", fontSize: 8, marginLeft: 3 }}>●</span>}
+                          {isActive && <span title="Active params" style={{ color: colors.green, fontSize: 8, marginLeft: isSelected ? 1 : 3 }}>★</span>}
                         </td>
                         <td className="py-1 pr-2" style={{ color: colors.text }}>{run.run_at ? run.run_at.slice(5, 16).replace("T", " ") : "—"}</td>
                         <td className="py-1 pr-2" style={{ color: colors.muted }}>{run.symbol ?? "—"}</td>
