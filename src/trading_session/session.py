@@ -61,6 +61,27 @@ class TradingSession:
     current_snapshot: SessionSnapshot | None = None
     peak_equity: float = 0.0
     deployed_candidate_id: int | None = None
+    # Fraction of the parent account's equity this session is allowed to
+    # size positions against. 1.0 = whole account (default, backward
+    # compatible). Multiple active sessions on the same account should sum
+    # to <= 1.0. See SessionManager.effective_equity() for the read path.
+    equity_share: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not (0.0 < self.equity_share <= 1.0):
+            raise ValueError(
+                f"equity_share must be in (0, 1], got {self.equity_share!r}"
+            )
+
+    def effective_equity(self, account_equity: float) -> float:
+        """Return the equity budget this session is allowed to size against.
+
+        This is the single injection point for the 60/40-style allocation —
+        every live sizing code path that needs the account's capital should
+        pass account_equity through this helper so the strategy sees a
+        virtual equity base scaled by the session's allocation share.
+        """
+        return max(0.0, account_equity) * self.equity_share
 
     @classmethod
     def create(
@@ -70,6 +91,7 @@ class TradingSession:
         symbol: str,
         initial_equity: float = 0.0,
         status: str = "stopped",
+        equity_share: float = 1.0,
     ) -> TradingSession:
         return cls(
             session_id=str(uuid.uuid4()),
@@ -80,4 +102,5 @@ class TradingSession:
             started_at=datetime.now(_TAIPEI_TZ),
             initial_equity=initial_equity,
             peak_equity=initial_equity,
+            equity_share=equity_share,
         )

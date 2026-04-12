@@ -154,6 +154,7 @@ async def war_room() -> dict:
                 "strategy_slug": s.strategy_slug,
                 "symbol": s.symbol,
                 "status": s.status,
+                "equity_share": getattr(s, "equity_share", 1.0),
                 **deploy_info,
                 "snapshot": {
                     "equity": snap.equity,

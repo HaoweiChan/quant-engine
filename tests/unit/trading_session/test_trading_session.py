@@ -232,3 +232,40 @@ class TestSessionManager:
         curve = mgr.get_equity_curve(session.session_id, days=1)
         assert len(curve) == 1
         assert curve[0][1] == 1234.0
+
+
+class TestEquityShare:
+    """Cover the 60/40-style margin allocation plumbing on TradingSession."""
+
+    def test_default_share_is_one(self) -> None:
+        s = TradingSession.create("acct-1", "strat", "TX")
+        assert s.equity_share == 1.0
+
+    def test_effective_equity_scales_account_equity(self) -> None:
+        s = TradingSession.create("acct-1", "strat", "TX", equity_share=0.4)
+        assert s.effective_equity(2_000_000) == pytest.approx(800_000)
+
+    def test_effective_equity_clamps_negative_to_zero(self) -> None:
+        s = TradingSession.create("acct-1", "strat", "TX", equity_share=0.6)
+        assert s.effective_equity(-500) == 0.0
+
+    def test_proportional_sizing_invariant(self) -> None:
+        """A 40% share must produce ~40% of the effective equity a 100% share
+        would see, for identical underlying account equity. This is the
+        invariant that makes the 60/40 split work downstream in
+        compute_risk_lots() and compute_margin_lots() without changing
+        those functions."""
+        full = TradingSession.create("acct-1", "strat-a", "TX", equity_share=1.0)
+        small = TradingSession.create("acct-1", "strat-b", "TX", equity_share=0.4)
+        account_equity = 2_000_000
+        full_eff = full.effective_equity(account_equity)
+        small_eff = small.effective_equity(account_equity)
+        assert small_eff / full_eff == pytest.approx(0.4)
+
+    def test_invalid_share_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            TradingSession.create("a", "s", "TX", equity_share=0.0)
+        with pytest.raises(ValueError):
+            TradingSession.create("a", "s", "TX", equity_share=1.5)
+        with pytest.raises(ValueError):
+            TradingSession.create("a", "s", "TX", equity_share=-0.1)
