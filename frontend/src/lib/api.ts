@@ -395,6 +395,7 @@ export interface WarRoomSession {
   strategy_slug: string;
   symbol: string;
   status: "active" | "paused" | "stopped" | "halted" | "flattening";
+  equity_share: number;
   deployed_candidate_id: number | null;
   deployed_params: Record<string, number> | null;
   backtest_metrics: Record<string, number> | null;
@@ -491,6 +492,17 @@ export async function startSession(sessionId: string): Promise<{ session_id: str
 
 export async function stopSession(sessionId: string): Promise<{ session_id: string; status: string }> {
   return fetchJSON(`/api/sessions/${sessionId}/stop`, { method: "POST" });
+}
+
+export async function updateEquityShare(
+  sessionId: string,
+  share: number,
+): Promise<{ session_id: string; account_id: string; equity_share: number }> {
+  return fetchJSON(`/api/sessions/${sessionId}/equity-share`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ share }),
+  });
 }
 
 export async function pauseSession(sessionId: string): Promise<{ session_id: string; status: string }> {

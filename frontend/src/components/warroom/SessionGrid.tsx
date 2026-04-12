@@ -1,3 +1,4 @@
+import { AllocationSlider } from "./AllocationSlider";
 import { SessionCard } from "./SessionCard";
 import { colors } from "@/lib/theme";
 import type { WarRoomSession } from "@/lib/api";
@@ -20,6 +21,9 @@ export function SessionGrid({ sessions, bindings, accountId, onAction }: Session
 
   return (
     <div className="flex flex-col gap-2 p-2 overflow-y-auto" style={{ flex: 1 }}>
+      {sessions.length >= 2 && (
+        <AllocationSlider sessions={sessions} onCommit={onAction} />
+      )}
       {sessions.map((s) => (
         <SessionCard key={s.session_id} session={s} allBindings={bindings} accountId={accountId} onAction={onAction} />
       ))}
