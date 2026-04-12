@@ -100,6 +100,7 @@ class SinopacGateway(BrokerGateway):
             return
         self._connected = False
         self._connect_error = None
+        self._ip_blocked = False  # reset on each explicit connect() call
         candidates: list[tuple[str, str, str]] = []
         if api_key and api_secret:
             candidates.append(("explicit", api_key, api_secret))
@@ -153,19 +154,39 @@ class SinopacGateway(BrokerGateway):
                 return
             except Exception as exc:
                 last_error = exc
+                err_str = str(exc)
+                # Detect permanent IP-block errors so we don't waste time
+                # retrying in _maybe_reconnect_disconnected. The response
+                # dict contains "not allow" when Sinopac rejects the login IP.
+                if "not allow" in err_str or "ip" in err_str.lower() and "allow" in err_str.lower():
+                    self._ip_blocked = True
+                    logger.warning(
+                        "sinopac_ip_blocked",
+                        account_id=account_id,
+                        ip_hint=err_str[:120],
+                    )
+                    break  # no point trying other creds with same IP
                 logger.warning(
                     "sinopac_login_failed",
                     account_id=account_id,
                     credential_source=source,
-                    error=str(exc),
+                    error=err_str,
                 )
         self._connect_error = f"Login failed: {last_error}" if last_error else "Login failed"
 
     def _subscribe_market_data(self) -> None:
-        """Subscribe to near-month TX tick data and bridge to WebSocket broadcaster."""
+        """Subscribe to near-month TX tick data and bridge to WebSocket broadcaster.
+
+        Skipped in simulation mode — the Sinopac simulation server does not
+        stream real ticks, and the subscription calls block the asyncio event
+        loop for several seconds (they include a time.sleep and contract fetches)
+        which hangs all other concurrent requests.
+        """
         import time
         global _SUBSCRIBED_CONTRACTS
         if not self._api:
+            return
+        if getattr(self, "_simulation", False):
             return
         try:
             from src.api.ws.live_feed import push_tick
@@ -436,6 +457,10 @@ class SinopacGateway(BrokerGateway):
 
     def _maybe_reconnect_disconnected(self) -> None:
         if self._connected:
+            return
+        # Skip retry when the last failure was an IP block — retrying won't help
+        # until the operator whitelists the new IP on Sinopac's side.
+        if getattr(self, "_ip_blocked", False):
             return
         now = time.monotonic()
         if now - self._last_connect_attempt_ts < self._reconnect_interval_secs:
