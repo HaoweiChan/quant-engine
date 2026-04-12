@@ -46,12 +46,12 @@ logger = structlog.get_logger(__name__)
 PARAM_SCHEMA: dict[str, dict] = {
     # Realized volatility estimation
     "vol_lookback_days": {
-        "type": "int", "default": 20, "min": 5, "max": 60,
-        "description": "Days of close-to-close returns for realized vol (20 = 1 month).",
+        "type": "int", "default": 10, "min": 5, "max": 60,
+        "description": "Days of close-to-close returns for realized vol (10 = 2 weeks, more reactive).",
     },
     "vol_target_annual": {
-        "type": "float", "default": 0.15, "min": 0.05, "max": 0.40,
-        "description": "Target annualized vol for overlay sizing (0.15 = 15%).",
+        "type": "float", "default": 0.20, "min": 0.05, "max": 0.40,
+        "description": "Target annualized vol for overlay sizing (0.20 = 20%).",
     },
     "vol_overlay_max_lots": {
         "type": "float", "default": 2.0, "min": 0.5, "max": 5.0,
@@ -59,13 +59,13 @@ PARAM_SCHEMA: dict[str, dict] = {
     },
     # Trend filter (SMA gate for DD breaker)
     "trend_sma_days": {
-        "type": "int", "default": 200, "min": 20, "max": 400,
+        "type": "int", "default": 20, "min": 20, "max": 400,
         "description": "SMA period in days for trend gate / DD breaker.",
     },
     # Drawdown circuit breaker (Faber TAA)
     "dd_breaker_pct": {
-        "type": "float", "default": 0.10, "min": 0.03, "max": 0.25,
-        "description": "Price drawdown % to exit overlay (0.10 = 10%).",
+        "type": "float", "default": 0.15, "min": 0.03, "max": 0.25,
+        "description": "Price drawdown % to exit overlay (0.15 = 15%).",
     },
     "dd_reentry_pct": {
         "type": "float", "default": 0.05, "min": 0.01, "max": 0.15,
@@ -73,11 +73,11 @@ PARAM_SCHEMA: dict[str, dict] = {
     },
     # Golden cross boost
     "boost_sma_fast_days": {
-        "type": "int", "default": 50, "min": 0, "max": 100,
+        "type": "int", "default": 0, "min": 0, "max": 100,
         "description": "Fast SMA for golden-cross boost (0 = disabled).",
     },
     "boost_lots": {
-        "type": "float", "default": 1.0, "min": 0.0, "max": 3.0,
+        "type": "float", "default": 0.0, "min": 0.0, "max": 3.0,
         "description": "Extra lots on golden cross (0 = disabled).",
     },
     # Nominal stop (wide, base never triggers due to min_hold_lots)
@@ -550,18 +550,18 @@ class InverseVolStopPolicy(StopPolicy):
 def create_vol_managed_bnh_engine(
     max_loss: float = 500_000.0,
     initial_capital: float = 2_000_000.0,
-    # Vol overlay
-    vol_lookback_days: int = 20,
-    vol_target_annual: float = 0.15,
+    # Vol overlay — optimized 2026-04-11, validated TX Sharpe=1.67 MTX Sharpe=1.62
+    vol_lookback_days: int = 10,
+    vol_target_annual: float = 0.20,
     vol_overlay_max_lots: float = 2.0,
     # Trend filter
-    trend_sma_days: int = 200,
+    trend_sma_days: int = 20,
     # DD circuit breaker
-    dd_breaker_pct: float = 0.10,
+    dd_breaker_pct: float = 0.15,
     dd_reentry_pct: float = 0.05,
     # Golden cross boost
-    boost_sma_fast_days: int = 50,
-    boost_lots: float = 1.0,
+    boost_sma_fast_days: int = 0,
+    boost_lots: float = 0.0,
     # Nominal stop
     stop_atr_mult: float = 15.0,
     # Legacy compat (accepted, unused)
