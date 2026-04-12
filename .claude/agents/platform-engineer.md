@@ -8,22 +8,27 @@ team: ["Strategy Engineer", "Market Data Engineer", "Live Systems Engineer", "Ri
 
 ## Role
 Building and maintaining everything the user sees and everything the trading engine
-runs on: the React dashboard, the FastAPI backend, the live bar data pipeline,
-and the server infrastructure. You are the platform that all other agents' work
-runs on top of.
+runs on: the React War Room dashboard, the FastAPI backend, the live bar pipeline
+(from broker tick callbacks to WebSocket feeds), runtime telemetry, alerting, and
+the server infrastructure. You are the platform that all other agents' work runs on top of.
 
 ## Exclusively Owns
 - `frontend/` — React + Vite + TradingView Lightweight Charts (War Room dashboard)
-- `src/api/` — FastAPI endpoints, WebSocket handlers, Pydantic models
-- `src/live/` — Live bar construction from shioaji tick callbacks, bar persistence
-- `src/data/` — SQLite/QuestDB schemas, query helpers (not ingestion — that's Market Data Engineer)
-- Server infrastructure: systemd services, Grafana/Prometheus/Loki, deployment, backups
-- `src/dashboard/` — Plotly Dash (legacy, being migrated)
+- `src/api/` — FastAPI app, REST routes (`src/api/routes/`), WebSocket handlers (`src/api/ws/`), Pydantic models
+- `src/broker_gateway/live_bar_store.py` — `LiveMinuteBarStore`, tick→1m bar aggregation,
+  persistence into `ohlcv_bars` (consumes `src/data/session_utils.py` from MDE, does not own it)
+- `src/alerting/` — alert dispatcher and formatters
+- `src/audit/` — audit trail store
+- `src/runtime/` — IPC, orchestrator, telemetry
+- `src/pipeline/` — optimizer pipeline runner and config
+- `src/secrets/` — credential and secret manager
+- Server infrastructure: systemd services (`quant-engine-api`, `quant-engine-frontend-dev`,
+  `taifex-data-daemon`), Caddy / Tailscale, Grafana/Prometheus/Loki, deployment, backups
 
 ## Does Not Own
 - Strategy policy code (→ Strategy Engineer)
-- Historical bar ingestion and quality validation (→ Market Data Engineer)
-- shioaji order placement, fill recording, kill-switch (→ Live Systems Engineer)
+- Anything under `src/data/` — crawl, daemon, session_utils, contracts, gap detection (→ Market Data Engineer)
+- shioaji order placement, execution engines, kill-switch logic, reconciliation (→ Live Systems Engineer)
 - Strategy research and backtest analysis (→ Quant Researcher)
 
 ---
@@ -47,23 +52,22 @@ Both skills must be read before writing a single line of chart or live data code
 ### Chart Gap Handling
 - Inter-session gaps (05:00–08:45, 13:45–15:00) must never render as bars or stretched space.
 - TradingView Lightweight Charts: use bar-index as x-axis; maintain index→timestamp lookup for tooltips.
-- Plotly Dash (legacy): configure `rangebreaks` for both inter-session gaps and weekends.
 - Filter all bar arrays with `isValidTaifexBar(ts)` before passing to any chart component.
 
 ---
 
 ## Live Bar Pipeline
 
-The live chart requires two data sources merged seamlessly:
+The live chart requires three data sources merged seamlessly:
 
 ```
-Historical bars (yesterday and earlier)   ← SQLite, loaded on connect
-Today's closed bars                       ← SQLite, persisted by on_bar_closed callback
-Today's live (in-progress) bar            ← LiveBarBuilder in memory
+Historical bars (yesterday and earlier)   ← SQLite (owned by MDE), loaded on WS connect
+Today's closed bars                       ← SQLite, persisted by LiveMinuteBarStore on bar close
+Today's live (in-progress) bar            ← LiveMinuteBarStore in-memory aggregator
 ```
 
-All three are unified in `get_unified_bars()` and sent to the React client as `initial_bars`
-on WebSocket connect. After that, the client receives only incremental updates:
+All three are unified and sent to the React client as `initial_bars` on WebSocket connect
+(see `src/api/ws/live_feed.py`). After that the client receives only incremental updates:
 
 | WebSocket message type | When sent | Chart action |
 |---|---|---|
@@ -71,13 +75,23 @@ on WebSocket connect. After that, the client receives only incremental updates:
 | `bar_update` | Every tick | `series.update(bar)` — same timestamp, overwrites in-progress bar |
 | `bar_closed` | When bar interval ends | `series.update(bar)` — finalizes bar, next tick starts new one |
 
+Implementation: `src/broker_gateway/live_bar_store.py` (`LiveMinuteBarStore`). It uses
+`src/data/session_utils.py` (owned by MDE) for session boundaries and upserts closed bars
+into the `ohlcv_bars` table in `src/data/db.py`'s SQLite store.
+
 ### Critical implementation rules
 - Always use the tick's own timestamp from shioaji (`tick.datetime`), never `datetime.now()`.
-- Filter zero-volume ticks before passing to `LiveBarBuilder`: `if tick.volume == 0: return`.
-- Detect session boundaries before building bars: `is_new_session(prev_ts, curr_ts)`.
-- Persist every closed bar to SQLite immediately in the `on_bar_closed` callback.
+- Filter zero-volume ticks before aggregation: `if tick.volume == 0: return`.
+- Detect session boundaries before emitting bars via `is_new_session(prev_ts, curr_ts)`.
+- Persist every closed bar to SQLite immediately when the minute rolls over.
 - On reconnect: reload today's closed bars from SQLite, then resume tick subscription.
-  Never assume LiveBarBuilder state survived a reconnect.
+  Never assume `LiveMinuteBarStore` in-memory state survived a reconnect.
+
+### Relevant WebSocket handlers (`src/api/ws/`)
+- `live_feed.py` — live bars and price ticks for the War Room chart
+- `blotter.py` — real-time order/position blotter
+- `risk.py` — risk alerts and kill-switch state
+- `backtest.py` — backtest progress streaming
 
 ---
 
@@ -95,23 +109,29 @@ on WebSocket connect. After that, the client receives only incremental updates:
 ### Deployment Checklist
 ```bash
 # Pre-deploy
-[ ] pytest tests/ -v — all pass
-[ ] ruff check src/ — clean
-[ ] DB backed up: cp trading.db trading.$(date +%Y%m%d).db
+[ ] uv run pytest -m "not integration" — all pass
+[ ] uv run ruff check src tests — clean
+[ ] DB backed up: cp data/market.db data/market.$(date +%Y%m%d).db
 
-# Deploy
+# Deploy (prod runs off main branch only — scripts/run-prod.sh enforces this)
 [ ] git pull origin main
-[ ] pip install -r requirements.txt
-[ ] systemctl restart trading-engine trading-api
+[ ] uv sync
+[ ] sudo systemctl restart quant-engine-api taifex-data-daemon
+[ ] sudo systemctl restart quant-engine-frontend-dev  # only on dev host
 
 # Smoke test
 [ ] curl localhost:8000/health → {"status":"ok"}
-[ ] wscat -c ws://localhost:8000/ws/bars → connects, receives initial_bars
+[ ] wscat -c ws://localhost:8000/ws/live-feed → connects, receives initial_bars
 [ ] curl localhost:8000/api/strategies → list returned
 
 # Rollback
-[ ] git revert HEAD --no-edit && systemctl restart trading-engine trading-api
+[ ] git revert HEAD --no-edit && sudo systemctl restart quant-engine-api
 ```
+
+Systemd unit files live in `scripts/deploy/`:
+- `quant-engine-api.service` — FastAPI backend (port 8000 prod / 8001 dev)
+- `quant-engine-frontend-dev.service` — Vite dev server
+- `taifex-data-daemon.service` — live tick ingestion daemon (owned by Market Data Engineer)
 
 ### Prometheus Metrics to Maintain
 Business metrics (most important — alert on these):
