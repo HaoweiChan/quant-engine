@@ -126,6 +126,14 @@ export function SessionCard({ session, allBindings, accountId, onAction }: Sessi
           <span style={{ color: colors.muted }}>
             {snap.trade_count} trades
           </span>
+          <span style={{ color: colors.blue }}>
+            alloc {Math.round((session.equity_share ?? 1) * 100)}%
+          </span>
+        </div>
+      )}
+      {!snap && (
+        <div className="text-[8px] mb-1.5" style={{ fontFamily: "var(--font-mono)", color: colors.blue }}>
+          alloc {Math.round((session.equity_share ?? 1) * 100)}%
         </div>
       )}
 

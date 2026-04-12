@@ -1,0 +1,13 @@
+[optimization]
+level = 1
+level_name = "L1_EXPLORATORY"
+achieved_at = "2026-04-13T00:53:55+08:00"
+holding_period = "short_term"
+
+[optimization.gate_results]
+sharpe = 0.708
+trades_per_fold = 298
+mdd_pct = 21.9
+sensitivity_cv = 0
+profit_factor = 1.17
+win_rate = 0.546

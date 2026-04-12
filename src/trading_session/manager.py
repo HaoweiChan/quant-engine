@@ -1,6 +1,7 @@
 """SessionManager — orchestrates all trading sessions."""
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import structlog
@@ -28,6 +29,11 @@ class SessionManager:
         self._session_db = session_db
         self._sessions: dict[str, TradingSession] = {}
         self.halt_active: bool = False
+        # Serializes writes that race across FastAPI worker threads —
+        # specifically the equity_share allocation path where two concurrent
+        # PATCH requests could otherwise see a stale sum-of-shares and both
+        # succeed, landing the account over-allocated.
+        self._allocation_lock = threading.Lock()
 
     def restore_from_db(self) -> None:
         """Load persisted sessions from DB, then supplement from account configs."""
@@ -69,17 +75,94 @@ class SessionManager:
         account_id: str,
         strategy_slug: str,
         symbol: str,
+        equity_share: float = 1.0,
     ) -> TradingSession:
         if self._session_db:
             existing = self._session_db.find_session(account_id, strategy_slug, symbol)
             if existing:
                 self._sessions[existing.session_id] = existing
                 return existing
-        session = TradingSession.create(account_id, strategy_slug, symbol, status="stopped")
+        session = TradingSession.create(
+            account_id, strategy_slug, symbol,
+            status="stopped", equity_share=equity_share,
+        )
         self._sessions[session.session_id] = session
         if self._session_db:
             self._session_db.save(session)
         return session
+
+    def set_equity_share(self, session_id: str, share: float) -> TradingSession:
+        """Update a session's equity_share and persist it.
+
+        Enforces the per-account invariant that the sum of equity_shares
+        across all sessions on that account does not exceed 1.0 (with a
+        1e-6 epsilon for floating-point tolerance).
+
+        Holds self._allocation_lock for the full read-compute-write so
+        concurrent PATCH requests from two FastAPI worker threads cannot
+        race each other into an over-allocated state.
+        """
+        with self._allocation_lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                raise ValueError(f"Session not found: {session_id}")
+            if not (0.0 < share <= 1.0):
+                raise ValueError(f"equity_share must be in (0, 1], got {share!r}")
+
+            if self._session_db:
+                other_sum = self._session_db.sum_equity_share_for_account(
+                    session.account_id, exclude_session_id=session_id
+                )
+            else:
+                other_sum = sum(
+                    s.equity_share
+                    for s in self._sessions.values()
+                    if s.account_id == session.account_id and s.session_id != session_id
+                )
+            if other_sum + share > 1.0 + 1e-6:
+                raise ValueError(
+                    f"Allocation overflow for account {session.account_id}: "
+                    f"existing sum={other_sum:.4f} + new={share:.4f} > 1.0"
+                )
+
+            session.equity_share = share
+            if self._session_db:
+                self._session_db.update_equity_share(session_id, share)
+            logger.info(
+                "session_equity_share_updated",
+                session_id=session_id,
+                equity_share=share,
+            )
+            return session
+
+    def get_effective_equity(self, session_id: str) -> float | None:
+        """Return the equity-share-adjusted equity budget for a session.
+
+        **Status (2026-04-13)**: defined but NOT yet called from any live
+        sizing path. The live strategy worker in
+        `src/runtime/orchestrator.py` is still an `_idle_worker`
+        placeholder, so this helper has no in-tree callers today. It
+        exists as the documented injection point the worker will use
+        once wired. Do not remove — it's the contract between the
+        equity_share plumbing (done in this Ralph run) and the future
+        multi-strategy live worker.
+
+        Fetches the parent account's current equity snapshot via the
+        broker gateway and multiplies by the session's equity_share.
+        Callers that don't have a gateway (tests, offline paths) can
+        call `TradingSession.effective_equity()` directly. Returns None
+        when the account is disconnected or unknown.
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return None
+        gw = self._registry.get_gateway(session.account_id)
+        if gw is None:
+            return None
+        acct_snap = gw.get_account_snapshot()
+        if not acct_snap.connected:
+            return None
+        return session.effective_equity(acct_snap.equity)
 
     def set_status(self, session_id: str, target_status: str) -> TradingSession:
         """Validate transition and update session status."""

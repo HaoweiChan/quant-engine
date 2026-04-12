@@ -473,7 +473,11 @@ def run_backtest_for_mcp(
     )
     paths = generate_paths(1, path_config)
     bars, timestamps = _bars_from_path(paths[0], path_config, timeframe, bar_agg)
-    result = runner.run(bars, timestamps=timestamps)
+    # Intraday mode: compute session boundaries for force-close
+    force_flat_indices: set[int] | None = None
+    if is_intraday and len(timestamps) > 1:
+        force_flat_indices = _compute_force_flat_indices(timestamps)
+    result = runner.run(bars, timestamps=timestamps, force_flat_indices=force_flat_indices)
     out = _format_backtest_result(
         result,
         label=f"synthetic:{scenario}",
@@ -626,6 +630,12 @@ def run_backtest_realdata_for_mcp(
     if not intraday:
         from src.strategies.registry import is_intraday_strategy
         intraday = is_intraday_strategy(resolved_slug)
+
+    # If no explicit params, load active params from registry (falls back to code defaults)
+    if strategy_params is None:
+        active_info = get_active_params_for_mcp(strategy=resolved_slug)
+        if active_info.get("source") == "registry":
+            strategy_params = active_info.get("params")
 
     clamped_params, param_warnings = ({} if strategy_params is None else strategy_params), []
     if strategy_params:
@@ -1328,15 +1338,15 @@ def run_sweep_for_mcp(
         timestamps = [b.timestamp for b in raw]
         source_label = f"real:{symbol}:{start}:{end}"
     else:
-        path_config = _make_path_config(scenario, n_bars, timeframe)
+        path_config = _make_path_config(scenario, n_bars, timeframe, sweep_bar_agg)
         paths = generate_paths(1, path_config)
-        bars, timestamps = _bars_from_path(paths[0], path_config, timeframe)
+        bars, timestamps = _bars_from_path(paths[0], path_config, timeframe, sweep_bar_agg)
         source_label = f"synthetic:{scenario}"
 
     # Compute force_flat_indices for intraday strategies (real data only)
     from src.strategies.registry import is_intraday_strategy
     sweep_force_flat: set[int] | None = None
-    if is_intraday_strategy(resolved_slug) and mode == "production_intent" and len(timestamps) > 1:
+    if is_intraday_strategy(resolved_slug) and len(timestamps) > 1:
         sweep_force_flat = _compute_force_flat_indices(timestamps)
 
     adapter = _get_adapter()

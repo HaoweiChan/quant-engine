@@ -1,12 +1,25 @@
-"""Single-host runtime orchestrator for isolated live-trading processes."""
+"""Single-host runtime orchestrator for isolated live-trading processes.
+
+Multi-strategy support: a single account can host N active trading sessions,
+each running as its own spawned subprocess. The orchestrator fans out by
+session_id — one strategy process per TradingSession — and leaves the
+market_data and execution processes shared across sessions.
+
+This is the "spawn-N-processes" option from the plan; it keeps per-strategy
+blast radius small (a crash in one strategy process does not take down the
+others) at the cost of some process overhead. The strategy worker target
+function is the injection point where a future PositionEngine + live-bar
+pipeline will be wired; today the default is still an idle sleep so this
+module does not yet drive real trading by itself.
+"""
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import signal
 import time
-import multiprocessing as mp
-from dataclasses import dataclass, field
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Literal
 
 import structlog
@@ -33,11 +46,18 @@ class RuntimeOrchestratorConfig:
 
 @dataclass
 class RuntimeOrchestrator:
-    """Supervisor managing market-data, strategy, and execution processes."""
+    """Supervisor managing market-data, strategy, and execution processes.
+
+    `strategy_targets` maps session_id → worker target so multiple
+    strategies can run concurrently. Passing a single `strategy_target` is
+    still supported for backward compatibility and is treated as a
+    single-session named "default".
+    """
 
     config: RuntimeOrchestratorConfig = field(default_factory=RuntimeOrchestratorConfig)
     market_data_target: ProcessTarget = _idle_worker
     strategy_target: ProcessTarget = _idle_worker
+    strategy_targets: dict[str, ProcessTarget] | None = None
     execution_target: ProcessTarget = _idle_worker
 
     def __post_init__(self) -> None:
@@ -49,16 +69,38 @@ class RuntimeOrchestrator:
             quote_capacity=self.config.quote_capacity,
             execution_capacity=self.config.execution_capacity,
         )
+        # Normalize strategy targets into the fan-out dict form
+        if self.strategy_targets is None:
+            self.strategy_targets = {"default": self.strategy_target}
 
     def start(self) -> None:
         if self._processes:
             return
-        self._processes = {
+        processes: dict[str, mp.Process] = {
             "market_data": self._spawn("market_data", self.market_data_target),
-            "strategy": self._spawn("strategy", self.strategy_target),
-            "execution": self._spawn("execution", self.execution_target),
         }
-        logger.info("runtime_orchestrator_started", run_mode=self.config.run_mode)
+        for session_id, target in (self.strategy_targets or {}).items():
+            name = f"strategy-{session_id}"
+            processes[name] = self._spawn(name, target)
+        processes["execution"] = self._spawn("execution", self.execution_target)
+        self._processes = processes
+        logger.info(
+            "runtime_orchestrator_started",
+            run_mode=self.config.run_mode,
+            strategy_sessions=list((self.strategy_targets or {}).keys()),
+        )
+
+    def get_strategy_processes(self) -> dict[str, mp.Process]:
+        """Return session_id → Process mapping for the live strategy workers.
+
+        Used by supervisors that want to restart a single crashed strategy
+        without touching the market-data or execution processes.
+        """
+        return {
+            name.removeprefix("strategy-"): proc
+            for name, proc in self._processes.items()
+            if name.startswith("strategy-")
+        }
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop_event.set()

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     initial_equity        REAL NOT NULL DEFAULT 0,
     peak_equity           REAL NOT NULL DEFAULT 0,
     deployed_candidate_id INTEGER,
+    equity_share          REAL NOT NULL DEFAULT 1.0,
     updated_at            TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_acct_strat_sym
@@ -61,9 +62,30 @@ class SessionDB:
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = db_path or _DB_PATH
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path))
+        # check_same_thread=False so FastAPI worker threads can share this
+        # connection with the route handlers that mutate sessions. The DB
+        # is write-light and all mutations go through the SessionManager,
+        # which serializes access at the Python level.
+        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SESSION_SCHEMA)
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """Idempotent migrations for legacy sessions tables.
+
+        The sessions table pre-dated the equity_share allocation field.
+        Add it in place so legacy rows default to 1.0 (full allocation).
+        """
+        cols = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        if "equity_share" not in cols:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN equity_share REAL NOT NULL DEFAULT 1.0"
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -73,13 +95,14 @@ class SessionDB:
         self._conn.execute(
             """INSERT OR REPLACE INTO sessions
                (session_id, account_id, strategy_slug, symbol, status,
-                started_at, initial_equity, peak_equity, deployed_candidate_id, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                started_at, initial_equity, peak_equity, deployed_candidate_id,
+                equity_share, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session.session_id, session.account_id, session.strategy_slug,
                 session.symbol, session.status, session.started_at.isoformat(),
                 session.initial_equity, session.peak_equity,
-                session.deployed_candidate_id, now,
+                session.deployed_candidate_id, session.equity_share, now,
             ),
         )
         self._conn.commit()
@@ -100,6 +123,51 @@ class SessionDB:
         )
         self._conn.commit()
 
+    def update_equity_share(self, session_id: str, share: float) -> None:
+        """Persist a new equity_share for the session.
+
+        Raises ValueError if the share is outside the valid (0, 1] range.
+        Call sites that need to enforce per-account sum-of-shares invariants
+        should do so before calling this method.
+        """
+        if not (0.0 < share <= 1.0):
+            raise ValueError(f"equity_share must be in (0, 1], got {share!r}")
+        now = datetime.now(_TAIPEI_TZ).isoformat()
+        self._conn.execute(
+            "UPDATE sessions SET equity_share = ?, updated_at = ? WHERE session_id = ?",
+            (share, now, session_id),
+        )
+        self._conn.commit()
+
+    def sum_equity_share_for_account(
+        self, account_id: str, exclude_session_id: str | None = None
+    ) -> float:
+        """Total equity_share for all sessions on an account.
+
+        Used by the allocation API to validate that adding/updating a
+        session's share will not push the account over 1.0.
+        """
+        if exclude_session_id is None:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(equity_share), 0.0) FROM sessions WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(equity_share), 0.0) FROM sessions "
+                "WHERE account_id = ? AND session_id != ?",
+                (account_id, exclude_session_id),
+            ).fetchone()
+        return float(row[0]) if row and row[0] is not None else 0.0
+
+    @staticmethod
+    def _row_equity_share(row) -> float:
+        # sqlite3.Row exposes column names via .keys() only. Pre-migration rows
+        # have no equity_share column, so fall back to 1.0 (full allocation).
+        if "equity_share" in row.keys():  # noqa: SIM118
+            return float(row["equity_share"])
+        return 1.0
+
     def load_all(self) -> list[TradingSession]:
         rows = self._conn.execute("SELECT * FROM sessions").fetchall()
         sessions: list[TradingSession] = []
@@ -114,10 +182,13 @@ class SessionDB:
                 initial_equity=r["initial_equity"],
                 peak_equity=r["peak_equity"],
                 deployed_candidate_id=r["deployed_candidate_id"],
+                equity_share=self._row_equity_share(r),
             ))
         return sessions
 
-    def find_session(self, account_id: str, strategy_slug: str, symbol: str) -> TradingSession | None:
+    def find_session(
+        self, account_id: str, strategy_slug: str, symbol: str,
+    ) -> TradingSession | None:
         row = self._conn.execute(
             "SELECT * FROM sessions WHERE account_id = ? AND strategy_slug = ? AND symbol = ?",
             (account_id, strategy_slug, symbol),
@@ -134,6 +205,7 @@ class SessionDB:
             initial_equity=row["initial_equity"],
             peak_equity=row["peak_equity"],
             deployed_candidate_id=row["deployed_candidate_id"],
+            equity_share=self._row_equity_share(row),
         )
 
     def log_deployment(
