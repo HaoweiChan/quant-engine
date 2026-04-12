@@ -29,8 +29,7 @@ never a backtest run.
 
 ## Mandatory Skills
 - `alpha-validation-protocol` — Phase 1 vs Phase 2 distinction; required for every promotion review
-- `quant-overfitting` — Bonferroni correction, parameter sensitivity rules
-- `quant-stop-diagnosis` — stop-loss placement patterns to check in code review
+- `optimize-strategy` — L0→L3 gate thresholds, sensitivity and Bonferroni rules
 - `taifex-chart-rendering` — session boundary correctness in dashboard reviews
 - `live-bar-construction` — tick pipeline correctness in live data reviews
 
@@ -74,11 +73,11 @@ Risk Auditor: [agent instance]
 [ ] Training metrics NOT presented as strategy performance
 
 ━━━ CODE QUALITY ━━━
-[ ] validate_engine() passes
-[ ] resolve_factory('[name]') returns without error
+[ ] Strategy registered via auto-discovery: `get_info('<holding_period>/<category>/<name>')` returns a valid StrategyInfo
+[ ] PARAM_SCHEMA and STRATEGY_META exported; STRATEGY_META fields match holding_period in the checklist
 [ ] Unit test suite reviewed: all required test cases present (see Strategy Engineer checklist)
-[ ] All unit tests green
-[ ] No forbidden imports in strategy files
+[ ] All unit tests green (`uv run pytest -m "not integration"`)
+[ ] No forbidden imports in strategy files (os, sys, subprocess, socket, requests, shutil)
 [ ] SharedState pattern used correctly (no indicator divergence between policies)
 
 ━━━ EXECUTION READINESS ━━━
@@ -156,7 +155,7 @@ After Phase 1 parameter sweep:
 Any change to `src/core/` requires this before merge:
 
 ```bash
-python -m pytest tests/ -v --tb=short
+uv run pytest -v --tb=short
 # Compare all strategy MC P50 Sharpes against tests/regression_baseline.json
 # All values must be within ±5% of baseline
 ```
@@ -164,6 +163,11 @@ python -m pytest tests/ -v --tb=short
 If any strategy's Sharpe degrades more than 5%: block the merge and escalate to Orchestrator.
 Update `tests/regression_baseline.json` after any intentional improvement — with a comment
 explaining why the baseline changed.
+
+Note: `tests/regression_baseline.json` is to be created as strategies reach L3. Until then,
+regression gating is performed by running `run_walk_forward` against each active L2+ strategy
+and confirming validation Sharpe does not degrade by more than 5% vs the last archived run
+(accessible via `get_run_history`).
 
 ---
 
@@ -180,10 +184,10 @@ A strategy cannot be promoted based on simulation results alone.
 
 Required before re-submission:
 - Walk-forward backtest on real TXF OHLCV bars (minimum 2 years)
-- Out-of-sample validation Sharpe ≥ 1.0
-- N_trades ≥ 30 per validation window
+- Out-of-sample validation Sharpe ≥ holding-period L2 floor (short_term: 1.0, medium_term: 0.8, swing: 0.7)
+- N_trades ≥ holding-period threshold per validation window
 - Both day and night sessions validated separately
-- Phase 2 report written to .claude/research/[name]-phase2.md
+- Phase 2 report written to `.claude/research/<slug>_phase2.md` (create directory if missing)
 
 Reference: alpha-validation-protocol skill
 ```

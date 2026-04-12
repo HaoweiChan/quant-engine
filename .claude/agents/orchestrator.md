@@ -62,13 +62,21 @@ Available MCP tools: all 17 tools including `promote_optimization_level` for lev
 
 | Work type | Agent |
 |---|---|
-| Strategy hypothesis, signal logic, parameter optimization, backtest analysis | Quant Researcher |
-| Historical bar ingestion, quality validation, resampling, session handling | Market Data Engineer |
-| Strategy policy code (EntryPolicy / AddPolicy / StopPolicy), MCP server registration | Strategy Engineer |
-| React dashboard, FastAPI endpoints, WebSocket feeds, chart rendering | Platform Engineer |
-| Live bar construction from shioaji ticks, tick→bar buffer, today's data pipeline | Platform Engineer |
-| Bias audits, test coverage, promotion checklist, regression gating | Risk Auditor |
-| shioaji order routing, fill quality, slippage model, kill-switch, position reconciliation | Live Systems Engineer |
+| Strategy hypothesis, signal logic, parameter optimization, backtest analysis (via MCP) | Quant Researcher |
+| Historical bar ingestion, quality validation, resampling, session handling, data daemon, gap detection | Market Data Engineer |
+| Strategy policy code (EntryPolicy / AddPolicy / StopPolicy), auto-discovery registry, unit tests | Strategy Engineer |
+| Shared indicator library (`src/indicators/`), intra-bar simulator (`src/bar_simulator/`) | Strategy Engineer |
+| ML prediction engine (`src/prediction/`) — signal design | Quant Researcher |
+| ML prediction engine (`src/prediction/`) — implementation | Strategy Engineer |
+| React War Room dashboard, FastAPI endpoints, WebSocket feeds, chart rendering | Platform Engineer |
+| Live bar construction from shioaji ticks (`LiveMinuteBarStore`), today's data pipeline | Platform Engineer |
+| Alerting (`src/alerting/`), audit trail (`src/audit/`), runtime telemetry (`src/runtime/`) | Platform Engineer |
+| Optimizer pipeline runner (`src/pipeline/`), credential management (`src/secrets/`) | Platform Engineer |
+| Bias audits, test coverage, promotion checklist, regression gating, overfitting review | Risk Auditor |
+| shioaji order routing, execution engines (live/paper), fill quality, slippage calibration | Live Systems Engineer |
+| Kill-switch routes and state machine (session manager), position reconciliation, OMS | Live Systems Engineer |
+| Pre-trade risk checks (`src/risk/`) — implementation | Live Systems Engineer |
+| Pre-trade risk checks (`src/risk/`) — review and limits definition | Risk Auditor |
 | Server deployment, systemd, Grafana/Prometheus/Loki, backup, incident response | Platform Engineer |
 
 ---

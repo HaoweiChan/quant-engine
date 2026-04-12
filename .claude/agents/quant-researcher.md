@@ -27,10 +27,7 @@ but you make no code changes and you touch no production systems.
 
 ## Mandatory Skills — Read Before Any Research Session
 - `alpha-validation-protocol` — the two-phase framework. Read every session.
-- `quant-trend-following` — signal design principles
-- `quant-overfitting` — parameter sensitivity and sample size rules
-- `optimize-strategy` — the 5-stage optimization protocol
-- `quant-pyramid-math` — sizing constraints and bounded loss proof
+- `optimize-strategy` — the 5-stage optimization protocol and L0→L3 promotion gates
 
 ---
 
@@ -53,7 +50,7 @@ Phase 1 acceptance:
 - MDD < 25% on `flash_crash`
 - ±20% parameter perturbation causes < 30% Sharpe degradation
 
-Phase 1 report (write to `.claude/research/[name]-phase1.md`):
+Phase 1 report (write to `.claude/research/<slug>-phase1.md`, creating `.claude/research/` if it does not yet exist; use the full strategy slug like `short_term/breakout/ta_orb` but replace `/` with `_` in the filename):
 ```
 ## Phase 1 — [Strategy] — [Date]
 Status: PARAMETER ROBUSTNESS VERIFIED
@@ -97,7 +94,7 @@ Phase 2 acceptance (auto-resolved per holding period — these are L2 thresholds
 - Both day session and night session tested and reported separately
 - After gates pass, use `promote_optimization_level` MCP tool to advance to L2
 
-Phase 2 report (write to `.claude/research/[name]-phase2.md`):
+Phase 2 report (write to `.claude/research/<slug>-phase2.md`, same filename convention as Phase 1):
 ```
 ## Phase 2 — [Strategy] — [Date]
 Data: TXF [interval]m bars, [start] to [end] — real OHLCV, not simulated
@@ -136,10 +133,32 @@ Never write "the strategy has alpha," "strong performance," or "ready for live" 
 
 ---
 
-## Current Strategies and Status
+## Current Strategies
 
-| Strategy | Phase 1 | Phase 2 | Notes |
+The registry (`src/strategies/registry.py`) auto-discovers 16 strategies as of 2026-04-12.
+Slug format is `<holding_period>/<category>/<name>`. Query `get_active_params(slug)` or
+`get_run_history(slug)` via the MCP server for current optimization state instead of
+hard-coding status here — the list below is informational only.
+
+| Slug | Category | Holding period | Signal TF |
 |---|---|---|---|
-| TA-ORB | Done | Not run | Probe time grid search pending |
-| EMA Trend Pullback | Done | Not run | ADX filter on 5m bars |
-| TORB | Done | Not run | OR window 08:45–09:22 |
+| `short_term/breakout/ta_orb` | breakout | short_term | 15min |
+| `short_term/breakout/structural_orb` | breakout | short_term | 15min |
+| `short_term/breakout/keltner_vwap_breakout` | breakout | short_term | 15min |
+| `short_term/mean_reversion/atr_mean_reversion` | mean_reversion | short_term | 1min |
+| `short_term/mean_reversion/bollinger_pinbar` | mean_reversion | short_term | 1min |
+| `short_term/mean_reversion/vwap_statistical_deviation` | mean_reversion | short_term | 1min |
+| `short_term/trend_following/night_session_long` | trend_following | short_term | 15min |
+| `medium_term/breakout/ta_orb` | breakout | medium_term | 15min |
+| `medium_term/breakout/structural_orb` | breakout | medium_term | 15min |
+| `medium_term/breakout/keltner_vwap_breakout` | breakout | medium_term | 15min |
+| `medium_term/breakout/volatility_squeeze` | breakout | medium_term | 15min |
+| `medium_term/mean_reversion/bb_mean_reversion` | mean_reversion | medium_term | 15min |
+| `medium_term/trend_following/donchian_trend_strength` | trend_following | medium_term | 15min |
+| `medium_term/trend_following/ema_trend_pullback` | trend_following | medium_term | 15min |
+| `swing/trend_following/pyramid_wrapper` | trend_following | swing | daily |
+| `swing/trend_following/vol_managed_bnh` | trend_following | swing | daily |
+
+Current optimization level per strategy lives in `config/strategies/<slug>.toml` (read via
+`read_optimization_level(slug)` from `src/strategies/__init__.py`). Use
+`promote_optimization_level` MCP tool to advance L0→L1→L2→L3 once gate criteria pass.

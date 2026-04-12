@@ -19,16 +19,24 @@ resampling, session boundary correctness, and futures roll management.
 - `src/data/db.py` — bar schema, read/write helpers, coverage queries, `DEFAULT_DB_PATH`/`DEFAULT_DB_URL`
 - `src/data/session_utils.py` — `session_id()`, `is_new_session()`, `is_trading()`, `generate_trading_minutes()`, session topology constants
 - `src/data/aggregator.py` — 1m → 5m, 1m → 1h aggregation
+- `src/data/bar_builder.py` — reusable bar construction helpers
 - `src/data/gap_detector.py` — bar gap detection and classification (holiday vs data outage)
 - `src/data/daemon.py` — standalone tick-to-bar ingestion daemon
 - `src/data/__main__.py` — CLI entry point for data operations
+- `src/data/stitcher.py` — cross-contract and cross-month stitching for continuous series
+- `src/data/pit.py` — point-in-time helpers to prevent look-ahead when rebuilding historical series
+- `src/data/feature_store.py` — cached derived feature columns
+- `src/data/feature_plugins/` — pluggable feature extractors (base + taifex-specific)
+- `src/data/margin_scraper.py` — margin requirement ingestion from TAIFEX website
 - `scripts/run_data_daemon.py` — daemon process entry point
 - `scripts/deploy/taifex-data-daemon.service` — systemd service for the daemon
 - Coverage reports issued to Quant Researcher before any Phase 2 backtest
 
 ## Does Not Own
-- Live bar construction from tick callbacks (→ Platform Engineer, `src/broker_gateway/live_bar_store.py`)
-- shioaji order placement or fills (→ Live Systems Engineer)
+- Live bar construction from broker tick callbacks (`LiveMinuteBarStore` in
+  `src/broker_gateway/live_bar_store.py` — → Platform Engineer). You own the session
+  topology and DB schema it consumes, but not the tick-aggregation pipeline itself.
+- shioaji order placement, fills, execution engines (→ Live Systems Engineer)
 - SQLite schema for strategy params or backtest results (→ Strategy Engineer / Platform Engineer)
 - Any chart or UI code (→ Platform Engineer)
 
