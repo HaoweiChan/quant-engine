@@ -66,7 +66,18 @@ async def run_backtest(req: BacktestRequest):
             cached["provenance"] = req.provenance
         return JSONResponse(cached)
 
-    # Step 2: Cache miss — run full backtest in thread pool (no fork, no pickle).
+    # Step 2: Check if this is a constrained environment (VPS with limited resources).
+    # If so, refuse to run compute-heavy backtests — user must run via MCP on dev machine.
+    from src.mcp_server.facade import _classify_hardware
+    if _classify_hardware() == "constrained":
+        return JSONResponse({
+            "status": "compute_required",
+            "cached": False,
+            "message": "VPS cannot run backtests due to limited resources. "
+                       "Run via MCP tools on dev machine, then view cached results here.",
+        })
+
+    # Step 3: Cache miss — run full backtest in thread pool (no fork, no pickle).
     from src.api.helpers import run_strategy_backtest
 
     future = loop.run_in_executor(
