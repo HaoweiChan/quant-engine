@@ -534,9 +534,11 @@ def _build_cache_key(
     strategy: str,
     strategy_params: dict[str, Any] | None = None,
     intraday: bool = False,
+    symbol: str = "TX",
 ) -> _CacheKey:
     """Compute cache key components for a real-data backtest."""
     import hashlib
+    from src.core.types import get_instrument_cost_config
 
     resolved_slug = resolve_strategy_slug(strategy)
 
@@ -550,12 +552,15 @@ def _build_cache_key(
 
     strategy_hash, _ = _compute_code_hash(resolved_slug)
     _sp = strategy_params or {}
-    _slip_bps = _sp.get("slippage_bps", 0)
-    _comm_fixed = _sp.get("commission_fixed_per_contract", 0)
-    cost_note: str | None = f"sbps={_slip_bps}|cfix={_comm_fixed}" if (_slip_bps or _comm_fixed) else None
+    # Use instrument cost defaults when not explicitly provided (matches _build_runner)
+    cost_config = get_instrument_cost_config(symbol)
+    _slip_bps = _sp.get("slippage_bps", cost_config.slippage_bps)
+    _comm_fixed = _sp.get("commission_fixed_per_contract", cost_config.commission_per_contract)
+    # Always generate cost_note so frontend can display costs
+    cost_note = f"sbps={_slip_bps}|cfix={_comm_fixed}"
     _p_str = _normalize_params_for_hash(_sp)
     _p_hash = hashlib.md5(_p_str.encode()).hexdigest()[:8]
-    cost_note = f"p={_p_hash}" + (f"|{cost_note}" if cost_note else "")
+    cost_note = f"p={_p_hash}|{cost_note}"
     timeframe_str = f"{bar_agg}min{'|intraday' if intraday else ''}"
     _tf_notes = f"tf={timeframe_str}"
     combined_notes = "; ".join(filter(None, [cost_note, _tf_notes]))
@@ -575,7 +580,7 @@ def lookup_backtest_cache(
     Runs the same cache key computation as run_backtest_realdata_for_mcp
     without loading bars or running simulation. Fast (~10ms).
     """
-    ck = _build_cache_key(strategy, strategy_params, intraday)
+    ck = _build_cache_key(strategy, strategy_params, intraday, symbol)
     if not ck.strategy_hash:
         return None
 
@@ -648,7 +653,7 @@ def run_backtest_realdata_for_mcp(
     bar_agg = int((strategy_params or {}).get("bar_agg", meta_bar_agg))
 
     # -- Cache key + lookup (reuses _build_cache_key) --
-    _ck = _build_cache_key(strategy, strategy_params, intraday)
+    _ck = _build_cache_key(strategy, strategy_params, intraday, symbol)
     strategy_hash = _ck.strategy_hash
     _cost_note = _ck.cost_note
     _timeframe_str = _ck.timeframe_str
@@ -1433,10 +1438,16 @@ def run_sweep_for_mcp(
 
         registry = ParamRegistry()
         search = "random" if n_samples is not None else "grid"
-        # Build notes with timeframe info (matches run_backtest_realdata format)
+        # Build notes with cost + timeframe info (matches run_backtest_realdata format)
         _is_intra = timeframe in ("intraday", "1m")
         _sweep_tf_str = f"{sweep_bar_agg}min{'|intraday' if _is_intra else ''}" if mode == "production_intent" and symbol else None
-        _sweep_notes = f"tf={_sweep_tf_str}" if _sweep_tf_str else None
+        # Include cost info in notes so frontend can display it
+        _sweep_cost_config = get_instrument_cost_config(symbol)
+        _sweep_slip_bps = clamped_base.get("slippage_bps", _sweep_cost_config.slippage_bps)
+        _sweep_comm_fixed = clamped_base.get("commission_fixed_per_contract", _sweep_cost_config.commission_per_contract)
+        _sweep_cost_note = f"sbps={_sweep_slip_bps}|cfix={_sweep_comm_fixed}"
+        _sweep_tf_note = f"tf={_sweep_tf_str}" if _sweep_tf_str else None
+        _sweep_notes = "; ".join(filter(None, [_sweep_cost_note, _sweep_tf_note]))
         run_id = registry.save_run(
             result=result,
             strategy=resolved_slug,
