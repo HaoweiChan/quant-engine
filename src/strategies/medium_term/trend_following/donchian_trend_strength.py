@@ -96,6 +96,13 @@ PARAM_SCHEMA: dict[str, dict] = {
         "description": "RSI must be above this for short entries (0=disabled).",
         "grid": [0, 40, 45, 50],
     },
+    "risk_per_trade": {
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "max": 1_000_000.0,
+        "description": "Target risk per trade in NT$. Lots auto-sized: risk / (stop_pts × point_value). 0=use fixed lots.",
+    },
     "vol_mult": {
         "type": "float",
         "default": 0.0,
@@ -348,7 +355,7 @@ class DonchianTrendStrengthEntry(EntryPolicy):
         self,
         indicators: _Indicators,
         lots: float = 1.0,
-        contract_type: str = "large",
+        risk_per_trade: float = 0.0,
         adx_threshold: float = 20.0,
         rsi_long_thresh: float = 55.0,
         rsi_short_thresh: float = 45.0,
@@ -360,7 +367,7 @@ class DonchianTrendStrengthEntry(EntryPolicy):
     ) -> None:
         self._ind = indicators
         self._lots = lots
-        self._contract_type = contract_type
+        self._risk_per_trade = risk_per_trade
         self._adx_threshold = adx_threshold
         self._rsi_long_thresh = rsi_long_thresh
         self._rsi_short_thresh = rsi_short_thresh
@@ -404,38 +411,38 @@ class DonchianTrendStrengthEntry(EntryPolicy):
                 return None
         price = snapshot.price
         sl_pts = daily_atr * self._atr_sl_multi
+        # Risk-based sizing: lots = risk_per_trade / (stop_distance × point_value)
+        if self._risk_per_trade > 0 and sl_pts > 0:
+            lots = max(1.0, round(self._risk_per_trade / (sl_pts * snapshot.point_value)))
+        else:
+            lots = self._lots
         uptrend = ind.vwap > ind.donchian_mid
         downtrend = ind.vwap < ind.donchian_mid
-        # RSI filter: rsi_long_thresh >= 100 disables it
         rsi_long_ok = ind.rsi is None or self._rsi_long_thresh >= 100 or ind.rsi < self._rsi_long_thresh
         rsi_short_ok = ind.rsi is None or self._rsi_short_thresh <= 0 or ind.rsi > self._rsi_short_thresh
+        meta = {
+            "atr_tp_multi": self._atr_tp_multi,
+            "adx": round(ind.adx, 1),
+            "rsi": round(ind.rsi, 1) if ind.rsi is not None else 0,
+            "vol_ratio": round(ind.bar_volume / max(ind.avg_volume, 1), 2),
+            "ch_width_atr": round(ind.channel_width / max(daily_atr, 1), 2),
+        }
+        ct = snapshot.contract_specs.contract_type
         if uptrend and price <= ind.donchian_mid and rsi_long_ok:
             return EntryDecision(
-                lots=self._lots,
-                contract_type=self._contract_type,
+                lots=lots,
+                contract_type=ct,
                 initial_stop=price - sl_pts,
                 direction="long",
-                metadata={
-                    "atr_tp_multi": self._atr_tp_multi,
-                    "adx": round(ind.adx, 1),
-                    "rsi": round(ind.rsi, 1) if ind.rsi is not None else 0,
-                    "vol_ratio": round(ind.bar_volume / max(ind.avg_volume, 1), 2),
-                    "ch_width_atr": round(ind.channel_width / max(daily_atr, 1), 2),
-                },
+                metadata=meta,
             )
         if downtrend and price >= ind.donchian_mid and rsi_short_ok:
             return EntryDecision(
-                lots=self._lots,
-                contract_type=self._contract_type,
+                lots=lots,
+                contract_type=ct,
                 initial_stop=price + sl_pts,
                 direction="short",
-                metadata={
-                    "atr_tp_multi": self._atr_tp_multi,
-                    "adx": round(ind.adx, 1),
-                    "rsi": round(ind.rsi, 1) if ind.rsi is not None else 0,
-                    "vol_ratio": round(ind.bar_volume / max(ind.avg_volume, 1), 2),
-                    "ch_width_atr": round(ind.channel_width / max(daily_atr, 1), 2),
-                },
+                metadata=meta,
             )
         return None
 
@@ -556,7 +563,7 @@ class DonchianTrendStrengthStop(StopPolicy):
 def create_donchian_trend_strength_engine(
     max_loss: float = 500_000.0,
     lots: float = 1.0,
-    contract_type: str = "large",
+    risk_per_trade: float = 0.0,
     lookback_period: int = 20,
     adx_len: int = 14,
     adx_threshold: float = 20.0,
@@ -598,7 +605,7 @@ def create_donchian_trend_strength_engine(
         entry_policy=DonchianTrendStrengthEntry(
             indicators=indicators,
             lots=lots,
-            contract_type=contract_type,
+            risk_per_trade=risk_per_trade,
             adx_threshold=adx_threshold,
             rsi_long_thresh=rsi_long_thresh,
             rsi_short_thresh=rsi_short_thresh,
