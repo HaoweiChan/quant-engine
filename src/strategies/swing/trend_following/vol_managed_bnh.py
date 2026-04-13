@@ -9,6 +9,14 @@ Alpha source: conditioning on second moment (vol) rather than first moment (tren
 direction). Low-vol periods get more overlay exposure; high-vol periods reduce.
 
 Signal timeframe: 5m bars (converted internally to daily closes for vol calc).
+
+Warmup Behavior:
+  - First entry occurs ~70 minutes after launch (SmoothedATR requires 14 samples
+    at 5m bar intervals before ready=True).
+  - Full overlay sizing activates after 10 trading days (_RealizedVol requires
+    10 daily closes for the vol_lookback window).
+  - This warmup is intentional for a swing strategy with 30-180 day expected
+    holding period (warmup represents 0.03%-0.16% of hold duration).
 """
 from __future__ import annotations
 
