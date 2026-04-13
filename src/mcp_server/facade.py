@@ -13,9 +13,23 @@ from typing import Any
 from src.simulator.types import PRESETS, PathConfig
 
 # Factory cache: avoids importlib.reload() on every MC worker / sweep trial.
-# Set QUANT_RELOAD_STRATEGY=1 to force reload (useful during dev).
+# Code-hash change detection auto-invalidates; env QUANT_RELOAD_STRATEGY=1 forces reload.
 _factory_cache: dict[str, Any] = {}
-_RELOAD_STRATEGY = os.environ.get("QUANT_RELOAD_STRATEGY", "0") == "1"
+_factory_hashes: dict[str, str] = {}
+
+
+def _should_reload_strategy(slug: str) -> bool:
+    """Return True when strategy source changed since last load."""
+    if os.environ.get("QUANT_RELOAD_STRATEGY", "0") == "1":
+        return True
+    try:
+        new_hash, _ = _compute_code_hash(slug)
+    except Exception:
+        return False
+    old = _factory_hashes.get(slug)
+    if old is None:
+        return False
+    return new_hash != old
 
 
 def _normalize_params_for_hash(params: dict[str, Any]) -> str:
@@ -79,10 +93,11 @@ def resolve_factory(strategy: str) -> Any:
     2. "module:factory" format (external strategies)
     3. Raise ValueError
 
-    Results are cached per-process to avoid expensive importlib.reload()
-    on every MC path / sweep trial.  Set QUANT_RELOAD_STRATEGY=1 to bypass.
+    Results are cached per-process. Auto-invalidated when the strategy source
+    file changes (code-hash check). Set QUANT_RELOAD_STRATEGY=1 to force reload.
     """
-    if strategy in _factory_cache and not _RELOAD_STRATEGY:
+    need_reload = _should_reload_strategy(strategy)
+    if strategy in _factory_cache and not need_reload:
         return _factory_cache[strategy]
 
     from src.strategies.registry import get_all, get_info
@@ -91,7 +106,7 @@ def resolve_factory(strategy: str) -> Any:
     try:
         info = get_info(strategy)
         mod = importlib.import_module(info.module)
-        if _RELOAD_STRATEGY:
+        if need_reload or strategy not in _factory_cache:
             importlib.reload(mod)
         result = getattr(mod, info.factory)
     except KeyError:
@@ -99,13 +114,18 @@ def resolve_factory(strategy: str) -> Any:
     if result is None and ":" in strategy:
         mod_path, fn_name = strategy.rsplit(":", 1)
         mod = importlib.import_module(mod_path)
-        if _RELOAD_STRATEGY:
+        if need_reload:
             importlib.reload(mod)
         result = getattr(mod, fn_name)
     if result is None:
         available = list(get_all().keys())
         raise ValueError(f"Unknown strategy '{strategy}'. Available: {available}")
     _factory_cache[strategy] = result
+    try:
+        h, _ = _compute_code_hash(strategy)
+        _factory_hashes[strategy] = h
+    except Exception:
+        pass
     return result
 
 
@@ -237,7 +257,7 @@ def _aggregate_synthetic_bars(
             break
         agg_bars.append({
             "price": group[-1]["close"],
-            "symbol": group[0].get("symbol", "TX"),
+            "symbol": group[0].get("symbol", ""),
             "daily_atr": group[-1].get("daily_atr", 0.0),
             "open": group[0]["open"],
             "high": max(b["high"] for b in group),
@@ -331,14 +351,14 @@ def _build_runner(
     periods_per_year: float = 252.0,
     fill_model=None,
     initial_equity: float = 2_000_000.0,
-    instrument: str = "TX",
+    instrument: str | None = None,
 ):
     """Build a BacktestRunner for any strategy. Single source of truth."""
     from src.simulator.backtester import BacktestRunner
     from src.core.types import ImpactParams, get_instrument_cost_config
     from src.simulator.fill_model import MarketImpactFillModel
 
-    cost_config = get_instrument_cost_config(instrument)
+    cost_config = get_instrument_cost_config(instrument or "")
     factory = resolve_factory(strategy)
     adapter = _get_adapter()
     merged = dict(strategy_params or {})
@@ -534,7 +554,7 @@ def _build_cache_key(
     strategy: str,
     strategy_params: dict[str, Any] | None = None,
     intraday: bool = False,
-    symbol: str = "TX",
+    symbol: str = "",
 ) -> _CacheKey:
     """Compute cache key components for a real-data backtest."""
     import hashlib
@@ -692,6 +712,7 @@ def run_backtest_realdata_for_mcp(
         clamped_params,
         periods_per_year=periods_per_year,
         initial_equity=initial_equity,
+        instrument=symbol,
     )
 
     bars = [
@@ -1486,6 +1507,7 @@ def run_sweep_for_mcp(
             full_runner = _build_runner(
                 resolved_slug, {**clamped_base, **result.best_params},
                 periods_per_year=_fp_ppy,
+                instrument=symbol,
             )
             full_result = full_runner.run(
                 bars, timestamps=timestamps, force_flat_indices=sweep_force_flat,
@@ -1964,7 +1986,7 @@ def run_sensitivity_check_for_mcp(
     best_params: dict[str, Any] | None = None,
     perturbation_pct: float = 20.0,
     n_steps: int = 5,
-    instrument: str = "TX",
+    instrument: str = "",
 ) -> dict[str, Any]:
     """Run a ±N% parameter sensitivity sweep on a strategy.
 
@@ -2093,7 +2115,7 @@ def run_sensitivity_check_for_mcp(
 
 def run_risk_report_for_mcp(
     strategy: str = "pyramid",
-    instrument: str = "TX",
+    instrument: str = "",
     symbol: str | None = None,
     start: str | None = None,
     end: str | None = None,

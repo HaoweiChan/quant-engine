@@ -404,8 +404,8 @@ TOOLS: list[Tool] = [
                 },
                 "instrument": {
                     "type": "string",
-                    "description": "Instrument symbol for cost defaults (default: TX)",
-                    "default": "TX",
+                    "description": "Instrument symbol for cost defaults (e.g. TX, MTX, TMF)",
+                    "default": "",
                 },
             },
             "required": ["strategy"],
@@ -724,8 +724,8 @@ TOOLS: list[Tool] = [
                 },
                 "instrument": {
                     "type": "string",
-                    "description": "Instrument symbol for cost defaults (default: TX)",
-                    "default": "TX",
+                    "description": "Instrument symbol for cost defaults (e.g. TX, MTX, TMF)",
+                    "default": "",
                 },
                 "symbol": {
                     "type": "string",
@@ -1049,7 +1049,7 @@ def register_tools(app: Server) -> None:
                     functools.partial(
                         run_risk_report_for_mcp,
                         strategy=arguments["strategy"],
-                        instrument=arguments.get("instrument", "TX"),
+                        instrument=arguments.get("instrument", ""),
                         symbol=arguments.get("symbol"),
                         start=arguments.get("start"),
                         end=arguments.get("end"),
@@ -1067,7 +1067,7 @@ def register_tools(app: Server) -> None:
                         best_params=arguments.get("best_params"),
                         perturbation_pct=arguments.get("perturbation_pct", 20.0),
                         n_steps=arguments.get("n_steps", 5),
-                        instrument=arguments.get("instrument", "TX"),
+                        instrument=arguments.get("instrument", ""),
                     ),
                 )
                 return _json_response(result)

@@ -38,6 +38,11 @@ class ContractSpecs:
         if not self.lot_types:
             raise ValueError("lot_types must contain at least one entry")
 
+    @property
+    def contract_type(self) -> str:
+        """Primary lot type label (e.g. 'large', 'mini', 'micro')."""
+        return next(iter(self.lot_types))
+
 
 @dataclass
 class MarketSnapshot:
@@ -364,6 +369,7 @@ class InstrumentCostConfig:
 INSTRUMENT_COSTS: dict[str, InstrumentCostConfig] = {
     "TX": InstrumentCostConfig(slippage_pct=0.1, commission_per_contract=100.0, symbol="TX"),
     "MTX": InstrumentCostConfig(slippage_pct=0.1, commission_per_contract=40.0, symbol="MTX"),
+    "TMF": InstrumentCostConfig(slippage_pct=0.1, commission_per_contract=20.0, symbol="TMF"),
 }
 
 
