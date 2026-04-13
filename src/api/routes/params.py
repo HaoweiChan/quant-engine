@@ -58,6 +58,28 @@ async def get_run_code(run_id: int) -> dict:
     }
 
 
+@router.get("/runs/{run_id:int}/result")
+async def get_run_result(run_id: int) -> dict:
+    """Return cached backtest result for a specific run.
+
+    This allows viewing historical run results without re-running the backtest.
+    Returns the full BacktestResult stored in result_json, or 404 if not cached.
+    """
+    from src.strategies.param_registry import ParamRegistry
+
+    registry = ParamRegistry()
+    result = registry.get_result_by_run_id(run_id)
+    registry.close()
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No cached result for run {run_id}. Run the backtest to generate and cache the result.",
+        )
+    result["run_id"] = run_id
+    result["cache_hit"] = True
+    return result
+
+
 @router.get("/runs/{strategy:path}")
 async def get_run_history(strategy: str, limit: int = 20) -> dict:
     """Return optimization run history for a strategy."""

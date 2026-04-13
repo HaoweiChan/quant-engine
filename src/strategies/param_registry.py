@@ -371,6 +371,19 @@ class ParamRegistry:
         except (json.JSONDecodeError, TypeError):
             return None
 
+    def get_result_by_run_id(self, run_id: int) -> dict[str, Any] | None:
+        """Return cached backtest result dict by run_id, else None."""
+        row = self._conn.execute(
+            "SELECT result_json FROM param_runs WHERE id = ? AND result_json IS NOT NULL",
+            (run_id,),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["result_json"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+
     # -- save_run ---------------------------------------------------------
 
     def save_run(
