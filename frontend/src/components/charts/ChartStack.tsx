@@ -86,10 +86,6 @@ export function ChartStack({
     [activeIndicators, localIndicators],
   );
 
-  // Live tick refs
-  const lastSeqTimeRef = useRef<number | null>(null);
-  const lastRealTsRef = useRef<string | null>(null);
-  const seqStepRef = useRef(60);
 
   const secondaryDef = useMemo(() => getIndicatorDef(secondaryId), [secondaryId]);
 
@@ -103,9 +99,20 @@ export function ChartStack({
   // Reset visible window when the underlying data changes
   useEffect(() => { setVisibleCount(INITIAL_VISIBLE); }, [bars]);
 
+  // Merge liveTick into bars before computing sessionBars.
+  // This ensures the live bar is part of the rendered data, eliminating
+  // race conditions between update() and setData() calls.
+  const barsWithLive = useMemo(() => {
+    if (!liveTick) return bars;
+    // Append liveTick; toProfessionalSessionBars will dedupe by timestamp,
+    // so if liveTick has same timestamp as last bar, it replaces it.
+    // If liveTick has a new timestamp (boundary crossed), it's added.
+    return [...bars, liveTick];
+  }, [bars, liveTick]);
+
   const sessionBars = useMemo(
-    () => toProfessionalSessionBars(bars, timeframeMinutes),
-    [bars, timeframeMinutes],
+    () => toProfessionalSessionBars(barsWithLive, timeframeMinutes),
+    [barsWithLive, timeframeMinutes],
   );
   const ds = useMemo(
     () => sessionBars.length <= visibleCount ? sessionBars : sessionBars.slice(-visibleCount),
@@ -176,42 +183,11 @@ export function ChartStack({
     })).filter((s) => s.data.length > 0);
   }, [ds, times, secondaryDef, secondaryParams]);
 
-  // Reset live refs on timeframe changes
-  useEffect(() => {
-    lastSeqTimeRef.current = null;
-    lastRealTsRef.current = null;
-  }, [timeframeMinutes]);
 
-  // Track sequential state whenever chart data/time mapping changes
-  useEffect(() => {
-    if (times.length > 0) {
-      lastSeqTimeRef.current = times[times.length - 1];
-      lastRealTsRef.current = ds[ds.length - 1]?.timestamp ?? null;
-      seqStepRef.current = step;
-    }
-  }, [times, ds, step]);
-
-  // Live tick: update last bar or append new bar via chart ref
-  useEffect(() => {
-    if (!liveTick || !primaryRef.current) return;
-    const cs = primaryRef.current.firstSeries();
-    if (!cs) return;
-    const converted = toProfessionalSessionBars([liveTick], timeframeMinutes);
-    if (converted.length === 0) return;
-    const live = converted[0];
-    const lastSeq = lastSeqTimeRef.current;
-    if (lastSeq == null) return;
-    const seqTime = live.timestamp === lastRealTsRef.current
-      ? lastSeq
-      : lastSeq + seqStepRef.current;
-    try {
-      cs.update({ time: seqTime as any, open: live.open, high: live.high, low: live.low, close: live.close });
-    } catch {
-      return;
-    }
-    lastSeqTimeRef.current = seqTime;
-    lastRealTsRef.current = live.timestamp;
-  }, [liveTick, timeframeMinutes]);
+  // Live tick handling: liveTick is now merged into barsWithLive above,
+  // so setData() in ChartPane already includes the live bar. No separate
+  // update() call needed - this eliminates the race condition where
+  // update() and setData() would fight over the chart state.
 
   // Overlay indicator management helpers
   const addIndicator = (registryId: string) => {

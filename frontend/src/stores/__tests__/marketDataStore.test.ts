@@ -15,13 +15,15 @@ describe("marketDataStore", () => {
   });
 
   describe("setBars", () => {
-    it("sets lastLiveTick to last bar when bars array is non-empty", () => {
+    it("does not set lastLiveTick when bars array is non-empty (prevents race condition)", () => {
+      // lastLiveTick should only be set by processLiveTick, not setBars.
+      // This prevents duplicate timestamps when live tick boundaries cross.
       const bars = [
         { timestamp: "2025-03-01T10:00:00Z", open: 100, high: 105, low: 99, close: 103, volume: 1000 },
         { timestamp: "2025-03-01T11:00:00Z", open: 103, high: 108, low: 102, close: 106, volume: 1200 },
       ];
       useMarketDataStore.getState().setBars(bars);
-      expect(useMarketDataStore.getState().lastLiveTick).toEqual(bars[1]);
+      expect(useMarketDataStore.getState().lastLiveTick).toBeNull();
     });
 
     it("sets lastLiveTick to null when bars array is empty", () => {

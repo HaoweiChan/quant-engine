@@ -74,7 +74,10 @@ export function createMarketDataStore() {
     setBars: (bars) => set({
       bars,
       error: null,
-      lastLiveTick: bars.length > 0 ? bars[bars.length - 1] : null,
+      // Don't initialize lastLiveTick to last completed bar - it should only
+      // be set when actual live tick data arrives via processLiveTick.
+      // This prevents duplicate timestamps when boundary crosses.
+      lastLiveTick: null,
     }),
     prependBars: (olderBars) => {
       const state = get();
