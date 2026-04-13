@@ -76,6 +76,7 @@ export function getMockWarRoomData(config: MockConfig = DEFAULT_CONFIG): WarRoom
     strategy_slug: "mock_strategy/ema_cross",
     symbol: config.symbol,
     status: "active",
+    equity_share: 1.0,
     deployed_candidate_id: 1,
     deployed_params: { ema_fast: 12, ema_slow: 26 },
     backtest_metrics: {
