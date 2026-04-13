@@ -41,9 +41,9 @@ export const useStrategyStore = create<StrategyState>((set, get) => ({
   symbol: "TX",
   startDate: "2025-08-01",
   endDate: "2026-03-14",
-  slippageBps: 0,
+  slippageBps: 1,        // matches backend cost_config.slippage_bps (0.1% * 10)
   commissionBps: 0,
-  commissionFixed: 0,
+  commissionFixed: 100,  // NT$100 per contract for TX (default)
   initialCapital: 2_000_000,
   maxLoss: 500_000,
   params: {},
