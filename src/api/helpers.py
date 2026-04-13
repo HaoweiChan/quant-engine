@@ -95,6 +95,7 @@ def start_crawl(db_symbol: str, start_str: str, end_str: str) -> bool:
 
 
 def _crawl_worker(db_symbol: str, start_str: str, end_str: str) -> None:
+    """Run crawl in a subprocess to isolate shioaji C++ crashes from the API server."""
     contract = FUTURES_BY_SYMBOL.get(db_symbol)
     if not contract:
         with _crawl_lock:
@@ -107,33 +108,28 @@ def _crawl_worker(db_symbol: str, start_str: str, end_str: str) -> None:
     _crawl_log(f"Date range: {start_str} to {end_str}")
 
     try:
-        from src.data.crawl import crawl_historical
-        from src.data.db import Database
-
-        _crawl_log("Connecting to Sinopac API...")
+        _crawl_log("Connecting to Sinopac API (subprocess)...")
         with _crawl_lock:
             _crawl_state.progress = "Logging in to Sinopac..."
 
-        from src.pipeline.config import create_sinopac_connector
-        connector = create_sinopac_connector()
-        _crawl_log("Login successful ✓")
-
-        db = Database(f"sqlite:///{_DB_PATH}")
-        start_date = date.fromisoformat(start_str)
-        end_date = date.fromisoformat(end_str)
-
-        with _crawl_lock:
-            _crawl_state.progress = f"Fetching {contract.db_symbol} 1-min bars..."
-        _crawl_log(f"Fetching 1-min kbars for {contract.shioaji_path} → DB symbol: {contract.db_symbol}")
-
-        total = crawl_historical(
-            symbol=contract.shioaji_path,
-            start=start_date,
-            end=end_date,
-            db=db,
-            connector=connector,
-            db_symbol=contract.db_symbol,
+        # Run the shioaji-dependent crawl in a subprocess to isolate C++ crashes.
+        proc = subprocess.run(
+            [sys.executable, "-m", "src.data.crawl_cli",
+             contract.shioaji_path, contract.db_symbol, start_str, end_str],
+            capture_output=True, text=True, timeout=600,
+            cwd=str(Path(__file__).resolve().parents[2]),
         )
+        if proc.returncode != 0:
+            stderr = proc.stderr.strip()
+            raise RuntimeError(f"Crawl subprocess failed (rc={proc.returncode}): {stderr[-500:]}")
+
+        for line in proc.stdout.strip().splitlines():
+            _crawl_log(line)
+
+        total = 0
+        for line in proc.stdout.splitlines():
+            if line.startswith("TOTAL="):
+                total = int(line.split("=", 1)[1])
         _crawl_log(f"Crawl complete: {total:,} bars stored for {contract.db_symbol}")
         with _crawl_lock:
             _crawl_state.bars_stored = total

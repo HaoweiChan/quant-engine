@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
 from fastapi import APIRouter
@@ -10,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api", tags=["backtest"])
+_backtest_pool = ProcessPoolExecutor(max_workers=2)
 
 
 class BacktestRequest(BaseModel):
@@ -25,6 +27,25 @@ class BacktestRequest(BaseModel):
     commission_fixed_per_contract: float = 0.0
     provenance: dict | None = None
     intraday: bool = False
+
+
+def _backtest_worker(
+    strategy_slug: str, symbol: str, start_str: str, end_str: str,
+    initial_equity: float, strategy_params: dict | None, max_loss: float,
+    slippage_bps: float, commission_bps: float,
+    commission_fixed_per_contract: float, provenance: dict | None,
+    intraday: bool,
+) -> dict:
+    """Run backtest in a separate process to avoid GIL blocking the event loop."""
+    from src.api.helpers import run_strategy_backtest
+    return run_strategy_backtest(
+        strategy_slug=strategy_slug, symbol=symbol, start_str=start_str,
+        end_str=end_str, initial_equity=initial_equity,
+        strategy_params=strategy_params, max_loss=max_loss,
+        slippage_bps=slippage_bps, commission_bps=commission_bps,
+        commission_fixed_per_contract=commission_fixed_per_contract,
+        provenance=provenance, intraday=intraday,
+    )
 
 
 def _merge_strategy_params(req: BacktestRequest) -> dict:
@@ -77,13 +98,11 @@ async def run_backtest(req: BacktestRequest):
                        "Run via MCP tools on dev machine, then view cached results here.",
         })
 
-    # Step 3: Cache miss — run full backtest in thread pool (no fork, no pickle).
-    from src.api.helpers import run_strategy_backtest
-
+    # Step 3: Cache miss — run in ProcessPoolExecutor to avoid GIL blocking.
     future = loop.run_in_executor(
-        None,
+        _backtest_pool,
         partial(
-            run_strategy_backtest,
+            _backtest_worker,
             strategy_slug=req.strategy,
             symbol=req.symbol,
             start_str=req.start,

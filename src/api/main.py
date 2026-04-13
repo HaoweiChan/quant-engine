@@ -50,13 +50,14 @@ def get_main_loop() -> asyncio.AbstractEventLoop | None:
 async def lifespan(app: FastAPI):
     global _main_loop
     _main_loop = asyncio.get_running_loop()
-    # Eagerly initialize broker gateways so tick subscriptions start
-    # immediately at backend startup — not lazily on first frontend request.
-    try:
-        from src.api.helpers import _init_war_room
-        _init_war_room()
-    except Exception:
-        pass  # non-fatal: dashboard still works, just no live feed until retry
+    # Eagerly initialize broker gateways in prod; skip in dev to avoid
+    # shioaji C++ crashes when IP is not whitelisted.
+    if os.getenv("QUANT_SKIP_BROKER_INIT") != "1":
+        try:
+            from src.api.helpers import _init_war_room
+            _init_war_room()
+        except Exception:
+            pass  # non-fatal: dashboard still works, just no live feed until retry
     yield
     _main_loop = None
 
