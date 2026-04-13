@@ -9,7 +9,7 @@ import { StatCard, StatRow } from "@/components/StatCard";
 import { ChartErrorBoundary } from "@/components/ErrorBoundary";
 import { useStrategyStore } from "@/stores/strategyStore";
 import { useBacktestStore } from "@/stores/backtestStore";
-import { runBacktest, fetchParamRuns, deleteParamRun, fetchOHLCV, fetchRunCode, fetchActiveParams, fetchMeta } from "@/lib/api";
+import { runBacktest, fetchParamRuns, deleteParamRun, fetchOHLCV, fetchRunCode, fetchRunResult, fetchActiveParams, fetchMeta } from "@/lib/api";
 import { computeParamHash } from "@/lib/provenance";
 import type { ParamRun, OHLCVBar, ActiveParams } from "@/lib/api";
 import { colors, pnlColor } from "@/lib/theme";
@@ -177,7 +177,7 @@ export function TearSheet() {
     }
   }, [strategy]);
 
-  const loadRunParams = (run: ParamRun) => {
+  const loadRunParams = async (run: ParamRun) => {
     setSelectedRunId(run.run_id);
     if (run.train_start) useStrategyStore.getState().setDates(run.train_start, run.train_end ?? endDate);
     if (run.symbol && !run.symbol.startsWith("synthetic")) useStrategyStore.getState().setSymbol(run.symbol);
@@ -212,6 +212,25 @@ export function TearSheet() {
     const store = useStrategyStore.getState();
     store.setCosts(sbpsMatch ? parseFloat(sbpsMatch[1]) : 0, 0);
     store.setCommissionFixed(cfixMatch ? parseFloat(cfixMatch[1]) : 0);
+
+    // Attempt to load cached result (no re-run needed)
+    setLoading(true);
+    setError(null);
+    try {
+      const cached = await fetchRunResult(run.run_id);
+      if (cached) {
+        setResult(cached);
+      } else {
+        // No cached result - clear display and inform user
+        setResult(null);
+        setError("No cached result for this run. Click 'Run Backtest' to generate.");
+      }
+    } catch (err) {
+      setResult(null);
+      setError(`Failed to load cached result: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSort = useCallback((key: SortKey) => {
@@ -400,9 +419,13 @@ export function TearSheet() {
           git_commit: metaInfo.git_commit,
         },
       });
-      // The streaming endpoint always returns 200; errors come as {detail: "..."}
+      // The streaming endpoint always returns 200; errors come as {detail: "..."} or {status: "compute_required"}
       if ((r as any).detail) {
         setError((r as any).detail);
+        return;
+      }
+      if ((r as any).status === "compute_required") {
+        setError("This server cannot run backtests (limited resources). Run via MCP on your dev machine, then refresh to view cached results.");
         return;
       }
       setResult(r);

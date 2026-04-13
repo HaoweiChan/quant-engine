@@ -387,6 +387,15 @@ export async function fetchRunCode(runId: number): Promise<{ run_id: number; str
   return fetchJSON(`/api/params/runs/${runId}/code`);
 }
 
+export async function fetchRunResult(runId: number): Promise<BacktestResult | null> {
+  try {
+    return await fetchJSON(`/api/params/runs/${runId}/result`);
+  } catch {
+    // 404 means no cached result - return null instead of throwing
+    return null;
+  }
+}
+
 // --- Deploy & Sessions ---
 
 export interface WarRoomSession {

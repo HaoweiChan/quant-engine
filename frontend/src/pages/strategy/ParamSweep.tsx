@@ -193,6 +193,9 @@ export function ParamSweep() {
             strategy, symbol, start: startDate, end: endDate, params: merged,
             slippage_bps: slippageBps, commission_bps: commissionBps, commission_fixed_per_contract: commissionFixed,
           });
+          if ((r as any).status === "compute_required") {
+            throw new Error("Server cannot run backtests. Use MCP on dev machine.");
+          }
           const m = r.metrics;
           cells.push({
                     xVal: xv, yVal: yv,
