@@ -35,6 +35,7 @@ LOCAL_DATA="$LOCAL_DIR/data/"
 #   market.db         — historical OHLCV bars (1m/5m/1h) for R1 and R2 contracts
 #   trading.db        — live session, order, fill, account snapshots (war room)
 #   param_registry.db — optimization run history (param sweeps, walk-forward results)
+#   portfolio_opt.db  — portfolio weight optimization runs and allocations
 #
 # WAL sidecars (*.db-shm, *.db-wal, *.db-journal) are excluded: transient, and
 # syncing them mid-write will corrupt the database on the other end.
@@ -46,7 +47,7 @@ LOCAL_DATA="$LOCAL_DIR/data/"
 #      The old form relied on unquoted word-splitting with literal quote characters
 #      and was fragile on some rsync builds. The array form is a correctness fix.
 
-SYNC_FILES=(market.db trading.db param_registry.db)
+SYNC_FILES=(market.db trading.db param_registry.db portfolio_opt.db)
 
 RSYNC_OPTS=(-avz --progress --update
     --exclude='*.db-shm'

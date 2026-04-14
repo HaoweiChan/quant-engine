@@ -98,3 +98,9 @@ frontend/.playwright-cli/
 # Playwright test artifacts
 frontend/playwright-report/
 frontend/test-results/
+
+# Linked git worktrees
+worktrees/
+
+# Claude Code ephemeral state
+.claude/scheduled_tasks.lock
