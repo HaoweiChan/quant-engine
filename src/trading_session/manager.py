@@ -91,6 +91,83 @@ class SessionManager:
             self._session_db.save(session)
         return session
 
+    def set_equity_shares_batch(
+        self, allocations: list[tuple[str, float]]
+    ) -> list[TradingSession]:
+        """Atomically update equity_shares for multiple sessions.
+
+        Unlike set_equity_share(), this validates the *final* sum across all
+        sessions being updated, allowing reallocation from an invalid state
+        (e.g., 3 sessions at 100% each) to a valid one (e.g., 40/30/30).
+
+        Args:
+            allocations: List of (session_id, share) tuples. All sessions
+                must belong to the same account.
+
+        Returns:
+            List of updated TradingSession objects.
+
+        Raises:
+            ValueError: If sessions not found, belong to different accounts,
+                share out of range, or final sum exceeds 1.0.
+        """
+        if not allocations:
+            return []
+
+        with self._allocation_lock:
+            # Resolve all sessions and validate they exist
+            sessions: list[TradingSession] = []
+            for session_id, share in allocations:
+                session = self._sessions.get(session_id)
+                if not session:
+                    raise ValueError(f"Session not found: {session_id}")
+                if not (0.0 < share <= 1.0):
+                    raise ValueError(f"equity_share must be in (0, 1], got {share!r}")
+                sessions.append(session)
+
+            # Validate all sessions belong to the same account
+            account_ids = {s.account_id for s in sessions}
+            if len(account_ids) > 1:
+                raise ValueError(
+                    f"All sessions must belong to the same account, got: {account_ids}"
+                )
+            account_id = sessions[0].account_id
+
+            # Get session IDs being updated
+            updating_ids = {sid for sid, _ in allocations}
+
+            # Calculate sum of shares NOT being updated (use in-memory sessions)
+            other_sum = sum(
+                s.equity_share
+                for s in self._sessions.values()
+                if s.account_id == account_id and s.session_id not in updating_ids
+            )
+
+            # Calculate new total
+            new_shares_sum = sum(share for _, share in allocations)
+            total = other_sum + new_shares_sum
+
+            if total > 1.0 + 1e-6:
+                raise ValueError(
+                    f"Allocation overflow for account {account_id}: "
+                    f"other={other_sum:.4f} + new={new_shares_sum:.4f} = {total:.4f} > 1.0"
+                )
+
+            # Apply all updates
+            updated: list[TradingSession] = []
+            for (session_id, share), session in zip(allocations, sessions):
+                session.equity_share = share
+                if self._session_db:
+                    self._session_db.update_equity_share(session_id, share)
+                logger.info(
+                    "session_equity_share_updated",
+                    session_id=session_id,
+                    equity_share=share,
+                )
+                updated.append(session)
+
+            return updated
+
     def set_equity_share(self, session_id: str, share: float) -> TradingSession:
         """Update a session's equity_share and persist it.
 
@@ -283,6 +360,29 @@ class SessionManager:
                 if self._session_db:
                     self._session_db.update_status(session.session_id, "flattening")
         logger.warning("global_flatten_activated")
+
+    def flatten_session(self, session_id: str) -> "TradingSession":
+        """Flatten (liquidate) positions for a specific session.
+
+        Sends market close orders for the session's symbol and sets status to 'flattening'.
+        Does not affect global halt state or other sessions.
+        """
+        session = self._sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session '{session_id}' not found")
+
+        if session.status in ("active", "paused", "halted"):
+            gw = self._registry.get_gateway(session.account_id)
+            if gw:
+                try:
+                    gw.close_all_positions(session.symbol)
+                except Exception:
+                    logger.exception("flatten_session_failed", session_id=session_id)
+            session.status = "flattening"
+            if self._session_db:
+                self._session_db.update_status(session_id, "flattening")
+            logger.warning("session_flatten_activated", session_id=session_id)
+        return session
 
     def resume(self) -> None:
         """Lift the global halt flag."""

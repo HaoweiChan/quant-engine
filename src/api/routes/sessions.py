@@ -20,6 +20,21 @@ class EquityShareUpdate(BaseModel):
     )
 
 
+class BatchAllocation(BaseModel):
+    session_id: str
+    share: float = Field(..., gt=0.0, le=1.0)
+
+
+class BatchEquityShareUpdate(BaseModel):
+    allocations: list[BatchAllocation] = Field(
+        ...,
+        description=(
+            "List of session allocations. All sessions must belong to the same "
+            "account. The sum of shares must not exceed 1.0."
+        ),
+    )
+
+
 def _get_session_manager():
     from src.api.helpers import get_session_manager
     return get_session_manager()
@@ -56,6 +71,23 @@ async def pause_session(session_id: str) -> dict:
     mgr = _get_session_manager()
     try:
         session = mgr.set_status(session_id, "paused")
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=409, detail=msg)
+    return {"session_id": session.session_id, "status": session.status}
+
+
+@router.post("/{session_id}/flatten")
+async def flatten_session(session_id: str) -> dict:
+    """Flatten (liquidate) all positions for a specific session.
+
+    Sends market close orders for the session's symbol and sets status to 'flattening'.
+    """
+    mgr = _get_session_manager()
+    try:
+        session = mgr.flatten_session(session_id)
     except ValueError as exc:
         msg = str(exc)
         if "not found" in msg:
@@ -117,4 +149,43 @@ async def update_equity_share(session_id: str, body: EquityShareUpdate) -> dict:
         "session_id": session.session_id,
         "account_id": session.account_id,
         "equity_share": session.equity_share,
+    }
+
+
+@router.patch("/batch-equity-share")
+async def batch_update_equity_share(body: BatchEquityShareUpdate) -> dict:
+    """Atomically update equity shares for multiple sessions.
+
+    Unlike the single-session endpoint, this validates the *final* sum across
+    all sessions being updated, allowing reallocation from an invalid state
+    (e.g., 3 sessions at 100% each) to a valid one (e.g., 40/30/30).
+
+    All sessions must belong to the same account.
+    """
+    mgr = _get_session_manager()
+    allocations = [(a.session_id, a.share) for a in body.allocations]
+    try:
+        updated = mgr.set_equity_shares_batch(allocations)
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail=msg) from None
+        if "overflow" in msg.lower():
+            raise HTTPException(status_code=409, detail=msg) from None
+        raise HTTPException(status_code=400, detail=msg) from None
+    # Invalidate war room cache so the next poll returns fresh session data
+    try:
+        from src.api.routes.war_room import invalidate_warroom_cache
+        invalidate_warroom_cache()
+    except Exception:
+        pass
+    return {
+        "updated": [
+            {
+                "session_id": s.session_id,
+                "account_id": s.account_id,
+                "equity_share": s.equity_share,
+            }
+            for s in updated
+        ]
     }
