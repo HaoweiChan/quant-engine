@@ -664,6 +664,120 @@ def run_grid_mc(
 _session_manager = None
 _gateway_registry = None
 _account_equity_store = None
+_market_data_subscriber = None
+
+
+def _start_market_data_subscriber() -> None:
+    """Start a standalone market data subscription for WebSocket live feed.
+
+    This runs independently of account gateways, ensuring live ticks are pushed
+    to the WebSocket broadcaster even when accounts are in simulation mode.
+    Uses the same GSM credentials as the data daemon.
+    """
+    global _market_data_subscriber
+    if _market_data_subscriber is not None:
+        return
+
+    import asyncio
+    import logging
+    import threading
+    import time
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        import shioaji as sj
+    except ImportError:
+        logger.info("market_data_subscriber: shioaji not installed, skipping")
+        return
+
+    try:
+        from src.secrets.manager import get_secret_manager
+        sm = get_secret_manager()
+        creds = sm.get_group("sinopac")
+        api_key = creds.get("api_key")
+        secret_key = creds.get("secret_key")
+        if not api_key or not secret_key:
+            logger.info("market_data_subscriber: credentials not found, skipping")
+            return
+    except Exception as exc:
+        logger.warning("market_data_subscriber: failed to load credentials: %s", exc)
+        return
+
+    # Use sentinel to prevent double-login race condition
+    _market_data_subscriber = "initializing"
+
+    def _run_subscriber() -> None:
+        global _market_data_subscriber
+        try:
+            from src.api.ws.live_feed import push_tick
+            from src.api.main import get_main_loop
+
+            api = sj.Shioaji(simulation=False)
+            api.login(api_key=api_key, secret_key=secret_key)
+            _market_data_subscriber = api
+            logger.info("market_data_subscriber: connected to Sinopac")
+
+            tick_loop = None
+
+            def _on_tick(exchange, tick) -> None:
+                nonlocal tick_loop
+                code = getattr(tick, "code", "")
+                # Skip continuous contract codes (R1/R2) to avoid price corruption
+                if code.endswith("R1") or code.endswith("R2"):
+                    return
+                price = float(getattr(tick, "close", 0))
+                volume = int(getattr(tick, "volume", 0))
+                if price <= 0:
+                    return
+
+                symbol = "TX" if code.startswith("TXF") else "MTX" if code.startswith("MXF") else "TMF" if code.startswith("TMF") else None
+                if symbol is None:
+                    return
+
+                raw_ts = getattr(tick, "datetime", None)
+                if isinstance(raw_ts, datetime):
+                    tick_ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=ZoneInfo("Asia/Taipei"))
+                else:
+                    tick_ts = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
+
+                try:
+                    loop = tick_loop
+                    if not loop or loop.is_closed():
+                        loop = get_main_loop()
+                        tick_loop = loop
+                    if loop and loop.is_running():
+                        asyncio.run_coroutine_threadsafe(push_tick(symbol, price, volume, tick_ts), loop)
+                except Exception:
+                    pass
+
+            api.quote.set_on_tick_fop_v1_callback(_on_tick)
+            time.sleep(2)  # wait for contracts to load
+
+            futures_groups = [("TX", "TXF"), ("MTX", "MXF"), ("TMF", "TMF")]
+            for symbol, group_name in futures_groups:
+                try:
+                    group = getattr(api.Contracts.Futures, group_name)
+                    candidates = [c for c in group if getattr(c, "code", "")[-2:] not in ("R1", "R2")]
+                    if not candidates:
+                        logger.warning("market_data_subscriber: no candidates for %s", symbol)
+                        continue
+                    contract = min(candidates, key=lambda c: getattr(c, "delivery_date", "9999"))
+                    api.quote.subscribe(
+                        contract,
+                        quote_type=sj.constant.QuoteType.Tick,
+                        version=sj.constant.QuoteVersion.v1,
+                    )
+                    logger.info("market_data_subscriber: subscribed to %s (%s)", symbol, getattr(contract, "code", "?"))
+                except Exception as exc:
+                    logger.warning("market_data_subscriber: subscribe failed for %s: %s", symbol, exc)
+        except Exception as exc:
+            logger.warning("market_data_subscriber: startup failed: %s", exc)
+            _market_data_subscriber = None
+
+    threading.Thread(target=_run_subscriber, daemon=True, name="market-data-subscriber").start()
 
 
 def _init_war_room() -> None:
@@ -684,6 +798,21 @@ def _init_war_room() -> None:
     _session_manager = SessionManager(registry=_gateway_registry, store=store, session_db=session_db)
     _session_manager.restore_from_db()
     _account_equity_store = AccountEquityStore()
+    # Seed sandbox accounts with synthetic equity history (idempotent).
+    # Skip the legacy GBM seeder for `mock_dev` when the real-backtest seeder
+    # is enabled — `seed_mock_warroom` owns that account's equity curve.
+    _warroom_seed_enabled = os.environ.get("QUANT_WARROOM_SEED") == "1"
+    try:
+        all_configs = db.load_all_accounts()
+        for config in all_configs:
+            if _warroom_seed_enabled and config.id == "mock-dev":
+                continue
+            if config.sandbox_mode and not _account_equity_store.has_history(config.id):
+                _account_equity_store.seed_sandbox_equity(config.id)
+    except Exception:
+        pass  # Non-critical: seeding failure doesn't block war room
+    # Start standalone market data subscriber for WebSocket live feed
+    _start_market_data_subscriber()
 
 
 def get_war_room_data() -> dict:
