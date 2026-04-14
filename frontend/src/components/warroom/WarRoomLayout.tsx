@@ -49,6 +49,17 @@ export function WarRoomLayout() {
   const setBottomTab = useWarRoomStore((s) => s.setBottomTab);
   const paramDrawerOpen = useWarRoomStore((s) => s.paramDrawerOpen);
 
+  // Resizable panel state (in pixels for left sidebar, percentages for others)
+  const [sidebarWidth, setSidebarWidth] = useState(280);
+  const [mainSplitPercent, setMainSplitPercent] = useState(75); // chart+equity vs bottom bar
+  const [chartSplitPercent, setChartSplitPercent] = useState(60); // chart vs equity+positions
+  const [equitySplitPercent, setEquitySplitPercent] = useState(50); // equity vs positions
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const isDraggingRef = useRef<string | null>(null);
+  const startPosRef = useRef({ x: 0, y: 0 });
+  const startValueRef = useRef(0);
+
   // Isolated market data store
   const storeRef = useRef<MarketDataStore>(null!);
   if (!storeRef.current) storeRef.current = createMarketDataStore();
@@ -63,6 +74,64 @@ export function WarRoomLayout() {
   const [fallbackSymbol, setFallbackSymbol] = useState<string | null>(null);
   const [equityVisibleRange, setEquityVisibleRange] = useState<{ fromTs: string; toTs: string } | null>(null);
   const crawlPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Drag handlers for resizable panels
+  const handleMouseDown = useCallback((e: React.MouseEvent, panelId: string) => {
+    e.preventDefault();
+    isDraggingRef.current = panelId;
+    startPosRef.current = { x: e.clientX, y: e.clientY };
+    if (panelId === "sidebar") {
+      startValueRef.current = sidebarWidth;
+    } else if (panelId === "mainSplit") {
+      startValueRef.current = mainSplitPercent;
+    } else if (panelId === "chartSplit") {
+      startValueRef.current = chartSplitPercent;
+    } else if (panelId === "equitySplit") {
+      startValueRef.current = equitySplitPercent;
+    }
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+  }, [sidebarWidth, mainSplitPercent, chartSplitPercent, equitySplitPercent]);
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isDraggingRef.current || !containerRef.current) return;
+
+    const rect = containerRef.current.getBoundingClientRect();
+    const panelId = isDraggingRef.current;
+
+    if (panelId === "sidebar") {
+      const deltaX = e.clientX - startPosRef.current.x;
+      const newWidth = Math.max(200, Math.min(500, startValueRef.current + deltaX));
+      setSidebarWidth(newWidth);
+    } else if (panelId === "mainSplit") {
+      // Main area height calculation (exclude top bars ~100px)
+      const mainAreaHeight = rect.height - 100;
+      const relativeY = e.clientY - rect.top - 100;
+      const newPercent = Math.max(30, Math.min(90, (relativeY / mainAreaHeight) * 100));
+      setMainSplitPercent(newPercent);
+    } else if (panelId === "chartSplit") {
+      // Calculate relative to the main panel area
+      const mainAreaHeight = (rect.height - 100) * (mainSplitPercent / 100);
+      const mainPanelTop = rect.top + 100;
+      const relativeY = e.clientY - mainPanelTop;
+      const newPercent = Math.max(20, Math.min(80, (relativeY / mainAreaHeight) * 100));
+      setChartSplitPercent(newPercent);
+    } else if (panelId === "equitySplit") {
+      // Calculate relative to the equity+positions panel
+      const mainAreaHeight = (rect.height - 100) * (mainSplitPercent / 100);
+      const equityPanelHeight = mainAreaHeight * ((100 - chartSplitPercent) / 100);
+      const equityPanelTop = rect.top + 100 + mainAreaHeight * (chartSplitPercent / 100);
+      const relativeY = e.clientY - equityPanelTop;
+      const newPercent = Math.max(20, Math.min(80, (relativeY / equityPanelHeight) * 100));
+      setEquitySplitPercent(newPercent);
+    }
+  }, [mainSplitPercent, chartSplitPercent]);
+
+  const handleMouseUp = useCallback(() => {
+    isDraggingRef.current = null;
+    document.removeEventListener("mousemove", handleMouseMove);
+    document.removeEventListener("mouseup", handleMouseUp);
+  }, [handleMouseMove]);
 
   // Callback for syncing equity chart with live chart visible range
   const handleVisibleRangeChange = useCallback((range: { fromTs: string; toTs: string } | null) => {
@@ -236,7 +305,7 @@ export function WarRoomLayout() {
   const fills = activeAccountData?.recent_fills ?? [];
 
   return (
-    <div className="flex flex-col" style={{ height: "calc(100vh - 36px)", background: colors.bg }}>
+    <div ref={containerRef} className="flex flex-col" style={{ height: "calc(100vh - 36px)", background: colors.bg }}>
       {/* Top Bar */}
       <WarRoomTopBar totalEquity={totalEquity} marginRatio={marginRatio} />
 
@@ -270,10 +339,17 @@ export function WarRoomLayout() {
       {/* Account Strip */}
       <AccountStrip accounts={accounts} />
 
-      {/* Main content: left panel + main area */}
+      {/* Main content: resizable layout */}
       <div className="flex flex-1 min-h-0">
-        {/* LEFT PANEL */}
-        <div className="flex flex-col shrink-0" style={{ width: 300, borderRight: `1px solid ${colors.cardBorder}`, background: colors.sidebar }}>
+        {/* LEFT SIDEBAR - fixed pixel width, resizable */}
+        <div
+          className="flex flex-col shrink-0"
+          style={{
+            width: sidebarWidth,
+            borderRight: `1px solid ${colors.cardBorder}`,
+            background: colors.sidebar
+          }}
+        >
           {/* Session header + add binding */}
           <div className="px-2 pt-2 pb-1">
             <div className="text-[8px] font-semibold tracking-wider px-1 mb-1.5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
@@ -303,68 +379,139 @@ export function WarRoomLayout() {
           </div>
         </div>
 
+        {/* Sidebar resize handle */}
+        <div
+          className="w-1 cursor-col-resize hover:bg-blue-500 transition-colors flex-shrink-0"
+          style={{ background: colors.cardBorder }}
+          onMouseDown={(e) => handleMouseDown(e, "sidebar")}
+        />
+
         {/* MAIN AREA */}
         <div className="flex-1 flex flex-col min-h-0 min-w-0">
           {activeAccountId && activeAccountData ? (
             <>
-              {/* Chart — 60% of area, clipped to contain ChartStack */}
-              <div className="overflow-hidden flex flex-col" style={{ flex: "0 0 60%" }}>
-                {/* Symbol selector bar */}
-                <div className="flex items-center gap-1.5 px-2 py-1" style={{ borderBottom: `1px solid ${colors.cardBorder}`, background: colors.card }}>
-                  <span className="text-[8px] font-semibold tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-                    CONTRACT
-                  </span>
-                  {CHART_SYMBOLS.map((sym) => (
-                    <button
-                      key={sym}
-                      onClick={() => setChartSymbolOverride(sym === (selectedSession?.symbol ?? "TX") ? null : sym)}
-                      className="px-1.5 py-0.5 rounded text-[8px] cursor-pointer border-none"
-                      style={{
-                        fontFamily: "var(--font-mono)",
-                        background: chartSymbol === sym ? "rgba(90,138,242,0.25)" : "transparent",
-                        color: chartSymbol === sym ? colors.blue : colors.dim,
-                      }}
-                    >
-                      {sym}
-                    </button>
-                  ))}
-                  {barError && (
-                    <span className="text-[8px] ml-auto" style={{ color: colors.red, fontFamily: "var(--font-mono)" }}>
-                      {barError}
+              {/* Upper section: Chart + Equity/Positions */}
+              <div className="flex flex-col min-h-0" style={{ height: `${mainSplitPercent}%` }}>
+                {/* Chart area */}
+                <div className="overflow-hidden flex flex-col" style={{ height: `${chartSplitPercent}%` }}>
+                  {/* Symbol selector bar */}
+                  <div className="flex items-center gap-1.5 px-2 py-1 shrink-0" style={{ borderBottom: `1px solid ${colors.cardBorder}`, background: colors.card }}>
+                    <span className="text-[8px] font-semibold tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+                      CONTRACT
                     </span>
-                  )}
+                    {CHART_SYMBOLS.map((sym) => (
+                      <button
+                        key={sym}
+                        onClick={() => setChartSymbolOverride(sym === (selectedSession?.symbol ?? "TX") ? null : sym)}
+                        className="px-1.5 py-0.5 rounded text-[8px] cursor-pointer border-none"
+                        style={{
+                          fontFamily: "var(--font-mono)",
+                          background: chartSymbol === sym ? "rgba(90,138,242,0.25)" : "transparent",
+                          color: chartSymbol === sym ? colors.blue : colors.dim,
+                        }}
+                      >
+                        {sym}
+                      </button>
+                    ))}
+                    {barError && (
+                      <span className="text-[8px] ml-auto" style={{ color: colors.red, fontFamily: "var(--font-mono)" }}>
+                        {barError}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex-1 min-h-0 overflow-hidden">
+                    <ChartStack
+                      key={`${activeAccountId}-${chartSymbol}-${tfMinutes}`}
+                      bars={marketBars}
+                      activeIndicators={[]}
+                      timeframeMinutes={tfMinutes}
+                      showVolume={true}
+                      liveTick={lastLiveTick}
+                      onTimeframeChange={handleTfChange}
+                      timeframeOptions={TF_OPTIONS}
+                      expandable={true}
+                      showOverlayControls={true}
+                      onVisibleRangeChange={handleVisibleRangeChange}
+                      headerLabel={`${chartSymbol} LIVE${fallbackSymbol ? ` (${fallbackSymbol} data)` : ""}`}
+                    />
+                  </div>
                 </div>
-                <div className="flex-1 min-h-0 overflow-hidden">
-                  <ChartStack
-                    key={`${activeAccountId}-${chartSymbol}-${tfMinutes}`}
-                    bars={marketBars}
-                    activeIndicators={[]}
-                    timeframeMinutes={tfMinutes}
-                    showVolume={true}
-                    liveTick={lastLiveTick}
-                    onTimeframeChange={handleTfChange}
-                    timeframeOptions={TF_OPTIONS}
-                    expandable={true}
-                    showOverlayControls={true}
-                    onVisibleRangeChange={handleVisibleRangeChange}
-                    headerLabel={`${chartSymbol} LIVE${fallbackSymbol ? ` (${fallbackSymbol} data)` : ""}`}
+
+                {/* Chart/Equity split handle */}
+                <div
+                  className="h-1 cursor-row-resize hover:bg-blue-500 transition-colors flex-shrink-0"
+                  style={{ background: colors.cardBorder }}
+                  onMouseDown={(e) => handleMouseDown(e, "chartSplit")}
+                />
+
+                {/* Equity + Positions area */}
+                <div className="flex flex-col min-h-0" style={{ height: `${100 - chartSplitPercent}%` }}>
+                  {/* Equity panel */}
+                  <div className="overflow-auto" style={{ height: `${equitySplitPercent}%` }}>
+                    <EquityPanel
+                      equityCurve={equityCurve}
+                      equityTimestamps={equityTimestamps}
+                      sessions={sessions}
+                      accountLabel={activeAccountData.display_name || activeAccountId}
+                      visibleRange={equityVisibleRange}
+                    />
+                  </div>
+
+                  {/* Equity/Positions split handle */}
+                  <div
+                    className="h-1 cursor-row-resize hover:bg-blue-500 transition-colors flex-shrink-0"
+                    style={{ background: colors.cardBorder }}
+                    onMouseDown={(e) => handleMouseDown(e, "equitySplit")}
                   />
+
+                  {/* Positions table */}
+                  <div className="overflow-auto" style={{ height: `${100 - equitySplitPercent}%` }}>
+                    <PositionsTable positions={positions} />
+                  </div>
                 </div>
               </div>
 
-              {/* Equity + Positions — stacked vertically, both full width */}
-              <div className="min-h-0 flex flex-col gap-0" style={{ flex: "1 1 40%" }}>
-                <div className="min-h-0 overflow-auto" style={{ flex: "0 0 50%" }}>
-                  <EquityPanel
-                    equityCurve={equityCurve}
-                    equityTimestamps={equityTimestamps}
-                    sessions={sessions}
-                    accountLabel={activeAccountData.display_name || activeAccountId}
-                    visibleRange={equityVisibleRange}
-                  />
+              {/* Main/Bottom split handle */}
+              <div
+                className="h-1 cursor-row-resize hover:bg-blue-500 transition-colors flex-shrink-0"
+                style={{ background: colors.cardBorder }}
+                onMouseDown={(e) => handleMouseDown(e, "mainSplit")}
+              />
+
+              {/* BOTTOM BAR */}
+              <div className="flex flex-col min-h-0" style={{ height: `${100 - mainSplitPercent}%`, background: colors.sidebar }}>
+                {/* Tab headers */}
+                <div className="flex items-center gap-0 border-b shrink-0" style={{ borderColor: colors.cardBorder }}>
+                  {(["blotter", "trades", "activity"] as BottomTab[]).map((tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => setBottomTab(tab)}
+                      className="px-4 py-1.5 text-[9px] font-semibold cursor-pointer border-none border-b-2"
+                      style={{
+                        background: "transparent",
+                        color: bottomTab === tab ? colors.text : colors.dim,
+                        borderBottomColor: bottomTab === tab ? colors.blue : "transparent",
+                        fontFamily: "var(--font-mono)",
+                        letterSpacing: "0.5px",
+                      }}
+                    >
+                      {tab === "blotter" ? "ORDER BLOTTER" : tab === "trades" ? "RECENT TRADES" : "ACTIVITY LOG"}
+                    </button>
+                  ))}
+                  <div className="flex-1" />
+                  <DeploymentHistory history={deployHistory} onRedeploy={poll} />
                 </div>
-                <div className="min-h-0 overflow-auto" style={{ flex: "1 1 50%" }}>
-                  <PositionsTable positions={positions} />
+                {/* Tab content */}
+                <div className="overflow-y-auto flex-1 min-h-0">
+                  {bottomTab === "blotter" && <OrderBlotterPane />}
+                  {bottomTab === "trades" && (
+                    <div className="p-2">
+                      <TradesTable fills={fills} />
+                    </div>
+                  )}
+                  {bottomTab === "activity" && (
+                    <ActivityLog deployHistory={deployHistory} accountId={activeAccountId} />
+                  )}
                 </div>
               </div>
             </>
@@ -376,43 +523,6 @@ export function WarRoomLayout() {
                   : "Select an account above to view the war room."}
               </span>
             </div>
-          )}
-        </div>
-      </div>
-
-      {/* BOTTOM BAR */}
-      <div className="shrink-0" style={{ height: 160, borderTop: `1px solid ${colors.cardBorder}`, background: colors.sidebar }}>
-        {/* Tab headers */}
-        <div className="flex items-center gap-0 border-b" style={{ borderColor: colors.cardBorder }}>
-          {(["blotter", "trades", "activity"] as BottomTab[]).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setBottomTab(tab)}
-              className="px-4 py-1.5 text-[9px] font-semibold cursor-pointer border-none border-b-2"
-              style={{
-                background: "transparent",
-                color: bottomTab === tab ? colors.text : colors.dim,
-                borderBottomColor: bottomTab === tab ? colors.blue : "transparent",
-                fontFamily: "var(--font-mono)",
-                letterSpacing: "0.5px",
-              }}
-            >
-              {tab === "blotter" ? "ORDER BLOTTER" : tab === "trades" ? "RECENT TRADES" : "ACTIVITY LOG"}
-            </button>
-          ))}
-          <div className="flex-1" />
-          <DeploymentHistory history={deployHistory} onRedeploy={poll} />
-        </div>
-        {/* Tab content */}
-        <div className="overflow-y-auto" style={{ height: "calc(100% - 33px)" }}>
-          {bottomTab === "blotter" && <OrderBlotterPane />}
-          {bottomTab === "trades" && (
-            <div className="p-2">
-              <TradesTable fills={fills} />
-            </div>
-          )}
-          {bottomTab === "activity" && (
-            <ActivityLog deployHistory={deployHistory} accountId={activeAccountId} />
           )}
         </div>
       </div>
