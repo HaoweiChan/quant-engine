@@ -8,8 +8,11 @@ import { ChartPane, type ChartPaneHandle, type CandleData, type VolumeData } fro
 import { colors } from "@/lib/theme";
 
 
-const PRIMARY_HEIGHT = 340;
-const SECONDARY_HEIGHT = 180;
+// Default heights when container size is unknown
+const DEFAULT_PRIMARY_HEIGHT = 340;
+const DEFAULT_SECONDARY_HEIGHT = 180;
+// Ratio of primary chart height to total (primary takes ~65% of space)
+const PRIMARY_HEIGHT_RATIO = 0.65;
 const INITIAL_VISIBLE = 4000;
 const LOAD_MORE_COUNT = 2000;
 export const MAX_SECONDARY_PANES = 5;
@@ -68,6 +71,23 @@ export function ChartStack({
   const primaryRef = useRef<ChartPaneHandle>(null);
   const secondaryRef = useRef<ChartPaneHandle>(null);
   const syncing = useRef(false);
+
+  // Track container height for responsive chart sizing
+  const [containerHeight, setContainerHeight] = useState<number | null>(null);
+
+  // Observe container size changes
+  useEffect(() => {
+    const container = chartCardRef.current;
+    if (!container) return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setContainerHeight(entry.contentRect.height);
+      }
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
 
   const [secondaryId, setSecondaryId] = useState("volume");
   const [secondaryParams, setSecondaryParams] = useState<Record<string, number>>({});
@@ -354,8 +374,28 @@ export function ChartStack({
   const showHeader = headerLabel || onTimeframeChange || expandable;
   const noBars = bars.length === 0;
 
+  // Calculate dynamic chart heights based on container
+  // Account for: header (~40px), overlay controls (~60px if shown), secondary header (~32px)
+  const headerHeight = showHeader ? 40 : 0;
+  const overlayControlsHeight = showOverlayControls ? Math.max(40, localIndicators.length * 24 + 40) : 0;
+  const secondaryHeaderHeight = 32;
+  const totalChrome = headerHeight + overlayControlsHeight + secondaryHeaderHeight;
+
+  const { primaryHeight, secondaryHeight } = useMemo(() => {
+    if (expanded) {
+      return { primaryHeight: 520, secondaryHeight: DEFAULT_SECONDARY_HEIGHT };
+    }
+    if (!containerHeight || containerHeight < 200) {
+      return { primaryHeight: DEFAULT_PRIMARY_HEIGHT, secondaryHeight: DEFAULT_SECONDARY_HEIGHT };
+    }
+    const availableHeight = containerHeight - totalChrome;
+    const primary = Math.max(120, Math.floor(availableHeight * PRIMARY_HEIGHT_RATIO));
+    const secondary = Math.max(80, availableHeight - primary);
+    return { primaryHeight: primary, secondaryHeight: secondary };
+  }, [containerHeight, totalChrome, expanded, localIndicators.length]);
+
   return (
-    <div ref={chartCardRef} style={expandable ? { background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 } : undefined}>
+    <div ref={chartCardRef} style={{ height: "100%", display: "flex", flexDirection: "column", ...(expandable ? { background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 } : {}) }}>
       {showHeader && (
         <div className="flex items-center justify-between p-2 border-b" style={{ borderColor: colors.cardBorder }}>
           {headerLabel && (
@@ -521,7 +561,7 @@ export function ChartStack({
         )}
         <ChartPane
           ref={primaryRef}
-          height={expanded ? 520 : PRIMARY_HEIGHT}
+          height={primaryHeight}
           candles={candles}
           volume={volume}
           series={overlaySeries}
@@ -572,7 +612,7 @@ export function ChartStack({
       </div>
       <ChartPane
         ref={secondaryRef}
-        height={SECONDARY_HEIGHT}
+        height={secondaryHeight}
         series={secondarySeries}
         showTimeScale={true}
         timeframeMinutes={timeframeMinutes}
