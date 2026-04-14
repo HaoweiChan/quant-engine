@@ -25,13 +25,14 @@ logger = logging.getLogger(__name__)
 
 _TAIPEI_TZ = timezone(timedelta(hours=8))
 
-# Strategy slugs seeded into the mock account. Each is (slug, intraday, symbol).
+# Strategy slugs seeded into the mock account. Each is (slug, intraday, symbol, equity_share).
 # Symbols reflect the mock-dev account's strategies_json config — 2/3 strategies
 # trade MTX as the user correctly asserted.
-_SEED_STRATEGIES: list[tuple[str, bool, str]] = [
-    ("medium_term/trend_following/donchian_trend_strength", True, "TX"),
-    ("short_term/trend_following/night_session_long", True, "MTX"),
-    ("swing/trend_following/vol_managed_bnh", False, "MTX"),
+# equity_share represents the fraction of total account equity allocated to each strategy.
+_SEED_STRATEGIES: list[tuple[str, bool, str, float]] = [
+    ("medium_term/trend_following/donchian_trend_strength", True, "MTX", 0.40),
+    ("short_term/trend_following/night_session_long", True, "MTX", 0.30),
+    ("swing/trend_following/vol_managed_bnh", False, "MTX", 0.30),
 ]
 
 _MOCK_ACCOUNT_DEFAULT = "mock-dev"
@@ -150,6 +151,94 @@ def _session_key_from_iso(iso_ts: str) -> str:
     return f"night::{prev}"
 
 
+_REASON_MAP: list[tuple[str, str]] = [
+    ("session_close", "SESSION_CLOSE"),
+    ("force_flat", "SESSION_CLOSE"),
+    ("stop_loss", "STOP_LOSS"),
+    ("stop", "STOP_LOSS"),
+    ("take_profit", "TAKE_PROFIT"),
+    ("profit", "TAKE_PROFIT"),
+    ("breakout", "BREAKOUT"),
+    ("trend_reversal", "TREND_REVERSAL"),
+    ("reversal", "TREND_REVERSAL"),
+    ("pyramid", "PYRAMID"),
+    ("add", "PYRAMID"),
+    ("entry", "ENTRY"),
+    ("exit", "EXIT"),
+]
+
+
+def _normalize_signal_reason(raw: str, is_close: int) -> str:
+    """Map a raw strategy reason string to a short display label."""
+    if is_close:
+        return "SESSION_CLOSE"
+    if not raw:
+        return "ENTRY"
+    lower = raw.lower()
+    for key, label in _REASON_MAP:
+        if key in lower:
+            return label
+    return raw.upper()[:20]
+
+
+def _insert_mock_pending_signals(
+    conn: sqlite3.Connection,
+    *,
+    account_id: str,
+    session_id: str,
+    slug: str,
+    symbol: str,
+) -> None:
+    """Add a couple of unfilled (triggered=0) signals to the blotter for demo purposes.
+
+    These represent signals that were generated but not yet executed (e.g. limit
+    orders waiting for price, or signals filtered by risk checks).
+    """
+    now = datetime.now(_TAIPEI_TZ)
+    pending_rows: list[tuple] = [
+        (
+            (now - timedelta(minutes=12)).isoformat(),
+            account_id,
+            session_id,
+            slug,
+            symbol,
+            "buy",
+            0.0,   # price unknown — pending
+            1,
+            0.0,   # no fee yet
+            0.0,
+            0,
+            "BREAKOUT",
+            0,     # triggered=0
+        ),
+        (
+            (now - timedelta(minutes=5)).isoformat(),
+            account_id,
+            session_id,
+            slug,
+            symbol,
+            "sell",
+            0.0,
+            1,
+            0.0,
+            0.0,
+            0,
+            "STOP_LOSS",
+            0,     # triggered=0
+        ),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO mock_fills
+            (timestamp, account_id, session_id, strategy_slug, symbol, side,
+             price, quantity, fee, pnl_realized, is_session_close,
+             signal_reason, triggered)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        pending_rows,
+    )
+
+
 def _persist_backtest_result(
     conn: sqlite3.Connection,
     *,
@@ -251,6 +340,8 @@ def _persist_backtest_result(
         is_close = 1 if (
             intraday and bucket_last_index.get(f["bucket"]) == idx
         ) or ("session_close" in f["reason"].lower() or "force_flat" in f["reason"].lower()) else 0
+        # Derive a clean signal_reason label from the raw reason string.
+        signal_reason = _normalize_signal_reason(f["reason"], is_close)
         # TX full contract fee ~ NT$100/round-trip → per-leg ~50.
         fee = 50.0
         fill_rows.append(
@@ -266,6 +357,8 @@ def _persist_backtest_result(
                 fee,
                 0.0,  # per-fill realized pnl not broken out here
                 is_close,
+                signal_reason,
+                1,  # triggered=1: all backtest fills are executed
             )
         )
 
@@ -274,11 +367,16 @@ def _persist_backtest_result(
             """
             INSERT INTO mock_fills
                 (timestamp, account_id, session_id, strategy_slug, symbol, side,
-                 price, quantity, fee, pnl_realized, is_session_close)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 price, quantity, fee, pnl_realized, is_session_close,
+                 signal_reason, triggered)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             fill_rows,
         )
+
+    # Insert a small set of mock "pending" (unfilled) signals so the blotter
+    # shows both FILLED and PENDING rows for demo purposes.
+    _insert_mock_pending_signals(conn, account_id=account_id, session_id=session_id, slug=slug, symbol=symbol)
 
     # Open positions at end of backtest: only if final fill is an entry and
     # there's no matching exit. For simplicity, we emit an open position for
@@ -349,44 +447,43 @@ def _synthesize_open_positions(conn: sqlite3.Connection, account_id: str) -> Non
     """Ensure OPEN POSITIONS table has realistic rows at end-of-seeding.
 
     Each strategy gets a canonical current position based on its semantics.
-    Donchian → TX long mid-swing. vol_managed_bnh → MTX base lot from lookback
+    Donchian → MTX mid-swing long. vol_managed_bnh → MTX base lot from lookback
     start. night_session_long → MTX intraday long mid-session (since night
     session opens 15:00 and we render the dashboard anytime).
     """
     conn.execute("DELETE FROM mock_positions WHERE account_id = ?", (account_id,))
 
-    tx_latest = _latest_price("TX")
     mtx_latest = _latest_price("MTX")
     # Fall back to TX data for MTX if MTX bars are sparse
     if mtx_latest is None:
-        mtx_latest = tx_latest
+        mtx_latest = _latest_price("TX")
 
-    if not tx_latest or not mtx_latest:
+    if not mtx_latest:
         logger.warning("warroom.seed.synthesize_skipped reason=no_latest_bar")
         return
 
-    # 1) Donchian — TX mid-swing long entered ~3 days ago
+    # 1) Donchian — MTX mid-swing long entered ~3 days ago
     donchian_slug = "medium_term/trend_following/donchian_trend_strength"
     donchian_session = _strategy_session_id(account_id, donchian_slug)
-    tx_entry = tx_latest[1] * 0.982
-    tx_qty = 2
-    tx_mult = _CONTRACT_MULTIPLIERS["TX"]
-    tx_unrealized = (tx_latest[1] - tx_entry) * tx_qty * tx_mult
+    donchian_entry = mtx_latest[1] * 0.982
+    donchian_qty = 2
+    donchian_mult = _CONTRACT_MULTIPLIERS["MTX"]
+    donchian_unrealized = (mtx_latest[1] - donchian_entry) * donchian_qty * donchian_mult
     conn.execute(
         """
         INSERT INTO mock_positions
             (account_id, session_id, strategy_slug, symbol, side, quantity,
              avg_entry_price, current_price, unrealized_pnl, opened_at)
-        VALUES (?, ?, ?, 'TX', 'long', ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, 'MTX', 'long', ?, ?, ?, ?, ?)
         """,
         (
             account_id,
             donchian_session,
             donchian_slug,
-            tx_qty,
-            round(tx_entry, 2),
-            round(tx_latest[1], 2),
-            round(tx_unrealized, 2),
+            donchian_qty,
+            round(donchian_entry, 2),
+            round(mtx_latest[1], 2),
+            round(donchian_unrealized, 2),
             _lookback_iso(3),
         ),
     )
@@ -500,7 +597,7 @@ def seed_mock_warroom(
     try:
         ensure_mock_warroom_schema(conn)
         all_cached = True
-        for slug, intraday, symbol in _SEED_STRATEGIES:
+        for slug, intraday, symbol, _equity_share in _SEED_STRATEGIES:
             session_id = _strategy_session_id(account_id, slug)
             per_start = time.perf_counter()
             if not force and _is_cached(conn, session_id, lookback_days):

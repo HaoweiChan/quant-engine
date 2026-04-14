@@ -73,7 +73,8 @@ def _load_mock_warroom_state(account_id: str) -> dict | None:
         fill_rows = conn.execute(
             """
             SELECT timestamp, account_id, session_id, strategy_slug, symbol,
-                   side, price, quantity, fee, pnl_realized, is_session_close
+                   side, price, quantity, fee, pnl_realized, is_session_close,
+                   signal_reason, triggered
             FROM mock_fills
             WHERE account_id = ?
             ORDER BY timestamp DESC
@@ -106,9 +107,8 @@ def _load_mock_warroom_state(account_id: str) -> dict | None:
     finally:
         conn.close()
 
-    # Aggregate per-strategy equity curves → account-level curve by union of
-    # sorted timestamps and forward-filling the per-strategy last-seen equity,
-    # then summing across strategies at each common timestamp.
+    # Aggregate per-strategy equity curves → account-level curve via linear
+    # interpolation onto a common hourly grid, then summing across strategies.
     per_strategy: dict[str, list[tuple[str, float]]] = {}
     per_strategy_initial: dict[str, float] = {}
     latest_per_strategy: dict[str, dict] = {}
@@ -131,20 +131,75 @@ def _load_mock_warroom_state(account_id: str) -> dict | None:
         if series:
             per_strategy_initial[slug] = series[0][1]
 
-    all_timestamps = sorted({ts for series in per_strategy.values() for ts, _ in series})
-    # Forward-fill each strategy onto the union timeline.
-    cursor_idx: dict[str, int] = {slug: 0 for slug in per_strategy}
-    last_val: dict[str, float] = dict(per_strategy_initial)
-    equity_curve: list[tuple[str, float]] = []
-    for ts in all_timestamps:
-        for slug, series in per_strategy.items():
-            i = cursor_idx[slug]
-            while i < len(series) and series[i][0] <= ts:
-                last_val[slug] = series[i][1]
-                i += 1
-            cursor_idx[slug] = i
-        total = sum(last_val.values())
-        equity_curve.append((ts, total))
+    # Resample all strategy curves onto a common hourly grid, then sum.
+    # This avoids step-function jumps caused by forward-filling strategies
+    # with sparse or misaligned timestamps onto the union timeline.
+    from datetime import datetime as _dt
+
+    def _iso_to_epoch(ts: str) -> float:
+        try:
+            d = _dt.fromisoformat(ts)
+            return d.timestamp()
+        except Exception:
+            return 0.0
+
+    def _epoch_to_iso_local(epoch: float) -> str:
+        return _dt.fromtimestamp(epoch, tz=_TAIPEI_TZ).isoformat()
+
+    def _interp_at(series_epochs: list[tuple[float, float]], target: float, initial: float) -> float:
+        """Linearly interpolate equity at `target` epoch from sorted (epoch, equity) series."""
+        if not series_epochs:
+            return initial
+        if target <= series_epochs[0][0]:
+            return series_epochs[0][1]
+        if target >= series_epochs[-1][0]:
+            return series_epochs[-1][1]
+        # Binary search for bracketing points
+        lo, hi = 0, len(series_epochs) - 1
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            if series_epochs[mid][0] <= target:
+                lo = mid
+            else:
+                hi = mid
+        t0, v0 = series_epochs[lo]
+        t1, v1 = series_epochs[hi]
+        if t1 == t0:
+            return v0
+        frac = (target - t0) / (t1 - t0)
+        return v0 + frac * (v1 - v0)
+
+    # Convert each strategy's ISO timestamps to epoch floats for interpolation.
+    per_strategy_epochs: dict[str, list[tuple[float, float]]] = {
+        slug: sorted((_iso_to_epoch(ts), eq) for ts, eq in series)
+        for slug, series in per_strategy.items()
+    }
+
+    # Determine grid boundaries from the union of all strategy time ranges.
+    all_epochs = [ep for series in per_strategy_epochs.values() for ep, _ in series]
+    if not all_epochs:
+        equity_curve: list[tuple[str, float]] = []
+    else:
+        grid_start = min(all_epochs)
+        grid_end = max(all_epochs)
+        # Use hourly grid (3600s) — coarse enough to smooth jitter, fine enough for chart detail.
+        step = 3600
+        grid_epochs: list[float] = []
+        t = grid_start
+        while t <= grid_end + step:
+            grid_epochs.append(t)
+            t += step
+        # Ensure the true end point is included.
+        if grid_epochs[-1] < grid_end:
+            grid_epochs.append(grid_end)
+
+        equity_curve = []
+        for ep in grid_epochs:
+            total = sum(
+                _interp_at(per_strategy_epochs[slug], ep, per_strategy_initial.get(slug, 0.0))
+                for slug in per_strategy_epochs
+            )
+            equity_curve.append((_epoch_to_iso_local(ep), total))
 
     positions = [
         {
@@ -168,6 +223,8 @@ def _load_mock_warroom_state(account_id: str) -> dict | None:
             "fee": float(r["fee"]),
             "strategy_slug": r["strategy_slug"],
             "is_session_close": bool(r["is_session_close"]),
+            "signal_reason": r["signal_reason"] or "",
+            "triggered": bool(r["triggered"]),
         }
         for r in fill_rows
     ]
@@ -296,7 +353,7 @@ async def war_room() -> dict:
                 "avg_entry_price": p.avg_entry_price,
                 "current_price": p.current_price,
                 "unrealized_pnl": p.unrealized_pnl,
-                "strategy_slug": None,
+                "strategy_slug": getattr(p, "strategy_slug", None),
             }
             for p in (snap.positions if snap and snap.connected else [])
         ]

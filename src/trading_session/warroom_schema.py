@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS mock_fills (
     quantity INTEGER NOT NULL,
     fee REAL NOT NULL,
     pnl_realized REAL NOT NULL,
-    is_session_close INTEGER NOT NULL DEFAULT 0
+    is_session_close INTEGER NOT NULL DEFAULT 0,
+    signal_reason TEXT NOT NULL DEFAULT '',
+    triggered INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_mock_fills_sid
@@ -72,6 +74,19 @@ CREATE TABLE IF NOT EXISTS mock_positions (
 
 
 def ensure_mock_warroom_schema(conn: sqlite3.Connection) -> None:
-    """Create mock_* tables and their indexes if they do not exist."""
+    """Create mock_* tables and their indexes if they do not exist.
+
+    Also runs lightweight migrations to add columns introduced after the initial
+    schema was deployed (ALTER TABLE is idempotent via the try/except pattern
+    because SQLite raises OperationalError when the column already exists).
+    """
     conn.executescript(_SCHEMA_SQL)
+    # Migration: add signal_reason and triggered to pre-existing mock_fills tables.
+    for col, ddl in [
+        ("signal_reason", "ALTER TABLE mock_fills ADD COLUMN signal_reason TEXT NOT NULL DEFAULT ''"),
+        ("triggered", "ALTER TABLE mock_fills ADD COLUMN triggered INTEGER NOT NULL DEFAULT 1"),
+    ]:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(mock_fills)").fetchall()}
+        if col not in existing:
+            conn.execute(ddl)
     conn.commit()
