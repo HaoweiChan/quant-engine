@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,6 +13,7 @@ from fastapi.responses import FileResponse
 
 from src.api.routes import (
     accounts,
+    admin_warroom,
     backtest,
     coverage,
     crawl,
@@ -46,6 +48,8 @@ _frontend_index = _frontend_dist / "index.html"
 def get_main_loop() -> asyncio.AbstractEventLoop | None:
     return _main_loop
 
+log = logging.getLogger(__name__)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _main_loop
@@ -58,8 +62,34 @@ async def lifespan(app: FastAPI):
             _init_war_room()
         except Exception:
             pass  # non-fatal: dashboard still works, just no live feed until retry
-    yield
-    _main_loop = None
+
+    # War Room mock seeder (dev-only, gated by QUANT_WARROOM_SEED=1).
+    app.state._seed_task = None
+    if os.environ.get("QUANT_WARROOM_SEED") == "1":
+        from src.trading_session.warroom_seeder import seed_mock_warroom
+
+        async def _bg_seed() -> None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(seed_mock_warroom, "mock-dev", 30, False),
+                    timeout=60.0,
+                )
+            except TimeoutError:
+                log.warning(
+                    "warroom.seed.timeout after 60s — using placeholder data"
+                )
+            except Exception as exc:
+                log.exception("warroom.seed.error", extra={"error": str(exc)})
+
+        app.state._seed_task = asyncio.create_task(_bg_seed())
+
+    try:
+        yield
+    finally:
+        seed_task = getattr(app.state, "_seed_task", None)
+        if seed_task is not None and not seed_task.done():
+            seed_task.cancel()
+        _main_loop = None
 
 app = FastAPI(
     title="Quant Engine API",
@@ -99,6 +129,7 @@ app.include_router(heartbeat.router)
 app.include_router(monte_carlo.router)
 app.include_router(portfolio.router)
 app.include_router(risk_evaluation.router)
+app.include_router(admin_warroom.router)
 
 # WebSocket routes
 app.include_router(live_feed.router)

@@ -47,7 +47,10 @@ describe("marketDataStore", () => {
       expect(next.lastLiveTick!.volume).toBe(50);
     });
 
-    it("aggregates tick into current bar within timeframe", () => {
+    it("updates OHLC but preserves historical volume when tick is within same bar period", () => {
+      // When lastLiveTick is null and a tick falls within the same bar period as
+      // the last historical bar, we only update OHLC prices - the historical bar's
+      // volume is kept unchanged to avoid double-counting (it's already complete).
       const bars = [
         { timestamp: "2025-03-01T10:00:00Z", open: 100, high: 105, low: 99, close: 103, volume: 1000 },
       ];
@@ -60,7 +63,8 @@ describe("marketDataStore", () => {
       expect(lastLiveTick!.high).toBe(105);
       expect(lastLiveTick!.low).toBe(99);
       expect(lastLiveTick!.close).toBe(104);
-      expect(lastLiveTick!.volume).toBe(1050);
+      // Historical volume preserved - tick.volume NOT added to avoid double-counting
+      expect(lastLiveTick!.volume).toBe(1000);
       expect(useMarketDataStore.getState().bars).toHaveLength(1);
     });
 

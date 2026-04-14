@@ -20,6 +20,7 @@ class TaifexContract:
 
 
 CONTRACTS: tuple[TaifexContract, ...] = (
+    # Near-month (R1) contracts
     TaifexContract(
         db_symbol="TX",
         shioaji_path="Futures.TXF.TXFR1",
@@ -44,6 +45,34 @@ CONTRACTS: tuple[TaifexContract, ...] = (
         shioaji_group="TMF",
         display_name="TMF (Micro TAIEX)",
         description="微型台指期貨",
+        point_value=10.0,
+        earliest_data=date(2024, 7, 29),
+    ),
+    # Next-month (R2) contracts
+    TaifexContract(
+        db_symbol="TX_R2",
+        shioaji_path="Futures.TXF.TXFR2",
+        shioaji_group="TXF",
+        display_name="TX R2 (Next Month)",
+        description="台指期次月 · 大台次月",
+        point_value=200.0,
+        earliest_data=date(2001, 1, 1),
+    ),
+    TaifexContract(
+        db_symbol="MTX_R2",
+        shioaji_path="Futures.MXF.MXFR2",
+        shioaji_group="MXF",
+        display_name="MTX R2 (Next Month)",
+        description="小台指期次月 · 小台次月",
+        point_value=50.0,
+        earliest_data=date(2001, 1, 1),
+    ),
+    TaifexContract(
+        db_symbol="TMF_R2",
+        shioaji_path="Futures.TMF.TMFR2",
+        shioaji_group="TMF",
+        display_name="TMF R2 (Next Month)",
+        description="微型台指期貨次月",
         point_value=10.0,
         earliest_data=date(2024, 7, 29),
     ),

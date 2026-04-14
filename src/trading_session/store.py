@@ -136,3 +136,50 @@ class AccountEquityStore:
                 (account_id, today),
             ).fetchone()
         return float(row["equity"]) if row else None
+
+    def has_history(self, account_id: str) -> bool:
+        """Check if account has any equity history."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM account_equity_history WHERE account_id = ? LIMIT 1",
+                (account_id,),
+            ).fetchone()
+        return row is not None
+
+    def seed_sandbox_equity(
+        self,
+        account_id: str,
+        days: int = 30,
+        starting: float = 2_000_000.0,
+        seed: int = 42,
+    ) -> int:
+        """Bulk-insert synthetic equity history for sandbox accounts.
+
+        Uses direct executemany (bypasses _MIN_INTERVAL_SECS throttle).
+        Caller must check has_history() first for idempotency.
+        Generates one point per trading day using geometric Brownian motion.
+        """
+        import math
+        import random
+
+        rng = random.Random(seed)
+        now = datetime.now(_TAIPEI_TZ)
+        points: list[tuple[str, str, float, float]] = []
+        equity = starting
+
+        # Generate one equity point per day for the past N days
+        for d in range(days, 0, -1):
+            ts = now - timedelta(days=d)
+            # GBM: equity *= exp((drift - 0.5*vol^2) + vol*Z)
+            drift, vol = 0.0001, 0.02
+            z = rng.gauss(0, 1)
+            equity *= math.exp((drift - 0.5 * vol**2) + vol * z)
+            points.append((account_id, ts.isoformat(), equity, 0.0))
+
+        with self._conn() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO account_equity_history "
+                "(account_id, timestamp, equity, margin_used) VALUES (?, ?, ?, ?)",
+                points,
+            )
+        return len(points)
