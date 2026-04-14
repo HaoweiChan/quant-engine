@@ -4,11 +4,13 @@ import type { WarRoomSession } from "@/lib/api";
 
 interface EquityPanelProps {
   equityCurve: number[];
+  equityTimestamps?: number[];
   sessions: WarRoomSession[];
   accountLabel: string;
+  visibleRange?: { fromTs: string; toTs: string } | null;
 }
 
-export function EquityPanel({ equityCurve, sessions, accountLabel }: EquityPanelProps) {
+export function EquityPanel({ equityCurve, equityTimestamps, sessions, accountLabel, visibleRange }: EquityPanelProps) {
   const activeSessions = sessions.filter((s) => s.status === "active" || s.status === "paused");
 
   return (
@@ -18,7 +20,12 @@ export function EquityPanel({ equityCurve, sessions, accountLabel }: EquityPanel
       </div>
       <div className="p-2 flex-1 min-h-0">
         {equityCurve.length > 0 ? (
-          <EquityCurveChart equity={equityCurve} height={100} />
+          <EquityCurveChart
+            equity={equityCurve}
+            timestamps={equityTimestamps}
+            height={120}
+            visibleRange={visibleRange}
+          />
         ) : (
           <div className="text-[8px] py-4 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
             No equity data yet.

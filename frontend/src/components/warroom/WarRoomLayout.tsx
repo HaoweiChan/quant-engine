@@ -7,6 +7,7 @@ import { useLiveFeed } from "@/hooks/useLiveFeed";
 import { fetchWarRoomTyped, fetchOHLCV, fetchDeployHistory, startCrawl, fetchCrawlStatus } from "@/lib/api";
 import type { WarRoomData, DeployLogEntry } from "@/lib/api";
 import { colors } from "@/lib/theme";
+import { parseTimestampMs, parseTimestampSec } from "@/lib/time";
 
 import { WarRoomTopBar } from "@/components/WarRoomTopBar";
 import { RiskLimiterPanel } from "@/components/RiskLimiterPanel";
@@ -32,9 +33,7 @@ const TF_OPTIONS = [
   { label: "D", value: 1440 },
 ];
 
-const CHART_SYMBOLS = [
-  "TX", "MTX", "TE", "TF", "XIF", "GTF", "RHF", "GDF",
-];
+const CHART_SYMBOLS = ["TX", "MTX", "TMF"];
 
 const POLL_MS = 15_000;
 const BAR_REFRESH_MS = 15_000;
@@ -62,7 +61,13 @@ export function WarRoomLayout() {
   const [crawling, setCrawling] = useState(false);
   const [barError, setBarError] = useState<string | null>(null);
   const [fallbackSymbol, setFallbackSymbol] = useState<string | null>(null);
+  const [equityVisibleRange, setEquityVisibleRange] = useState<{ fromTs: string; toTs: string } | null>(null);
   const crawlPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Callback for syncing equity chart with live chart visible range
+  const handleVisibleRangeChange = useCallback((range: { fromTs: string; toTs: string } | null) => {
+    setEquityVisibleRange(range);
+  }, []);
 
   // Live feed → isolated store
   const processTickStable = useCallback(
@@ -125,7 +130,7 @@ export function WarRoomLayout() {
       if (incremental || r.bars.length === 0) return;
       // Check for stale data and auto-crawl
       const lastTs = r.bars[r.bars.length - 1].timestamp;
-      const lastDate = new Date(lastTs.includes("T") ? lastTs : lastTs.replace(" ", "T") + "+08:00");
+      const lastDate = new Date(parseTimestampMs(lastTs));
       const taipeiNow = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Taipei" }));
       const ageMs = taipeiNow.getTime() - lastDate.getTime();
       const staleThresholdMs = tf >= 1440 ? 3 * 86_400_000 : 86_400_000;
@@ -214,6 +219,13 @@ export function WarRoomLayout() {
 
   const equityCurve = useMemo(() => {
     return (activeAccountData?.equity_curve ?? []).map((p: { equity: number }) => p.equity);
+  }, [activeAccountData?.equity_curve]);
+
+  const equityTimestamps = useMemo(() => {
+    // Use shared parser for consistent timestamp handling across all charts
+    return (activeAccountData?.equity_curve ?? []).map((p: { timestamp: string }) =>
+      parseTimestampSec(p.timestamp)
+    );
   }, [activeAccountData?.equity_curve]);
 
   const riskGuards: RiskGuard[] = activeAccountData ? [
@@ -324,7 +336,7 @@ export function WarRoomLayout() {
                 </div>
                 <div className="flex-1 min-h-0 overflow-hidden">
                   <ChartStack
-                    key={`${activeAccountId}-${chartSymbol}`}
+                    key={`${activeAccountId}-${chartSymbol}-${tfMinutes}`}
                     bars={marketBars}
                     activeIndicators={[]}
                     timeframeMinutes={tfMinutes}
@@ -334,22 +346,25 @@ export function WarRoomLayout() {
                     timeframeOptions={TF_OPTIONS}
                     expandable={true}
                     showOverlayControls={true}
+                    onVisibleRangeChange={handleVisibleRangeChange}
                     headerLabel={`${chartSymbol} LIVE${fallbackSymbol ? ` (${fallbackSymbol} data)` : ""}`}
                   />
                 </div>
               </div>
 
-              {/* Positions + Equity — remaining 40% */}
-              <div className="min-h-0 flex gap-0" style={{ flex: "1 1 40%" }}>
-                <div className="flex-1 min-w-0 overflow-auto">
-                  <PositionsTable positions={positions} />
-                </div>
-                <div className="flex-1 min-w-0 overflow-auto">
+              {/* Equity + Positions — stacked vertically, both full width */}
+              <div className="min-h-0 flex flex-col gap-0" style={{ flex: "1 1 40%" }}>
+                <div className="min-h-0 overflow-auto" style={{ flex: "0 0 50%" }}>
                   <EquityPanel
                     equityCurve={equityCurve}
+                    equityTimestamps={equityTimestamps}
                     sessions={sessions}
                     accountLabel={activeAccountData.display_name || activeAccountId}
+                    visibleRange={equityVisibleRange}
                   />
+                </div>
+                <div className="min-h-0 overflow-auto" style={{ flex: "1 1 50%" }}>
+                  <PositionsTable positions={positions} />
                 </div>
               </div>
             </>

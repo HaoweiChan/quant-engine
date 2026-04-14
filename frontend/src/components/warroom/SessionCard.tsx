@@ -124,7 +124,7 @@ export function SessionCard({ session, allBindings, accountId, onAction }: Sessi
             DD {snap.drawdown_pct.toFixed(1)}%
           </span>
           <span style={{ color: colors.muted }}>
-            {snap.trade_count} trades
+            {snap.trade_count.toLocaleString()} trades
           </span>
           <span style={{ color: colors.blue }}>
             alloc {Math.round((session.equity_share ?? 1) * 100)}%

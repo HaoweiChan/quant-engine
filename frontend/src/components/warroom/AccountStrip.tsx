@@ -40,6 +40,7 @@ export function AccountStrip({ accounts }: AccountStripProps) {
             style={{
               background: isSelected ? `${colors.green}15` : colors.card,
               border: `1px solid ${isSelected ? colors.green : colors.cardBorder}`,
+              borderLeft: info.sandbox_mode ? `4px solid ${colors.orange}` : undefined,
               fontFamily: "var(--font-mono)",
             }}
           >
@@ -50,11 +51,6 @@ export function AccountStrip({ accounts }: AccountStripProps) {
             {info.connected && (
               <span className="text-[9px] font-semibold" style={{ color: colors.green }}>
                 ${info.equity.toLocaleString()}
-              </span>
-            )}
-            {info.sandbox_mode && (
-              <span className="text-[6px] font-semibold px-1 py-0.5 rounded" style={{ background: colors.orange, color: "white" }}>
-                PAPER
               </span>
             )}
           </button>
