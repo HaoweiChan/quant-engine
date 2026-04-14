@@ -415,6 +415,7 @@ export interface WarRoomSession {
     unrealized_pnl: number;
     drawdown_pct: number;
     trade_count: number;
+    instrument?: string;
     positions?: {
       symbol: string;
       side: "long" | "short";
@@ -423,6 +424,7 @@ export interface WarRoomSession {
       current_price: number;
       unrealized_pnl: number;
       strategy: string;
+      strategy_slug?: string;
     }[];
   } | null;
 }
@@ -434,6 +436,7 @@ export interface AccountPosition {
   avg_entry_price: number;
   current_price: number;
   unrealized_pnl: number;
+  strategy_slug?: string;
 }
 
 export interface AccountFill {
@@ -443,6 +446,7 @@ export interface AccountFill {
   price: number;
   quantity: number;
   fee: number;
+  strategy_slug?: string;
 }
 
 export interface WarRoomData {

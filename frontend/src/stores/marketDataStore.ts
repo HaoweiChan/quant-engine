@@ -1,29 +1,11 @@
 import { createStore } from "zustand/vanilla";
 import { useStore } from "zustand";
 import type { OHLCVBar } from "@/lib/api";
+import { parseTimestampMs, formatTaipeiTimestamp } from "@/lib/time";
 
 
-// Parse naive Taipei-local timestamps using the same convention as sessionChart.ts:
-// append 'Z' so that Date UTC fields contain Taipei local hours.
-// This ensures epoch values are consistent across all frontend modules.
-function parseBarTimestamp(ts: string): number {
-  const normalized = ts.includes("T") ? ts : ts.replace(" ", "T");
-  const zoned = /(?:Z|[+-]\d{2}:\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`;
-  return new Date(zoned).getTime();
-}
-
-
-function formatTaipeiTimestamp(epochMs: number): string {
-  // Epochs use the Z-trick (UTC fields = Taipei local), so read back via getUTC*
-  const d = new Date(epochMs);
-  const yyyy = d.getUTCFullYear().toString().padStart(4, "0");
-  const mm = (d.getUTCMonth() + 1).toString().padStart(2, "0");
-  const dd = d.getUTCDate().toString().padStart(2, "0");
-  const hh = d.getUTCHours().toString().padStart(2, "0");
-  const min = d.getUTCMinutes().toString().padStart(2, "0");
-  return `${yyyy}-${mm}-${dd} ${hh}:${min}:00`;
-}
-
+// Re-export parseTimestampMs as parseBarTimestamp for backward compatibility
+const parseBarTimestamp = parseTimestampMs;
 
 function createLiveBar(tick: { price: number; volume: number }, tickTime: number, tfMs: number): OHLCVBar {
   const newBarEpoch = Math.floor(tickTime / tfMs) * tfMs;
@@ -131,6 +113,10 @@ export function createMarketDataStore() {
           const lastBarTime = parseBarTimestamp(lastBar.timestamp);
           if (!Number.isFinite(lastBarTime)) return;
           if (tickTime < lastBarTime + tfMs) {
+            // Tick is within the same bar period as the last historical bar.
+            // The historical bar already has complete volume from the database,
+            // so we only update OHLC prices - do NOT add tick.volume to avoid
+            // double-counting volume that's already in the historical data.
             const prevClose = lastBar.close;
             set({
               prevClose,
@@ -139,23 +125,27 @@ export function createMarketDataStore() {
                 high: Math.max(lastBar.high, tick.price),
                 low: Math.min(lastBar.low, tick.price),
                 close: tick.price,
-                volume: lastBar.volume + tick.volume,
+                // Keep historical volume unchanged - don't add tick.volume
               },
             });
           } else {
-            const completedBar = { ...lastBar };
+            // Tick is in a new bar period - start fresh with just this tick's volume
             const newBar = createLiveBar(tick, tickTime, tfMs);
             const prevClose = lastBar.close;
-            set({
-              prevClose,
-              bars: [...state.bars, completedBar],
-              lastLiveTick: newBar,
-            });
+            set({ prevClose, lastLiveTick: newBar });
           }
         }
       }
     },
-    setQuery: (q) => set(q),
+    setQuery: (q) => {
+      const state = get();
+      // Clear bars when timeframe changes to prevent stale data display
+      if (q.tfMinutes !== undefined && q.tfMinutes !== state.tfMinutes) {
+        set({ ...q, bars: [], lastLiveTick: null, prevClose: null });
+      } else {
+        set(q);
+      }
+    },
     setLoading: (loading) => set({ loading }),
     setLoadingOlder: (loadingOlder) => set({ loadingOlder }),
     setError: (error) => set({ error, loading: false }),

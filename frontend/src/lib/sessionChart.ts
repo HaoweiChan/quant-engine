@@ -177,8 +177,6 @@ export function buildSequentialTimes(
   stepSeconds: number,
 ): { times: number[]; formatTick: (time: number) => string } {
   const times = bars.map((_, i) => SEQ_BASE_EPOCH + i * stepSeconds);
-  const timeframeMinutes = Math.max(1, Math.floor(stepSeconds / 60));
-  const nightCloseBucketMin = Math.floor(NIGHT_END_MIN / timeframeMinutes) * timeframeMinutes;
   const map = new Map<number, string>();
   bars.forEach((b, i) => map.set(times[i], b.timestamp));
   const resolveTimestamp = (time: number): string | null => {
@@ -188,8 +186,6 @@ export function buildSequentialTimes(
     if (idx < 0 || idx >= bars.length) return null;
     return bars[idx].timestamp;
   };
-  // Track last date shown to avoid repeating the same date on every tick
-  let lastDateLabel = "";
   const formatTick = (time: number): string => {
     const ts = resolveTimestamp(time);
     if (!ts) return "";
@@ -198,24 +194,39 @@ export function buildSequentialTimes(
     const minuteOfDay = parts.hour * 60 + parts.minute;
     const hhmm = `${parts.hour.toString().padStart(2, "0")}:${parts.minute.toString().padStart(2, "0")}`;
     const dateStr = `${parts.month}/${parts.day}`;
-    const isSessionOpen = minuteOfDay === DAY_START_MIN || minuteOfDay === NIGHT_START_MIN;
-    const isSessionClose = minuteOfDay === DAY_END_MIN || minuteOfDay === nightCloseBucketMin;
+    const isNightOpen = minuteOfDay === NIGHT_START_MIN;
+    const isDayOpen = minuteOfDay === DAY_START_MIN;
+    const isSessionOpen = isNightOpen || isDayOpen;
+    const sessionPrefix = isNightOpen ? "夜" : isDayOpen ? "日" : "";
+
     if (stepSeconds >= 86400) {
       return dateStr;
     }
-    // Day transition: show date only (no time)
-    if (dateStr !== lastDateLabel) {
-      lastDateLabel = dateStr;
-      return dateStr;
-    }
-    // Same day: show HH:MM at appropriate intervals
-    if (isSessionOpen || isSessionClose) return hhmm;
+
+    // 1h timeframe: label session opens with date+time+marker, every 4h otherwise
     if (stepSeconds > 15 * 60) {
+      if (isSessionOpen) return `${sessionPrefix}${dateStr} ${hhmm}`;
+      // Show every 4 hours on the hour, or bars that land at an even hour boundary
+      // (handles 08:00, 12:00, 16:00, 20:00, 00:00 etc.)
+      if (parts.minute === 0 && parts.hour % 4 === 0) return hhmm;
+      return "";
+    }
+
+    // Sub-hourly timeframes: session opens get a session marker prefix
+    if (isSessionOpen) return `${sessionPrefix}${hhmm}`;
+
+    // 15m timeframe: label every hour
+    if (stepSeconds > 5 * 60) {
       return parts.minute === 0 ? hhmm : "";
     }
-    if (stepSeconds <= 15 * 60 && parts.minute === 0) return hhmm;
-    if (stepSeconds <= 5 * 60 && parts.minute % 30 === 0) return hhmm;
-    return "";
+
+    // 5m timeframe: label every 15 minutes
+    if (stepSeconds > 60) {
+      return parts.minute % 15 === 0 ? hhmm : "";
+    }
+
+    // 1m timeframe: label every hour
+    return parts.minute === 0 ? hhmm : "";
   };
   return { times, formatTick };
 }

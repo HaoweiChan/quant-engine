@@ -12,6 +12,7 @@ export interface BlotterEvent {
   slippage_bps?: number;
   timestamp: number;
   message?: string;
+  strategy_slug?: string;
 }
 
 const WS_URL = `ws://${window.location.hostname}:8000/ws/blotter`;
