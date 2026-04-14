@@ -7,12 +7,7 @@ import type { StrategyInfo } from "@/lib/api";
 const TAIFEX_SYMBOLS = [
   { label: "TX", value: "TX" },
   { label: "MTX", value: "MTX" },
-  { label: "TE", value: "TE" },
-  { label: "TF", value: "TF" },
-  { label: "XIF", value: "XIF" },
-  { label: "GTF", value: "GTF" },
-  { label: "RHF", value: "RHF" },
-  { label: "GDF", value: "GDF" },
+  { label: "TMF", value: "TMF" },
 ];
 
 const inputStyle: React.CSSProperties = {

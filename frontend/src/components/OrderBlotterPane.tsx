@@ -68,6 +68,8 @@ export function OrderBlotterPane() {
               <th className="text-left py-0.5 px-1" style={{ color: colors.dim }}>Type</th>
               <th className="text-left py-0.5 px-1" style={{ color: colors.dim }}>Symbol</th>
               <th className="text-left py-0.5 px-1" style={{ color: colors.dim }}>Strategy</th>
+              <th className="text-left py-0.5 px-1" style={{ color: colors.dim }}>Signal</th>
+              <th className="text-left py-0.5 px-1" style={{ color: colors.dim }}>Status</th>
               <th className="text-right py-0.5 px-1" style={{ color: colors.dim }}>Side</th>
               <th className="text-right py-0.5 px-1" style={{ color: colors.dim }}>Qty</th>
               <th className="text-right py-0.5 px-1" style={{ color: colors.dim }}>Price</th>
@@ -87,6 +89,7 @@ export function OrderBlotterPane() {
 
 function BlotterRow({ ev }: { ev: BlotterEvent }) {
   const slip = ev.slippage_bps;
+  const isFilled = ev.triggered !== false; // default true when field absent
   return (
     <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
       <td className="py-0.5 px-1" style={{ color: colors.dim }}>{fmtTime(ev.timestamp)}</td>
@@ -103,6 +106,14 @@ function BlotterRow({ ev }: { ev: BlotterEvent }) {
         ) : (
           <span style={{ color: colors.dim }}>—</span>
         )}
+      </td>
+      <td className="py-0.5 px-1" style={{ color: colors.muted }}>
+        {ev.signal_reason ? ev.signal_reason : "—"}
+      </td>
+      <td className="py-0.5 px-1">
+        <span style={{ color: isFilled ? colors.green : "#f5a623", fontWeight: 600 }}>
+          {isFilled ? "FILLED" : "PENDING"}
+        </span>
       </td>
       <td className="text-right py-0.5 px-1" style={{ color: ev.side === "buy" ? colors.green : colors.red }}>{ev.side ?? "—"}</td>
       <td className="text-right py-0.5 px-1" style={{ color: colors.muted }}>{ev.qty ?? "—"}</td>

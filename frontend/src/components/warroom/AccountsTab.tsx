@@ -14,12 +14,7 @@ const BROKER_OPTIONS = ["mock", "sinopac", "binance", "schwab", "ccxt"];
 const TAIFEX_SYMBOLS = [
   { label: "TX (TAIEX)", value: "TX" },
   { label: "MTX (Mini-TAIEX)", value: "MTX" },
-  { label: "TE (Electronics)", value: "TE" },
-  { label: "TF (Finance)", value: "TF" },
-  { label: "XIF (Non-Fin/Elec)", value: "XIF" },
-  { label: "GTF (OTC 200)", value: "GTF" },
-  { label: "RHF (USD/TWD FX)", value: "RHF" },
-  { label: "GDF (Gold)", value: "GDF" },
+  { label: "TMF (TAIFEX Mini-Gold)", value: "TMF" },
 ];
 
 export function AccountModal({ initial, onClose, onSaved }: {

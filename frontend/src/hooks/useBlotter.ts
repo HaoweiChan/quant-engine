@@ -13,6 +13,8 @@ export interface BlotterEvent {
   timestamp: number;
   message?: string;
   strategy_slug?: string;
+  signal_reason?: string;
+  triggered?: boolean;
 }
 
 const WS_URL = `ws://${window.location.hostname}:8000/ws/blotter`;
