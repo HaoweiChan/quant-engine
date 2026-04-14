@@ -47,6 +47,8 @@ interface ChartStackProps {
   showOverlayControls?: boolean;
   /** Optional header label */
   headerLabel?: string;
+  /** Callback when visible time range changes (for syncing with other charts) */
+  onVisibleRangeChange?: (range: { fromTs: string; toTs: string } | null) => void;
 }
 
 export function ChartStack({
@@ -60,6 +62,7 @@ export function ChartStack({
   expandable = false,
   showOverlayControls = false,
   headerLabel,
+  onVisibleRangeChange,
 }: ChartStackProps) {
   const chartCardRef = useRef<HTMLDivElement | null>(null);
   const primaryRef = useRef<ChartPaneHandle>(null);
@@ -285,6 +288,37 @@ export function ChartStack({
     const timer = setTimeout(wireSync, 50);
     return () => { clearTimeout(timer); cleanSubs(); };
   }, [bars.length, secondaryId]);
+
+  // Emit visible range changes for external sync (e.g., equity curve)
+  useEffect(() => {
+    if (!onVisibleRangeChange) return;
+    const primary = primaryRef.current?.chart();
+    if (!primary || ds.length === 0) return;
+
+    const emitRange = (range: { from: number; to: number } | null) => {
+      if (!range || ds.length === 0) {
+        onVisibleRangeChange(null);
+        return;
+      }
+      // Clamp indices to valid range
+      const fromIdx = Math.max(0, Math.min(ds.length - 1, Math.round(range.from)));
+      const toIdx = Math.max(0, Math.min(ds.length - 1, Math.round(range.to)));
+      if (fromIdx >= ds.length || toIdx < 0) {
+        onVisibleRangeChange(null);
+        return;
+      }
+      onVisibleRangeChange({
+        fromTs: ds[fromIdx].timestamp,
+        toTs: ds[toIdx].timestamp,
+      });
+    };
+
+    const handler = (range: any) => emitRange(range);
+    primary.timeScale().subscribeVisibleLogicalRangeChange(handler);
+    return () => {
+      try { primary.timeScale().unsubscribeVisibleLogicalRangeChange(handler); } catch { /* ok */ }
+    };
+  }, [onVisibleRangeChange, ds]);
 
   const handleFit = () => {
     const chart = primaryRef.current?.chart();

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from "react";
-import { createChart, type IChartApi, LineSeries } from "lightweight-charts";
+import { createChart, type IChartApi, type ISeriesApi, LineSeries } from "lightweight-charts";
 import { colors } from "@/lib/theme";
+import { parseTimestampSec } from "@/lib/time";
 
 interface EquityCurveChartProps {
   equity: number[];
@@ -9,6 +10,7 @@ interface EquityCurveChartProps {
   startDate?: string;
   timeframeMinutes?: number;
   timestamps?: number[];
+  visibleRange?: { fromTs: string; toTs: string } | null;
 }
 
 const MAX_CHART_POINTS = 2000;
@@ -33,18 +35,47 @@ function downsample(data: number[], maxPoints: number): Sample[] {
 }
 
 function toChartData(samples: Sample[], timestamps: number[] | undefined, baseDate: Date, tfMinutes: number) {
-  return samples.map(({ value, idx }) => {
+  const data = samples.map(({ value, idx }) => {
     const epochSec = timestamps ? timestamps[idx] : baseDate.getTime() / 1000 + idx * tfMinutes * 60;
-    return { time: epochSec as unknown as string, value };
+    return { time: epochSec, value };
   });
+  // Sort by time to ensure ascending order (required by lightweight-charts)
+  data.sort((a, b) => a.time - b.time);
+  // Deduplicate by time (keep last value for each timestamp)
+  const deduped: { time: number; value: number }[] = [];
+  for (const d of data) {
+    if (deduped.length === 0 || deduped[deduped.length - 1].time < d.time) {
+      deduped.push(d);
+    } else {
+      // Same time - update value
+      deduped[deduped.length - 1].value = d.value;
+    }
+  }
+  return deduped.map(d => ({ time: d.time as unknown as string, value: d.value }));
 }
 
-export const EquityCurveChart = React.memo(function EquityCurveChart({ equity, bnhEquity, height = 260, startDate, timeframeMinutes, timestamps }: EquityCurveChartProps) {
+// Use shared parser for consistent timestamp handling across all charts
+const parseTimestamp = parseTimestampSec;
+
+export const EquityCurveChart = React.memo(function EquityCurveChart({
+  equity,
+  bnhEquity,
+  height = 260,
+  startDate,
+  timeframeMinutes,
+  timestamps,
+  visibleRange,
+}: EquityCurveChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const stratSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const bnhSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const initializedRef = useRef(false);
 
+  // Effect 1: Create chart once (deps: [height])
   useEffect(() => {
-    if (!containerRef.current || equity.length === 0) return;
+    if (!containerRef.current) return;
+
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
@@ -80,38 +111,94 @@ export const EquityCurveChart = React.memo(function EquityCurveChart({ equity, b
     });
     chartRef.current = chart;
 
-    const tfMin = timeframeMinutes ?? 1;
-    const baseDate = startDate ? new Date(startDate) : new Date("2025-01-01");
-    const ds = downsample(equity, MAX_CHART_POINTS);
-    const stratSeries = chart.addSeries(LineSeries, { color: colors.green, lineWidth: 2, title: "Strategy" });
-    stratSeries.setData(toChartData(ds, timestamps, baseDate, tfMin));
-
-    if (bnhEquity && bnhEquity.length > 0) {
-      const bnh = downsample(bnhEquity, MAX_CHART_POINTS);
-      const bnhSeries = chart.addSeries(LineSeries, {
-        color: "#8888aa",
-        lineWidth: 1,
-        lineStyle: 1,
-        title: "Buy & Hold",
-        crosshairMarkerVisible: true,
-      });
-      bnhSeries.setData(toChartData(bnh, timestamps, baseDate, tfMin));
-    }
-
-    chart.timeScale().fitContent();
+    // Create strategy series
+    stratSeriesRef.current = chart.addSeries(LineSeries, {
+      color: colors.green,
+      lineWidth: 2,
+      title: "Strategy",
+    });
 
     const handleResize = () => {
-      if (containerRef.current) {
-        chart.applyOptions({ width: containerRef.current.clientWidth });
-        chart.timeScale().fitContent();
+      if (containerRef.current && chartRef.current) {
+        chartRef.current.applyOptions({ width: containerRef.current.clientWidth });
+        chartRef.current.timeScale().fitContent();
       }
     };
     window.addEventListener("resize", handleResize);
+
     return () => {
       window.removeEventListener("resize", handleResize);
       chart.remove();
+      chartRef.current = null;
+      stratSeriesRef.current = null;
+      bnhSeriesRef.current = null;
+      initializedRef.current = false;
     };
-  }, [equity, bnhEquity, height, startDate, timeframeMinutes, timestamps]);
+  }, [height]);
+
+  // Effect 2: Update data (deps: [equity, bnhEquity, timestamps, startDate, timeframeMinutes])
+  useEffect(() => {
+    if (!chartRef.current || !stratSeriesRef.current || equity.length === 0) return;
+
+    const tfMin = timeframeMinutes ?? 1;
+    const baseDate = startDate ? new Date(startDate) : new Date("2025-01-01");
+
+    // Update strategy series
+    const ds = downsample(equity, MAX_CHART_POINTS);
+    stratSeriesRef.current.setData(toChartData(ds, timestamps, baseDate, tfMin));
+
+    // Handle bnhEquity add/remove
+    if (bnhEquity && bnhEquity.length > 0) {
+      if (!bnhSeriesRef.current && chartRef.current) {
+        bnhSeriesRef.current = chartRef.current.addSeries(LineSeries, {
+          color: "#8888aa",
+          lineWidth: 1,
+          lineStyle: 1,
+          title: "Buy & Hold",
+          crosshairMarkerVisible: true,
+        });
+      }
+      if (bnhSeriesRef.current) {
+        const bnh = downsample(bnhEquity, MAX_CHART_POINTS);
+        bnhSeriesRef.current.setData(toChartData(bnh, timestamps, baseDate, tfMin));
+      }
+    } else if (bnhSeriesRef.current && chartRef.current) {
+      chartRef.current.removeSeries(bnhSeriesRef.current);
+      bnhSeriesRef.current = null;
+    }
+
+    // Fit content on initial data load
+    if (!initializedRef.current) {
+      chartRef.current.timeScale().fitContent();
+      initializedRef.current = true;
+    }
+  }, [equity, bnhEquity, timestamps, startDate, timeframeMinutes]);
+
+  // Effect 3: Sync visible range from external chart (deps: [visibleRange, timestamps])
+  useEffect(() => {
+    if (!chartRef.current || !visibleRange || !timestamps || timestamps.length === 0) return;
+
+    const fromSec = parseTimestamp(visibleRange.fromTs);
+    const toSec = parseTimestamp(visibleRange.toTs);
+
+    // Find nearest equity timestamps that bracket [fromSec, toSec]
+    // Only apply if range overlaps with our data
+    const firstTs = timestamps[0];
+    const lastTs = timestamps[timestamps.length - 1];
+    if (toSec < firstTs || fromSec > lastTs) return;
+
+    const clampedFrom = Math.max(fromSec, firstTs);
+    const clampedTo = Math.min(toSec, lastTs);
+
+    try {
+      chartRef.current.timeScale().setVisibleRange({
+        from: clampedFrom as unknown as string,
+        to: clampedTo as unknown as string,
+      });
+    } catch {
+      // Range may be invalid, ignore
+    }
+  }, [visibleRange, timestamps]);
 
   return <div ref={containerRef} />;
 });
