@@ -94,3 +94,7 @@ node_modules/
 .playwright-cli/
 frontend/.playwright-cli/
 .playwright-mcp/
+
+# Playwright test artifacts
+frontend/playwright-report/
+frontend/test-results/

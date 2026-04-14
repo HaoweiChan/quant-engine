@@ -32,7 +32,8 @@ REMOTE_DATA="$REMOTE:$VPS_DIR/data/"
 LOCAL_DATA="$LOCAL_DIR/data/"
 
 # Databases synced bidirectionally:
-#   market.db        — historical OHLCV bars (1m / 5m / 1h)
+#   market.db        — historical OHLCV bars (1m / 5m / 1h) for R1 and R2 contracts
+#                      (TX, MTX, TMF near-month; TX_R2, MTX_R2, TMF_R2 next-month)
 #   taifex_data.db   — TAIFEX contract and session metadata
 #   trading.db       — live session and fill records
 #   param_registry.db — optimization run history (param sweeps, walk-forward results)
