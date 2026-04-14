@@ -1,8 +1,17 @@
 import { useState } from "react";
 import { colors } from "@/lib/theme";
-import { startSession, stopSession, updateAccountStrategies } from "@/lib/api";
+import { startSession, stopSession, flattenSession, updateAccountStrategies } from "@/lib/api";
 import { useWarRoomStore } from "@/stores/warRoomStore";
 import type { WarRoomSession } from "@/lib/api";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 
 interface SessionCardProps {
   session: WarRoomSession;
@@ -17,6 +26,7 @@ export function SessionCard({ session, allBindings, accountId, onAction }: Sessi
   const openParamDrawer = useWarRoomStore((s) => s.openParamDrawer);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
   const isSelected = selectedSessionId === session.session_id;
   const isRunning = session.status === "active" || session.status === "paused";
   const isStuck = session.status === "halted" || session.status === "flattening";
@@ -54,12 +64,21 @@ export function SessionCard({ session, allBindings, accountId, onAction }: Sessi
     openParamDrawer(session.strategy_slug);
   };
 
-  const handleRemove = async (e: React.MouseEvent) => {
+  const handleRemoveClick = (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (!accountId || !allBindings) return;
+    setConfirmRemoveOpen(true);
+  };
+
+  const handleConfirmRemove = async () => {
     if (!accountId || !allBindings) return;
     setLoading(true);
     setError(null);
+    setConfirmRemoveOpen(false);
     try {
+      // Flatten (liquidate) any open positions for this session first
+      await flattenSession(session.session_id);
+      // Then remove the strategy binding
       const updated = allBindings.filter(
         (b) => !(b.slug === session.strategy_slug && b.symbol === session.symbol),
       );
@@ -102,7 +121,7 @@ export function SessionCard({ session, allBindings, accountId, onAction }: Sessi
           )}
           {accountId && allBindings && (
             <button
-              onClick={handleRemove}
+              onClick={handleRemoveClick}
               disabled={loading}
               className="cursor-pointer border-none bg-transparent text-[10px] leading-none px-0.5"
               style={{ color: colors.dim }}
@@ -173,6 +192,60 @@ export function SessionCard({ session, allBindings, accountId, onAction }: Sessi
           PARAMS {hasParams && "✓"}
         </button>
       </div>
+
+      {/* Remove confirmation dialog */}
+      <Dialog open={confirmRemoveOpen} onOpenChange={setConfirmRemoveOpen}>
+        <DialogContent
+          showCloseButton={false}
+          style={{
+            background: colors.card,
+            border: `1px solid ${colors.cardBorder}`,
+            color: colors.text,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <DialogHeader>
+            <DialogTitle style={{ color: colors.text, fontSize: 13 }}>
+              Remove Strategy
+            </DialogTitle>
+            <DialogDescription style={{ color: colors.muted, fontSize: 11 }}>
+              Are you sure you want to remove{" "}
+              <strong style={{ color: colors.text }}>
+                {session.strategy_slug.split("/").pop()}
+              </strong>{" "}
+              ({session.symbol}) from this account?
+              <br />
+              <span style={{ color: colors.orange }}>
+                Any open positions will be liquidated.
+              </span>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmRemoveOpen(false)}
+              style={{
+                borderColor: colors.cardBorder,
+                color: colors.muted,
+                background: "transparent",
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleConfirmRemove}
+              style={{
+                background: colors.red,
+                color: "#fff",
+              }}
+            >
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

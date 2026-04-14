@@ -507,6 +507,10 @@ export async function stopSession(sessionId: string): Promise<{ session_id: stri
   return fetchJSON(`/api/sessions/${sessionId}/stop`, { method: "POST" });
 }
 
+export async function flattenSession(sessionId: string): Promise<{ session_id: string; status: string }> {
+  return fetchJSON(`/api/sessions/${sessionId}/flatten`, { method: "POST" });
+}
+
 export async function updateEquityShare(
   sessionId: string,
   share: number,
@@ -515,6 +519,16 @@ export async function updateEquityShare(
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ share }),
+  });
+}
+
+export async function batchUpdateEquityShare(
+  allocations: { session_id: string; share: number }[],
+): Promise<{ updated: { session_id: string; account_id: string; equity_share: number }[] }> {
+  return fetchJSON("/api/sessions/batch-equity-share", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ allocations }),
   });
 }
 
