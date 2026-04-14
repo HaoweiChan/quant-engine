@@ -2334,3 +2334,100 @@ def run_risk_report_for_mcp(
         walk_forward_result=l5_walk_forward,
     )
     return report.to_dict()
+
+
+def run_portfolio_optimization_for_mcp(
+    strategies: list[dict[str, Any]],
+    symbol: str = "TX",
+    start: str = "2025-08-01",
+    end: str = "2026-03-14",
+    initial_equity: float = 2_000_000.0,
+    min_weight: float = 0.10,
+) -> dict[str, Any]:
+    """Run portfolio weight optimization across multiple strategies.
+
+    Backtests each strategy on real data, then finds optimal weight
+    allocations for max Sharpe, max return, min drawdown, and risk parity.
+    """
+    from dataclasses import asdict
+
+    import numpy as np
+
+    if len(strategies) < 2:
+        return {"error": "Need at least 2 strategies for portfolio optimization"}
+    if len(strategies) > 5:
+        return {"error": "Maximum 5 strategies supported"}
+
+    daily_returns: dict[str, Any] = {}
+    bt_errors: list[str] = []
+    for entry in strategies:
+        slug = entry["slug"]
+        params = entry.get("params")
+        resolved = resolve_strategy_slug(slug)
+        try:
+            bt = run_backtest_realdata_for_mcp(
+                symbol=symbol,
+                start=start,
+                end=end,
+                strategy=resolved,
+                strategy_params=params,
+                initial_equity=initial_equity,
+            )
+        except Exception as exc:
+            bt_errors.append(f"{slug}: {exc}")
+            continue
+        if "error" in bt:
+            bt_errors.append(f"{slug}: {bt['error']}")
+            continue
+        dr = bt.get("daily_returns", [])
+        if hasattr(dr, "tolist"):
+            dr = dr.tolist()
+        if not dr:
+            bt_errors.append(f"{slug}: no daily returns produced")
+            continue
+        daily_returns[slug] = np.array(dr, dtype=np.float64)
+
+    if bt_errors:
+        return {"error": f"Backtest failures: {'; '.join(bt_errors)}"}
+    if len(daily_returns) < 2:
+        return {"error": "Need at least 2 successful backtests for optimization"}
+
+    from src.core.portfolio_optimizer import PortfolioOptimizer
+
+    try:
+        optimizer = PortfolioOptimizer(
+            daily_returns=daily_returns,
+            initial_capital=initial_equity,
+            min_weight=min_weight,
+        )
+        result = optimizer.optimize()
+    except Exception as exc:
+        return {"error": f"Optimization failed: {exc}"}
+
+    output = {
+        "strategy_slugs": result.strategy_slugs,
+        "max_sharpe": asdict(result.max_sharpe),
+        "max_return": asdict(result.max_return),
+        "min_drawdown": asdict(result.min_drawdown),
+        "risk_parity": asdict(result.risk_parity),
+        "equal_weight": asdict(result.equal_weight),
+        "pareto_front": [asdict(p) for p in result.pareto_front],
+        "correlation_matrix": result.correlation_matrix,
+        "individual_metrics": result.individual_metrics,
+        "n_days": result.n_days,
+    }
+
+    # Auto-persist to portfolio store
+    try:
+        from src.core.portfolio_store import PortfolioStore
+        store = PortfolioStore()
+        run_id = store.save_optimization(
+            result=output, symbol=symbol, start=start, end=end,
+            initial_capital=initial_equity, min_weight=min_weight,
+        )
+        store.close()
+        output["run_id"] = run_id
+    except Exception as exc:
+        output["persistence_warning"] = f"Failed to save to DB: {exc}"
+
+    return output

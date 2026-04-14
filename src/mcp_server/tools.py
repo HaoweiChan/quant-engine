@@ -20,6 +20,7 @@ from src.mcp_server.facade import (
     run_backtest_for_mcp,
     run_backtest_realdata_for_mcp,
     run_monte_carlo_for_mcp,
+    run_portfolio_optimization_for_mcp,
     run_risk_report_for_mcp,
     run_sensitivity_check_for_mcp,
     run_stress_for_mcp,
@@ -783,6 +784,70 @@ TOOLS: list[Tool] = [
             "required": ["strategy", "target_level", "gate_results"],
         },
     ),
+    Tool(
+        name="run_portfolio_optimization",
+        description=(
+            "Find optimal capital allocation weights across 2-5 strategies. "
+            "Runs backtests on real data for each strategy, then uses scipy SLSQP "
+            "optimization to find weight vectors that maximize Sharpe, maximize return, "
+            "minimize drawdown, and achieve risk parity. Also generates an efficient "
+            "frontier / Pareto front for multi-objective analysis.\n\n"
+            "Returns: optimal weights for each objective, individual strategy metrics, "
+            "correlation matrix, and Pareto front points.\n\n"
+            "Use this before staging multiple strategies to determine allocation."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "strategies": {
+                    "type": "array",
+                    "description": "List of strategy entries to optimize across",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "slug": {
+                                "type": "string",
+                                "description": "Strategy slug (e.g. 'medium_term/trend_following/donchian_trend_strength')",
+                            },
+                            "params": {
+                                "type": "object",
+                                "description": "Optional parameter overrides for this strategy",
+                            },
+                        },
+                        "required": ["slug"],
+                    },
+                    "minItems": 2,
+                    "maxItems": 5,
+                },
+                "symbol": {
+                    "type": "string",
+                    "description": "Instrument symbol",
+                    "default": "TX",
+                },
+                "start": {
+                    "type": "string",
+                    "description": "Start date (YYYY-MM-DD)",
+                    "default": "2025-08-01",
+                },
+                "end": {
+                    "type": "string",
+                    "description": "End date (YYYY-MM-DD)",
+                    "default": "2026-03-14",
+                },
+                "initial_equity": {
+                    "type": "number",
+                    "description": "Initial capital in NTD",
+                    "default": 2000000.0,
+                },
+                "min_weight": {
+                    "type": "number",
+                    "description": "Minimum allocation per strategy (0.0-0.5). Default 0.10 = 10%",
+                    "default": 0.10,
+                },
+            },
+            "required": ["strategies"],
+        },
+    ),
 ]
 
 
@@ -1289,6 +1354,17 @@ def register_tools(app: Server) -> None:
                     "gate_results": gate_results,
                     "thresholds": thresholds.to_dict(),
                 })
+
+            if name == "run_portfolio_optimization":
+                result = run_portfolio_optimization_for_mcp(
+                    strategies=arguments["strategies"],
+                    symbol=arguments.get("symbol", "TX"),
+                    start=arguments.get("start", "2025-08-01"),
+                    end=arguments.get("end", "2026-03-14"),
+                    initial_equity=arguments.get("initial_equity", 2_000_000.0),
+                    min_weight=arguments.get("min_weight", 0.10),
+                )
+                return _json_response(result)
 
             return _json_response({"error": f"Unknown tool: {name}"})
 

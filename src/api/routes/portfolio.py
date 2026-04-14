@@ -1,6 +1,7 @@
-"""Portfolio-level backtest and stress-test endpoints for multi-strategy analysis."""
+"""Portfolio-level backtest, stress-test, and optimization endpoints."""
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Literal
 
 import numpy as np
@@ -44,6 +45,15 @@ class PortfolioStressRequest(BaseModel):
     method: Literal["stationary", "circular", "garch"] = "stationary"
     ruin_threshold: float = Field(0.5, ge=0.01, le=0.99)
     seed: int | None = None
+
+
+class PortfolioOptimizeRequest(BaseModel):
+    strategies: list[StrategyEntry]
+    symbol: str = "TX"
+    start: str = "2025-08-01"
+    end: str = "2026-03-14"
+    initial_capital: float = 2_000_000.0
+    min_weight: float = Field(0.10, ge=0.0, le=0.5, description="Minimum allocation per strategy")
 
 
 def _validate_strategies(strategies: list[StrategyEntry]) -> None:
@@ -189,3 +199,74 @@ async def run_portfolio_stress_test(req: PortfolioStressRequest) -> dict:
         "n_days": result.n_days,
         "bands": bands,
     }
+
+
+@router.post("/optimize")
+async def run_portfolio_optimize(req: PortfolioOptimizeRequest) -> dict:
+    """Find optimal weight allocations across strategies.
+
+    Runs backtests for each strategy, then optimizes weights for
+    max Sharpe, max return, min drawdown, and risk parity.
+    Returns Pareto front for multi-objective visualization.
+    """
+    _validate_strategies(req.strategies)
+    from src.core.portfolio_optimizer import PortfolioOptimizer
+    # Run individual backtests
+    daily_returns: dict[str, np.ndarray] = {}
+    for entry in req.strategies:
+        try:
+            bt = run_strategy_backtest(
+                strategy_slug=entry.slug,
+                symbol=req.symbol,
+                start_str=req.start,
+                end_str=req.end,
+                initial_equity=req.initial_capital,
+                strategy_params=entry.params,
+            )
+        except ValueError as exc:
+            raise HTTPException(404, f"Strategy '{entry.slug}': {exc}")
+        except Exception as exc:
+            raise HTTPException(500, f"Backtest error for '{entry.slug}': {exc}")
+        dr = bt.get("daily_returns", [])
+        if isinstance(dr, np.ndarray):
+            dr = dr.tolist()
+        daily_returns[entry.slug] = np.array(dr, dtype=np.float64)
+    try:
+        optimizer = PortfolioOptimizer(
+            daily_returns=daily_returns,
+            initial_capital=req.initial_capital,
+            min_weight=req.min_weight,
+        )
+        result = optimizer.optimize()
+    except Exception as exc:
+        raise HTTPException(500, f"Optimization error: {exc}")
+    output = {
+        "strategy_slugs": result.strategy_slugs,
+        "max_sharpe": asdict(result.max_sharpe),
+        "max_return": asdict(result.max_return),
+        "min_drawdown": asdict(result.min_drawdown),
+        "risk_parity": asdict(result.risk_parity),
+        "equal_weight": asdict(result.equal_weight),
+        "pareto_front": [asdict(p) for p in result.pareto_front],
+        "correlation_matrix": result.correlation_matrix,
+        "individual_metrics": result.individual_metrics,
+        "n_days": result.n_days,
+    }
+    # Auto-persist
+    try:
+        from src.core.portfolio_store import PortfolioStore
+        store = PortfolioStore()
+        run_id = store.save_optimization(
+            result=output, symbol=req.symbol, start=req.start, end=req.end,
+            initial_capital=req.initial_capital, min_weight=req.min_weight,
+        )
+        store.close()
+        output["run_id"] = run_id
+    except Exception as exc:
+        logger.warning("portfolio_persistence_failed", error=str(exc))
+    logger.info(
+        "portfolio_optimization_completed",
+        n_strategies=len(req.strategies),
+        max_sharpe=result.max_sharpe.sharpe,
+    )
+    return output
