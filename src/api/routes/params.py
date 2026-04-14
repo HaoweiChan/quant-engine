@@ -7,20 +7,42 @@ from fastapi import APIRouter, HTTPException
 router = APIRouter(prefix="/api/params", tags=["params"])
 
 
+def _resolve_full_strategy_path(registry, strategy: str) -> str:
+    """Resolve a short strategy name to its full path if needed.
+
+    If strategy contains '/', it's already a full path. Otherwise,
+    look for a matching full path in param_runs.
+    """
+    if "/" in strategy:
+        return strategy
+    row = registry._conn.execute(
+        "SELECT DISTINCT strategy FROM param_runs WHERE strategy LIKE ? LIMIT 1",
+        (f"%/{strategy}",),
+    ).fetchone()
+    return row["strategy"] if row else strategy
+
+
 @router.get("/active/{strategy:path}")
 async def get_active_params(strategy: str) -> dict:
-    """Return active optimized params or PARAM_SCHEMA defaults."""
+    """Return active optimized params or PARAM_SCHEMA defaults.
+
+    Supports both full paths and short names (resolved via fallback lookup).
+    """
     from src.strategies.param_registry import ParamRegistry
 
     registry = ParamRegistry()
-    detail = registry.get_active_detail(strategy)
+
+    # Try to resolve short name to full path
+    resolved_strategy = _resolve_full_strategy_path(registry, strategy)
+
+    detail = registry.get_active_detail(resolved_strategy)
     if detail:
         code_changed = None
         try:
             from src.strategies.code_hash import compute_strategy_hash
 
-            current_hash, _ = compute_strategy_hash(strategy)
-            code_changed = registry.check_code_hash_match(strategy, current_hash) is False
+            current_hash, _ = compute_strategy_hash(resolved_strategy)
+            code_changed = registry.check_code_hash_match(resolved_strategy, current_hash) is False
         except FileNotFoundError:
             code_changed = None
         finally:
@@ -31,7 +53,7 @@ async def get_active_params(strategy: str) -> dict:
     try:
         from src.strategies.registry import get_defaults
 
-        defaults = get_defaults(strategy)
+        defaults = get_defaults(resolved_strategy)
         return {"params": defaults, "source": "defaults"}
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown strategy '{strategy}'")
@@ -82,11 +104,16 @@ async def get_run_result(run_id: int) -> dict:
 
 @router.get("/runs/{strategy:path}")
 async def get_run_history(strategy: str, limit: int = 20) -> dict:
-    """Return optimization run history for a strategy."""
+    """Return optimization run history for a strategy.
+
+    Supports both full paths (e.g. 'short_term/trend_following/night_session_long')
+    and short names (e.g. 'night_session_long'). Short names are resolved to full paths.
+    """
     from src.strategies.param_registry import ParamRegistry
 
     registry = ParamRegistry()
-    runs = registry.get_run_history(strategy, limit=limit)
+    resolved_strategy = _resolve_full_strategy_path(registry, strategy)
+    runs = registry.get_run_history(resolved_strategy, limit=limit)
     registry.close()
     return {"runs": runs, "count": len(runs)}
 

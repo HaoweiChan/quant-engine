@@ -17,6 +17,7 @@ class LivePosition:
     current_price: float
     unrealized_pnl: float
     margin_required: float
+    strategy_slug: str | None = None
 
 
 @dataclass

@@ -28,7 +28,7 @@ def _load_mock_positions_from_db(account_id: str = "mock-dev") -> list[LivePosit
             rows = conn.execute(
                 """
                 SELECT symbol, side, quantity, avg_entry_price, current_price,
-                       unrealized_pnl
+                       unrealized_pnl, strategy_slug
                 FROM mock_positions WHERE account_id = ?
                 """,
                 (account_id,),
@@ -46,6 +46,7 @@ def _load_mock_positions_from_db(account_id: str = "mock-dev") -> list[LivePosit
             current_price=float(r[4]),
             unrealized_pnl=float(r[5]),
             margin_required=0.0,
+            strategy_slug=r[6] if len(r) > 6 else None,
         )
         for r in rows
     ]
@@ -139,9 +140,11 @@ class MockGateway(BrokerGateway):
         if not positions:
             positions = [
                 LivePosition("TX", "long", 3, 20150.0, 20150.0 + self._rng.normal(0, 100),
-                             self._rng.normal(20000, 15000), 400_000.0),
+                             self._rng.normal(20000, 15000), 400_000.0,
+                             strategy_slug="short_term/breakout/donchian_trend_strength"),
                 LivePosition("MTX", "long", 4, 20450.0, 20450.0 + self._rng.normal(0, 80),
-                             self._rng.normal(8000, 5000), 50_000.0),
+                             self._rng.normal(8000, 5000), 50_000.0,
+                             strategy_slug="short_term/trend_following/night_session_long"),
             ]
         unrealized = sum(p.unrealized_pnl for p in positions)
         margin_used = sum(getattr(p, "margin_required", 0.0) for p in positions)

@@ -34,7 +34,8 @@ def _load_historical_mock_fills(limit: int = 50) -> list[dict[str, Any]]:
             rows = conn.execute(
                 """
                 SELECT timestamp, account_id, session_id, strategy_slug, symbol,
-                       side, price, quantity, fee, pnl_realized, is_session_close
+                       side, price, quantity, fee, pnl_realized, is_session_close,
+                       signal_reason, triggered
                 FROM mock_fills
                 ORDER BY timestamp DESC
                 LIMIT ?
@@ -61,6 +62,8 @@ def _load_historical_mock_fills(limit: int = 50) -> list[dict[str, Any]]:
                 "fee": float(r["fee"]),
                 "pnl_realized": float(r["pnl_realized"]),
                 "is_session_close": bool(r["is_session_close"]),
+                "signal_reason": r["signal_reason"] or "",
+                "triggered": bool(r["triggered"]),
                 "source": "mock_history",
             }
         )
