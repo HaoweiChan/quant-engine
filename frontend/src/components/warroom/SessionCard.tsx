@@ -2,6 +2,7 @@ import { useState } from "react";
 import { colors } from "@/lib/theme";
 import { startSession, stopSession, flattenSession, updateAccountStrategies } from "@/lib/api";
 import { useWarRoomStore } from "@/stores/warRoomStore";
+import { ContractRollBadge } from "./ContractRollBadge";
 import type { WarRoomSession } from "@/lib/api";
 import {
   Dialog,
@@ -13,14 +14,21 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 
+interface RollInfo {
+  holding_period: string;
+  urgency: "none" | "watch" | "imminent" | "overdue";
+  days_to_settlement: number;
+}
+
 interface SessionCardProps {
   session: WarRoomSession;
   allBindings?: { slug: string; symbol: string }[];
   accountId?: string;
+  rollInfo?: RollInfo;
   onAction: () => void;
 }
 
-export function SessionCard({ session, allBindings, accountId, onAction }: SessionCardProps) {
+export function SessionCard({ session, allBindings, accountId, rollInfo, onAction }: SessionCardProps) {
   const selectedSessionId = useWarRoomStore((s) => s.selectedSessionId);
   const setSelectedSessionId = useWarRoomStore((s) => s.setSelectedSessionId);
   const openParamDrawer = useWarRoomStore((s) => s.openParamDrawer);
@@ -114,6 +122,14 @@ export function SessionCard({ session, allBindings, accountId, onAction }: Sessi
           </span>
         </div>
         <div className="flex items-center gap-1">
+          {rollInfo && (
+            <ContractRollBadge
+              urgency={rollInfo.urgency}
+              daysToSettlement={rollInfo.days_to_settlement}
+              holdingPeriod={rollInfo.holding_period}
+              compact
+            />
+          )}
           {session.is_stale && (
             <span className="text-[7px] px-1 py-0.5 rounded" style={{ background: "rgba(255,165,0,0.12)", color: colors.orange, fontFamily: "var(--font-mono)" }}>
               NEW

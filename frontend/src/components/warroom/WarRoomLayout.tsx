@@ -24,6 +24,7 @@ import { EquityPanel } from "./EquityPanel";
 import { ActivityLog } from "./ActivityLog";
 import { DeploymentHistory } from "./DeploymentHistory";
 import { ParamCompareDrawer } from "./ParamCompareDrawer";
+import { SettlementCountdown } from "./SettlementCountdown";
 
 const TF_OPTIONS = [
   { label: "1m", value: 1 },
@@ -329,6 +330,7 @@ export function WarRoomLayout() {
             {activeSessions.length}/{sessions.length}
           </span>
         </div>
+        <SettlementCountdown settlement={data?.settlement} />
         {crawling && (
           <span className="text-[8px]" style={{ color: colors.orange, fontFamily: "var(--font-mono)" }}>
             Syncing bars...
@@ -367,7 +369,7 @@ export function WarRoomLayout() {
 
           {/* Session Grid */}
           <div className="flex-1 min-h-0 overflow-y-auto">
-            <SessionGrid sessions={sessions} bindings={accountBindings} accountId={activeAccountId ?? undefined} onAction={poll} />
+            <SessionGrid sessions={sessions} bindings={accountBindings} accountId={activeAccountId ?? undefined} settlement={data?.settlement} onAction={poll} />
           </div>
 
           {/* Risk Guards */}
@@ -466,7 +468,7 @@ export function WarRoomLayout() {
 
                   {/* Positions table */}
                   <div className="overflow-auto" style={{ height: `${100 - equitySplitPercent}%` }}>
-                    <PositionsTable positions={positions} />
+                    <PositionsTable positions={positions} settlement={data?.settlement} />
                   </div>
                 </div>
               </div>

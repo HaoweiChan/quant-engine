@@ -449,6 +449,18 @@ export interface AccountFill {
   strategy_slug?: string;
 }
 
+export interface SettlementInfo {
+  days_to_settlement: number;
+  settlement_date: string;
+  current_month: string;
+  next_month: string;
+  per_session: Record<string, {
+    holding_period: string;
+    urgency: "none" | "watch" | "imminent" | "overdue";
+    days_to_settlement: number;
+  }>;
+}
+
 export interface WarRoomData {
   accounts: Record<string, {
     display_name: string;
@@ -464,6 +476,7 @@ export interface WarRoomData {
     equity_curve?: { timestamp: string; equity: number }[];
   }>;
   all_sessions: WarRoomSession[];
+  settlement?: SettlementInfo;
   fetched_at?: string;
 }
 

@@ -1,4 +1,5 @@
 import { colors } from "@/lib/theme";
+import type { SettlementInfo } from "@/lib/api";
 
 interface Position {
   symbol: string;
@@ -37,11 +38,16 @@ function strategyLabel(slug: string | undefined): string {
   return slug.split("/").pop() ?? slug;
 }
 
-export function PositionsTable({ positions }: { positions: Position[] }) {
+export function PositionsTable({ positions, settlement }: { positions: Position[]; settlement?: SettlementInfo }) {
   return (
     <div className="rounded h-full flex flex-col" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
-      <div className="text-[10px] p-2 border-b shrink-0" style={{ borderColor: colors.cardBorder, color: colors.muted, fontFamily: "var(--font-mono)" }}>
-        OPEN POSITIONS
+      <div className="flex items-center justify-between text-[10px] p-2 border-b shrink-0" style={{ borderColor: colors.cardBorder, fontFamily: "var(--font-mono)" }}>
+        <span style={{ color: colors.muted }}>OPEN POSITIONS</span>
+        {settlement && (
+          <span style={{ color: colors.blue, fontSize: 8 }}>
+            R1: {settlement.current_month} &rarr; R2: {settlement.next_month}
+          </span>
+        )}
       </div>
       <div className="p-2 overflow-y-auto flex-1">
         {positions.length === 0 ? (

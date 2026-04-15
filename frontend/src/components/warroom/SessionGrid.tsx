@@ -1,16 +1,17 @@
 import { AllocationSlider } from "./AllocationSlider";
 import { SessionCard } from "./SessionCard";
 import { colors } from "@/lib/theme";
-import type { WarRoomSession } from "@/lib/api";
+import type { WarRoomSession, SettlementInfo } from "@/lib/api";
 
 interface SessionGridProps {
   sessions: WarRoomSession[];
   bindings?: { slug: string; symbol: string }[];
   accountId?: string;
+  settlement?: SettlementInfo;
   onAction: () => void;
 }
 
-export function SessionGrid({ sessions, bindings, accountId, onAction }: SessionGridProps) {
+export function SessionGrid({ sessions, bindings, accountId, settlement, onAction }: SessionGridProps) {
   if (sessions.length === 0) {
     return (
       <div className="p-3 text-[9px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
@@ -25,7 +26,14 @@ export function SessionGrid({ sessions, bindings, accountId, onAction }: Session
         <AllocationSlider sessions={sessions} onCommit={onAction} />
       )}
       {sessions.map((s) => (
-        <SessionCard key={s.session_id} session={s} allBindings={bindings} accountId={accountId} onAction={onAction} />
+        <SessionCard
+          key={s.session_id}
+          session={s}
+          allBindings={bindings}
+          accountId={accountId}
+          rollInfo={settlement?.per_session?.[s.session_id]}
+          onAction={onAction}
+        />
       ))}
     </div>
   );
