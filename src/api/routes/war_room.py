@@ -10,7 +10,9 @@ from pathlib import Path
 
 _TAIPEI_TZ = timezone(timedelta(hours=8))
 
-from fastapi import APIRouter
+from collections import deque
+
+from fastapi import APIRouter, Query
 
 from src.api.helpers import get_war_room_data
 
@@ -35,6 +37,250 @@ def _mock_db_path() -> Path:
 
 def _strategy_label(slug: str) -> str:
     return slug.split("/")[-1] if "/" in slug else slug
+
+
+def _get_mock_db_connection() -> sqlite3.Connection:
+    """Open and return a SQLite connection to the mock trading DB."""
+    db_path = _mock_db_path()
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _reconstruct_positions_from_fills(fill_rows: list, as_of: str) -> list[dict]:
+    """Reconstruct open positions at `as_of` via FIFO matching of fills.
+
+    Fill rows must be provided in chronological order (oldest first).
+    Each row must have: strategy_slug, symbol, side, quantity, price, timestamp.
+    """
+    from datetime import datetime as _dt
+
+    # Group fills by (strategy_slug, symbol), sorted chronologically.
+    groups: dict[tuple, list] = {}
+    for row in sorted(fill_rows, key=lambda r: r["timestamp"]):
+        key = (row["strategy_slug"], row["symbol"])
+        groups.setdefault(key, []).append(row)
+
+    positions = []
+    for (slug, symbol), fills in groups.items():
+        # Maintain a deque of open lots: each entry is (qty, price).
+        lots: deque[tuple[int, float]] = deque()
+        net_qty = 0  # positive = long, negative = short
+
+        for fill in fills:
+            side = fill["side"].upper()
+            qty = int(fill["quantity"])
+            price = float(fill["price"])
+
+            # Determine signed delta.
+            delta = qty if side == "BUY" else -qty
+            new_net = net_qty + delta
+
+            if net_qty == 0:
+                # Opening a fresh position.
+                lots.append((qty if delta > 0 else -delta, price))
+            elif (net_qty > 0 and delta > 0) or (net_qty < 0 and delta < 0):
+                # Adding to existing position.
+                lots.append((abs(delta), price))
+            else:
+                # Reducing or flipping.
+                remaining_close = abs(delta)
+                while remaining_close > 0 and lots:
+                    lot_qty, lot_price = lots[0]
+                    if lot_qty <= remaining_close:
+                        remaining_close -= lot_qty
+                        lots.popleft()
+                    else:
+                        lots[0] = (lot_qty - remaining_close, lot_price)
+                        remaining_close = 0
+                # If we flipped through zero, open the new side.
+                if new_net != 0 and not lots:
+                    lots.append((abs(new_net), price))
+
+            net_qty = new_net
+
+        if net_qty == 0 or not lots:
+            continue
+
+        # Compute VWAP of remaining lots.
+        total_qty = sum(q for q, _ in lots)
+        avg_entry = sum(q * p for q, p in lots) / total_qty if total_qty else 0.0
+        # Use the price of the most recent fill as current_price proxy.
+        current_price = float(fills[-1]["price"])
+
+        positions.append(
+            {
+                "symbol": symbol,
+                "side": "BUY" if net_qty > 0 else "SELL",
+                "quantity": abs(net_qty),
+                "avg_entry_price": avg_entry,
+                "current_price": current_price,
+                "unrealized_pnl": 0.0,  # Cannot compute without live price
+                "strategy_slug": slug,
+            }
+        )
+
+    return positions
+
+
+def _load_mock_current(account_id: str) -> dict | None:
+    """Cache-friendly path: return the full mock war-room state with hourly resampling."""
+    return _load_mock_warroom_state(account_id)
+
+
+def _normalize_as_of_to_taipei(as_of: str) -> str:
+    """Convert an as_of timestamp (possibly UTC) to Taipei local ISO format.
+
+    DB timestamps are stored as Taipei local ISO (e.g. '2026-04-01T19:00:59+08:00').
+    The frontend sends UTC ISO strings (e.g. '2026-04-01T11:00:59.000Z').
+    SQLite does string comparison, so we must match the DB format.
+    """
+    from datetime import datetime as _dt
+    raw = as_of.strip()
+    try:
+        dt = _dt.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    taipei_dt = dt.astimezone(_TAIPEI_TZ)
+    return taipei_dt.isoformat()
+
+
+def _load_mock_as_of(account_id: str, as_of: str) -> dict:
+    """Return mock war-room state filtered to `as_of` timestamp.
+
+    Bypasses the cache (both read and write).  Returns raw snapshot points
+    without hourly grid resampling.  Positions are reconstructed from fills
+    via FIFO matching.  Never reads the mock_positions table.
+    """
+    from datetime import datetime as _dt
+
+    as_of = _normalize_as_of_to_taipei(as_of)
+    db_path = _mock_db_path()
+    if not db_path.exists():
+        return {
+            "equity_curve": [],
+            "positions": [],
+            "recent_fills": [],
+            "trade_counts_by_session": {},
+            "equity": 0.0,
+            "per_strategy_latest": {},
+        }
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        session_like = f"mock::{account_id}::%"
+
+        snapshot_rows = conn.execute(
+            """
+            SELECT session_id, strategy_slug, timestamp, equity, unrealized_pnl,
+                   realized_pnl, drawdown_pct, peak_equity, trade_count
+            FROM mock_session_snapshots
+            WHERE timestamp <= ? AND session_id LIKE ?
+            ORDER BY timestamp ASC
+            """,
+            (as_of, session_like),
+        ).fetchall()
+
+        # All fills up to as_of (needed for position reconstruction and recent_fills).
+        all_fill_rows = conn.execute(
+            """
+            SELECT timestamp, account_id, session_id, strategy_slug, symbol,
+                   side, price, quantity, fee, pnl_realized, is_session_close,
+                   signal_reason, triggered
+            FROM mock_fills
+            WHERE account_id = ? AND timestamp <= ?
+            ORDER BY timestamp ASC
+            """,
+            (account_id, as_of),
+        ).fetchall()
+
+        trade_counts_by_session = {
+            row[0]: int(row[1])
+            for row in conn.execute(
+                """
+                SELECT session_id, COUNT(1) FROM mock_fills
+                WHERE account_id = ? AND timestamp <= ?
+                GROUP BY session_id
+                """,
+                (account_id, as_of),
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    if not snapshot_rows:
+        return {
+            "equity_curve": [],
+            "positions": [],
+            "recent_fills": [],
+            "trade_counts_by_session": {},
+            "equity": 0.0,
+            "per_strategy_latest": {},
+        }
+
+    # Build equity curve with forward-fill: carry each strategy's last known
+    # equity so sums are always across ALL strategies, not just those with
+    # a snapshot at that exact timestamp.
+    per_strategy_latest: dict[str, dict] = {}
+    strategy_latest_equity: dict[str, float] = {}
+    all_timestamps: set[str] = set()
+    for row in snapshot_rows:
+        ts = row["timestamp"]
+        slug = row["strategy_slug"]
+        all_timestamps.add(ts)
+        strategy_latest_equity[slug] = float(row["equity"])
+        per_strategy_latest[slug] = {
+            "equity": float(row["equity"]),
+            "unrealized_pnl": float(row["unrealized_pnl"]),
+            "realized_pnl": float(row["realized_pnl"]),
+            "drawdown_pct": float(row["drawdown_pct"]),
+            "peak_equity": float(row["peak_equity"]),
+            "trade_count": int(row["trade_count"]),
+            "timestamp": row["timestamp"],
+            "session_id": row["session_id"],
+        }
+    # Forward-fill equity per strategy across all timestamps
+    ts_equity: dict[str, float] = {}
+    strat_eq: dict[str, float] = {}
+    rows_by_ts: dict[str, dict[str, float]] = {}
+    for row in snapshot_rows:
+        ts = row["timestamp"]
+        rows_by_ts.setdefault(ts, {})[row["strategy_slug"]] = float(row["equity"])
+    for ts in sorted(all_timestamps):
+        for slug, eq in rows_by_ts.get(ts, {}).items():
+            strat_eq[slug] = eq
+        ts_equity[ts] = sum(strat_eq.values())
+    equity_curve = sorted(ts_equity.items())
+
+    # Recent fills: last 200 in descending order for display.
+    recent_fills = [
+        {
+            "timestamp": r["timestamp"],
+            "symbol": r["symbol"],
+            "side": r["side"],
+            "price": float(r["price"]),
+            "quantity": int(r["quantity"]),
+            "fee": float(r["fee"]),
+            "strategy_slug": r["strategy_slug"],
+            "is_session_close": bool(r["is_session_close"]),
+            "signal_reason": r["signal_reason"] or "",
+            "triggered": bool(r["triggered"]),
+        }
+        for r in reversed(all_fill_rows[-200:])
+    ]
+
+    positions = _reconstruct_positions_from_fills(list(all_fill_rows), as_of)
+    latest_equity = equity_curve[-1][1] if equity_curve else 0.0
+
+    return {
+        "equity": latest_equity,
+        "equity_curve": equity_curve,
+        "positions": positions,
+        "recent_fills": recent_fills,
+        "trade_counts_by_session": trade_counts_by_session,
+        "per_strategy_latest": per_strategy_latest,
+    }
 
 
 def _load_mock_warroom_state(account_id: str) -> dict | None:
@@ -360,19 +606,46 @@ def _infer_holding_period(strategy_slug: str) -> str:
     return "short_term"
 
 
-@router.get("/war-room")
-async def war_room() -> dict:
-    # Serve cached response when fresh (absorbs the 5s dashboard poll).
-    now_ts = time.time()
-    cached = _WARROOM_CACHE.get("data")
-    if cached is not None and (now_ts - _WARROOM_CACHE.get("ts", 0.0)) < _WARROOM_CACHE_TTL:
-        return cached
-
-    mock_state: dict | None = None
+@router.get("/war-room/mock-range")
+async def mock_range() -> dict:
+    """Return the min/max timestamps for mock account playback range."""
+    conn = _get_mock_db_connection()
     try:
-        mock_state = _load_mock_warroom_state(_MOCK_ACCOUNT_ID)
-    except Exception:
+        row = conn.execute(
+            """
+            SELECT MIN(timestamp) as min_ts, MAX(timestamp) as max_ts
+            FROM mock_session_snapshots
+            WHERE session_id LIKE 'mock::mock-dev::%'
+            """
+        ).fetchone()
+        if row and row["min_ts"]:
+            return {"min_ts": row["min_ts"], "max_ts": row["max_ts"]}
+        return {"min_ts": None, "max_ts": None}
+    finally:
+        conn.close()
+
+
+@router.get("/war-room")
+async def war_room(as_of: str | None = Query(None)) -> dict:
+    # When as_of is set, bypass cache entirely and return time-filtered state.
+    if as_of is not None:
+        mock_state: dict | None = None
+        try:
+            mock_state = _load_mock_as_of(_MOCK_ACCOUNT_ID, as_of)
+        except Exception:
+            mock_state = None
+    else:
+        # Serve cached response when fresh (absorbs the 5s dashboard poll).
+        now_ts = time.time()
+        cached = _WARROOM_CACHE.get("data")
+        if cached is not None and (now_ts - _WARROOM_CACHE.get("ts", 0.0)) < _WARROOM_CACHE_TTL:
+            return cached
+
         mock_state = None
+        try:
+            mock_state = _load_mock_current(_MOCK_ACCOUNT_ID)
+        except Exception:
+            mock_state = None
 
     fetched_at = datetime.now(_TAIPEI_TZ).isoformat()
     try:
@@ -504,8 +777,8 @@ async def war_room() -> dict:
             except Exception:
                 pass
         deploy_info = _resolve_deployment_info(s)
-        # Override trade_count from mock_fills for mock_dev sessions.
         mock_trade_count = None
+        mock_strategy_snap = None
         if (
             mock_state is not None
             and s.account_id == _MOCK_ACCOUNT_ID
@@ -513,8 +786,45 @@ async def war_room() -> dict:
         ):
             mock_session_id = f"mock::{_MOCK_ACCOUNT_ID}::{s.strategy_slug.replace('/', '__')}"
             mock_trade_count = mock_state["trade_counts_by_session"].get(mock_session_id)
+            psl = mock_state.get("per_strategy_latest", {})
+            mock_strategy_snap = psl.get(s.strategy_slug)
+            # Fallback: short slug → find matching full slug (e.g. "night_session_long" → "short_term/.../night_session_long")
+            if mock_strategy_snap is None:
+                short = s.strategy_slug.split("/")[-1]
+                for full_slug in psl:
+                    if full_slug.split("/")[-1] == short:
+                        mock_strategy_snap = psl[full_slug]
+                        if mock_trade_count is None:
+                            alt_sid = f"mock::{_MOCK_ACCOUNT_ID}::{full_slug.replace('/', '__')}"
+                            mock_trade_count = mock_state["trade_counts_by_session"].get(alt_sid)
+                        break
+        # During playback (as_of), prefer mock per-strategy snapshot over live snapshot.
+        # If in playback mode with a mock account but no mock data yet, return zeros
+        # instead of live data (which would be identical across strategies).
         snapshot_block: dict | None = None
-        if snap:
+        is_playback_mock = as_of and s.account_id == _MOCK_ACCOUNT_ID
+        if mock_strategy_snap is not None:
+            snapshot_block = {
+                "equity": mock_strategy_snap["equity"],
+                "unrealized_pnl": mock_strategy_snap["unrealized_pnl"],
+                "realized_pnl": mock_strategy_snap["realized_pnl"],
+                "drawdown_pct": mock_strategy_snap["drawdown_pct"],
+                "trade_count": mock_trade_count if mock_trade_count is not None else mock_strategy_snap["trade_count"],
+                "positions": [
+                    p for p in (mock_state.get("positions") or [])
+                    if p.get("strategy_slug") == s.strategy_slug
+                ],
+            }
+        elif is_playback_mock:
+            snapshot_block = {
+                "equity": 0,
+                "unrealized_pnl": 0,
+                "realized_pnl": 0,
+                "drawdown_pct": 0,
+                "trade_count": mock_trade_count or 0,
+                "positions": [],
+            }
+        elif snap:
             snapshot_block = {
                 "equity": snap.equity,
                 "unrealized_pnl": snap.unrealized_pnl,
@@ -562,6 +872,8 @@ async def war_room() -> dict:
         "settlement": settlement_block,
         "fetched_at": fetched_at,
     }
-    _WARROOM_CACHE["data"] = response
-    _WARROOM_CACHE["ts"] = now_ts
+    # Only populate the cache on the non-time-travel path.
+    if as_of is None:
+        _WARROOM_CACHE["data"] = response
+        _WARROOM_CACHE["ts"] = now_ts
     return response
