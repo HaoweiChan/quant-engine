@@ -81,3 +81,52 @@ def format_trade(result: ExecutionResult) -> str:
     if reason.startswith("add"):
         return format_add_position(result)
     return format_exit(result)
+
+
+def format_roll_window_open(
+    symbol: str,
+    holding_period: str,
+    days_to_settlement: int,
+    spread: float | None = None,
+) -> str:
+    spread_info = f"\nCurrent spread: {spread:+.1f} pts" if spread is not None else ""
+    return (
+        f"<b>ROLL WINDOW OPEN</b>\n"
+        f"Symbol: {symbol}  ({holding_period})\n"
+        f"Settlement in {days_to_settlement} days{spread_info}\n"
+        f"Monitoring for optimal spread..."
+    )
+
+
+def format_roll_executed(
+    symbol: str,
+    strategy_slug: str,
+    old_contract: str,
+    new_contract: str,
+    lots: float,
+    spread_cost: float,
+    trigger: str,
+) -> str:
+    return (
+        f"<b>CONTRACT ROLLED</b>\n"
+        f"Symbol: {symbol}\n"
+        f"Strategy: {strategy_slug}\n"
+        f"{old_contract} -> {new_contract}\n"
+        f"Lots: {lots}  Spread cost: {spread_cost:,.0f}\n"
+        f"Trigger: {trigger}"
+    )
+
+
+def format_settlement_warning(
+    symbol: str,
+    days_remaining: int,
+    open_lots: float,
+) -> str:
+    urgency = "CRITICAL" if days_remaining <= 1 else "WARNING"
+    return (
+        f"<b>SETTLEMENT {urgency}</b>\n"
+        f"Symbol: {symbol}\n"
+        f"Settlement in {days_remaining} day(s)\n"
+        f"Open lots: {open_lots}\n"
+        f"Roll required before settlement!"
+    )

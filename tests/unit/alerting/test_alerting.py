@@ -12,6 +12,9 @@ from src.alerting.formatters import (
     format_exit,
     format_pre_trade_rejection,
     format_risk_alert,
+    format_roll_executed,
+    format_roll_window_open,
+    format_settlement_warning,
     format_trade,
 )
 from src.core.types import Order, RiskAction
@@ -149,3 +152,35 @@ class TestDispatcher:
             )
             assert ok is True
             mock_client.post.assert_called_once()
+
+
+class TestRollFormatters:
+    def test_roll_window_open(self) -> None:
+        msg = format_roll_window_open("TX", "swing", 7, spread=50.0)
+        assert "ROLL WINDOW OPEN" in msg
+        assert "TX" in msg
+        assert "7 days" in msg
+        assert "+50.0" in msg
+
+    def test_roll_window_open_no_spread(self) -> None:
+        msg = format_roll_window_open("TX", "medium_term", 4)
+        assert "ROLL WINDOW OPEN" in msg
+        assert "spread" not in msg.lower().split("monitoring")[0]
+
+    def test_roll_executed(self) -> None:
+        msg = format_roll_executed(
+            "TX", "swing/trend/vol_managed", "TXFR1", "TXFR2",
+            lots=2.0, spread_cost=20000.0, trigger="favorable_spread",
+        )
+        assert "CONTRACT ROLLED" in msg
+        assert "TXFR1 -> TXFR2" in msg
+        assert "20,000" in msg
+
+    def test_settlement_warning(self) -> None:
+        msg = format_settlement_warning("TX", 1, 3.0)
+        assert "CRITICAL" in msg
+        assert "1 day" in msg
+
+    def test_settlement_warning_non_critical(self) -> None:
+        msg = format_settlement_warning("TX", 3, 2.0)
+        assert "WARNING" in msg

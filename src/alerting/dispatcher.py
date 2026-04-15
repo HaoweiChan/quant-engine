@@ -40,5 +40,49 @@ class NotificationDispatcher:
 
         return await self.dispatch(format_pre_trade_rejection(event))
 
+    async def dispatch_roll_window_open(
+        self,
+        symbol: str,
+        holding_period: str,
+        days_to_settlement: int,
+        spread: float | None = None,
+    ) -> bool:
+        from src.alerting.formatters import format_roll_window_open
+
+        return await self.dispatch(
+            format_roll_window_open(symbol, holding_period, days_to_settlement, spread)
+        )
+
+    async def dispatch_roll_executed(
+        self,
+        symbol: str,
+        strategy_slug: str,
+        old_contract: str,
+        new_contract: str,
+        lots: float,
+        spread_cost: float,
+        trigger: str,
+    ) -> bool:
+        from src.alerting.formatters import format_roll_executed
+
+        return await self.dispatch(
+            format_roll_executed(
+                symbol, strategy_slug, old_contract, new_contract,
+                lots, spread_cost, trigger,
+            )
+        )
+
+    async def dispatch_settlement_warning(
+        self,
+        symbol: str,
+        days_remaining: int,
+        open_lots: float,
+    ) -> bool:
+        from src.alerting.formatters import format_settlement_warning
+
+        return await self.dispatch(
+            format_settlement_warning(symbol, days_remaining, open_lots)
+        )
+
     async def close(self) -> None:
         await self._client.aclose()
