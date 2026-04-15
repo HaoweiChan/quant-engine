@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { colors } from "@/lib/theme";
 import { startSession, stopSession, flattenSession, updateAccountStrategies } from "@/lib/api";
 import { useWarRoomStore } from "@/stores/warRoomStore";
@@ -35,10 +35,23 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const isSelected = selectedSessionId === session.session_id;
   const isRunning = session.status === "active" || session.status === "paused";
   const isStuck = session.status === "halted" || session.status === "flattening";
   const snap = session.snapshot;
+
+  const extMetrics = useMemo(() => {
+    const bm = session.backtest_metrics;
+    if (!bm) return null;
+    return {
+      sharpe: bm.sharpe?.toFixed(2) ?? "—",
+      sortino: bm.sortino?.toFixed(2) ?? "—",
+      winRate: bm.win_rate != null ? `${(bm.win_rate * 100).toFixed(0)}%` : "—",
+      maxDD: bm.max_drawdown_pct != null ? `${bm.max_drawdown_pct.toFixed(1)}%` : "—",
+      pf: bm.profit_factor?.toFixed(2) ?? "—",
+    };
+  }, [session.backtest_metrics]);
 
   const statusColor = session.status === "active" ? colors.green
     : session.status === "paused" ? colors.gold
@@ -111,13 +124,13 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
       }}
     >
       {/* Header: status + name */}
-      <div className="flex items-center justify-between mb-1">
+      <div className="flex items-center justify-between mb-1.5">
         <div className="flex items-center gap-1.5">
-          <span style={{ color: statusColor, fontSize: 8 }}>{statusIcon}</span>
-          <span className="text-[10px] font-medium" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
+          <span style={{ color: statusColor, fontSize: 10 }}>{statusIcon}</span>
+          <span className="text-[12px] font-medium" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
             {session.strategy_slug.split("/").pop()}
           </span>
-          <span className="text-[9px]" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>
+          <span className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>
             &middot; {session.symbol}
           </span>
         </div>
@@ -131,7 +144,7 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
             />
           )}
           {session.is_stale && (
-            <span className="text-[7px] px-1 py-0.5 rounded" style={{ background: "rgba(255,165,0,0.12)", color: colors.orange, fontFamily: "var(--font-mono)" }}>
+            <span className="text-[9px] px-1.5 py-0.5 rounded" style={{ background: "rgba(255,165,0,0.12)", color: colors.orange, fontFamily: "var(--font-mono)" }}>
               NEW
             </span>
           )}
@@ -139,7 +152,7 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
             <button
               onClick={handleRemoveClick}
               disabled={loading}
-              className="cursor-pointer border-none bg-transparent text-[10px] leading-none px-0.5"
+              className="cursor-pointer border-none bg-transparent text-[12px] leading-none px-0.5"
               style={{ color: colors.dim }}
               title="Remove strategy"
             >
@@ -150,31 +163,53 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
       </div>
 
       {/* Metrics line */}
-      {snap && (
-        <div className="flex gap-2.5 text-[8px] mb-1.5" style={{ fontFamily: "var(--font-mono)" }}>
-          <span style={{ color: snap.unrealized_pnl >= 0 ? colors.green : colors.red }}>
-            PnL {snap.unrealized_pnl >= 0 ? "+" : ""}${Math.round(snap.unrealized_pnl).toLocaleString()}
+      {snap && (() => {
+        const totalPnl = (snap.realized_pnl ?? 0) + snap.unrealized_pnl;
+        return (
+        <>
+        <div className="flex gap-3 text-[10px] mb-1" style={{ fontFamily: "var(--font-mono)" }}>
+          <span style={{ color: totalPnl >= 0 ? colors.green : colors.red }}>
+            PnL {totalPnl >= 0 ? "+" : ""}${Math.round(totalPnl).toLocaleString()}
           </span>
           <span style={{ color: snap.drawdown_pct > 5 ? colors.red : colors.muted }}>
             DD {snap.drawdown_pct.toFixed(1)}%
           </span>
           <span style={{ color: colors.muted }}>
-            {snap.trade_count.toLocaleString()} trades
+            Trades {snap.trade_count.toLocaleString()}
           </span>
           <span style={{ color: colors.blue }}>
-            alloc {Math.round((session.equity_share ?? 1) * 100)}%
+            Alloc {Math.round((session.equity_share ?? 1) * 100)}%
           </span>
+          {extMetrics && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+              className="border-none bg-transparent cursor-pointer p-0 ml-auto"
+              style={{ color: colors.dim, fontSize: 10, fontFamily: "var(--font-mono)" }}
+            >
+              {expanded ? "▾" : "▸"}
+            </button>
+          )}
         </div>
-      )}
+        {expanded && extMetrics && (
+          <div className="flex gap-3 text-[10px] mb-1" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
+            <span>Sharpe <span style={{ color: colors.text }}>{extMetrics.sharpe}</span></span>
+            <span>Sortino <span style={{ color: colors.text }}>{extMetrics.sortino}</span></span>
+            <span>WR <span style={{ color: colors.text }}>{extMetrics.winRate}</span></span>
+            <span>PF <span style={{ color: colors.text }}>{extMetrics.pf}</span></span>
+          </div>
+        )}
+        </>
+        );
+      })()}
       {!snap && (
-        <div className="text-[8px] mb-1.5" style={{ fontFamily: "var(--font-mono)", color: colors.blue }}>
-          alloc {Math.round((session.equity_share ?? 1) * 100)}%
+        <div className="text-[10px] mb-1" style={{ fontFamily: "var(--font-mono)", color: colors.blue }}>
+          Alloc {Math.round((session.equity_share ?? 1) * 100)}%
         </div>
       )}
 
       {/* Error feedback */}
       {error && (
-        <div className="text-[7px] px-1.5 py-0.5 rounded mb-1" style={{ background: "rgba(255,82,82,0.12)", color: colors.red, fontFamily: "var(--font-mono)" }}>
+        <div className="text-[9px] px-1.5 py-0.5 rounded mb-1" style={{ background: "rgba(255,82,82,0.12)", color: colors.red, fontFamily: "var(--font-mono)" }}>
           {error}
         </div>
       )}
@@ -184,7 +219,7 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
         <button
           onClick={handleToggle}
           disabled={loading}
-          className="flex-1 text-[7px] font-semibold py-1 rounded text-white cursor-pointer border-none"
+          className="flex-1 text-[9px] font-semibold py-1.5 rounded text-white cursor-pointer border-none"
           style={{
             background: isRunning ? colors.red : isStuck ? colors.orange : colors.green,
             letterSpacing: "0.5px",
@@ -196,7 +231,7 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
         </button>
         <button
           onClick={handleParams}
-          className="flex-1 text-[7px] font-semibold py-1 rounded cursor-pointer border-none"
+          className="flex-1 text-[9px] font-semibold py-1.5 rounded cursor-pointer border-none"
           style={{
             background: hasParams ? "rgba(90,138,242,0.25)" : "rgba(90,138,242,0.1)",
             color: hasParams ? "#fff" : colors.blue,

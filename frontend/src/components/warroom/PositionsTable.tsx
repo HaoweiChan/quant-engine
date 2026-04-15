@@ -41,19 +41,19 @@ function strategyLabel(slug: string | undefined): string {
 export function PositionsTable({ positions, settlement }: { positions: Position[]; settlement?: SettlementInfo }) {
   return (
     <div className="rounded h-full flex flex-col" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
-      <div className="flex items-center justify-between text-[10px] p-2 border-b shrink-0" style={{ borderColor: colors.cardBorder, fontFamily: "var(--font-mono)" }}>
+      <div className="flex items-center justify-between text-[11px] p-2 border-b shrink-0" style={{ borderColor: colors.cardBorder, fontFamily: "var(--font-mono)" }}>
         <span style={{ color: colors.muted }}>OPEN POSITIONS</span>
         {settlement && (
-          <span style={{ color: colors.blue, fontSize: 8 }}>
+          <span style={{ color: colors.blue, fontSize: 9 }}>
             R1: {settlement.current_month} &rarr; R2: {settlement.next_month}
           </span>
         )}
       </div>
       <div className="p-2 overflow-y-auto flex-1">
         {positions.length === 0 ? (
-          <div className="text-[9px] py-2 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No open positions.</div>
+          <div className="text-[11px] py-2 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No open positions.</div>
         ) : (
-          <table className="w-full text-[9px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }} data-testid="positions-table">
+          <table className="w-full text-[11px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }} data-testid="positions-table">
             <thead>
               <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
                 {["Sym", "Strategy", "Side", "Qty", "Entry", "Current", "UnPnL"].map((h) => (

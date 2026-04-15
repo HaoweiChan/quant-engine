@@ -38,14 +38,14 @@ function strategyLabel(slug: string | undefined): string {
 export function TradesTable({ fills }: { fills: Fill[] }) {
   return (
     <div className="rounded h-full flex flex-col" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
-      <div className="text-[10px] p-2 border-b shrink-0" style={{ borderColor: colors.cardBorder, color: colors.muted, fontFamily: "var(--font-mono)" }}>
+      <div className="text-[11px] p-2 border-b shrink-0" style={{ borderColor: colors.cardBorder, color: colors.muted, fontFamily: "var(--font-mono)" }}>
         RECENT TRADES
       </div>
       <div className="p-2 overflow-y-auto flex-1">
         {fills.length === 0 ? (
-          <div className="text-[9px] py-2 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No recent trades.</div>
+          <div className="text-[11px] py-2 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No recent trades.</div>
         ) : (
-          <table className="w-full text-[9px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }} data-testid="trades-table">
+          <table className="w-full text-[11px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }} data-testid="trades-table">
             <thead>
               <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
                 {["Time", "Sym", "Strategy", "Side", "Price", "Qty", "Fee"].map((h) => (

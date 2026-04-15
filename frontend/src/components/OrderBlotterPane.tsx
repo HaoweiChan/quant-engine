@@ -1,5 +1,7 @@
+import { useMemo } from "react";
 import { useBlotter } from "@/hooks/useBlotter";
 import type { BlotterEvent } from "@/hooks/useBlotter";
+import type { AccountFill } from "@/lib/api";
 import { colors, pnlColor } from "@/lib/theme";
 
 
@@ -37,31 +39,53 @@ function fmtTime(ts: number): string {
   return new Date(ts * 1000).toLocaleTimeString(undefined, { hour12: false });
 }
 
-export function OrderBlotterPane() {
-  const { events, connected } = useBlotter();
+interface OrderBlotterPaneProps {
+  playbackFills?: AccountFill[];
+}
+
+export function OrderBlotterPane({ playbackFills }: OrderBlotterPaneProps = {}) {
+  const { events: liveEvents, connected } = useBlotter();
+
+  const playbackEvents: BlotterEvent[] = useMemo(() => {
+    if (!playbackFills || playbackFills.length === 0) return [];
+    return playbackFills.map((f) => ({
+      type: "fill" as const,
+      symbol: f.symbol,
+      side: (f.side === "Buy" || f.side === "buy" ? "buy" : "sell") as "buy" | "sell",
+      qty: f.quantity,
+      price: f.price,
+      timestamp: Math.floor(new Date(f.timestamp).getTime() / 1000),
+      strategy_slug: f.strategy_slug,
+      signal_reason: "",
+      triggered: true,
+    }));
+  }, [playbackFills]);
+
+  const events = playbackFills && playbackFills.length > 0 ? playbackEvents : liveEvents;
+  const isPlayback = playbackFills !== undefined && playbackFills.length > 0;
 
   return (
     <div className="overflow-y-auto" style={{ maxHeight: 320 }}>
       <div className="flex items-center justify-between mb-1.5 px-1">
-        <span className="text-[9px] font-semibold" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+        <span className="text-[11px] font-semibold" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
           ORDER BLOTTER
         </span>
-        <span className="flex items-center gap-1 text-[8px]" style={{ fontFamily: "var(--font-mono)" }}>
+          <span className="flex items-center gap-1 text-[10px]" style={{ fontFamily: "var(--font-mono)" }}>
           <span
             className="inline-block w-1.5 h-1.5 rounded-full"
-            style={{ background: connected ? colors.green : colors.red }}
+            style={{ background: isPlayback ? colors.cyan : connected ? colors.green : colors.red }}
           />
-          <span style={{ color: connected ? colors.dim : colors.red }}>
-            {connected ? "LIVE" : "DISCONNECTED"}
+          <span style={{ color: isPlayback ? colors.cyan : connected ? colors.dim : colors.red }}>
+            {isPlayback ? "PLAYBACK" : connected ? "LIVE" : "DISCONNECTED"}
           </span>
         </span>
       </div>
       {events.length === 0 ? (
-        <div className="text-[10px] py-3 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+        <div className="text-[11px] py-3 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
           No events yet.
         </div>
       ) : (
-        <table className="w-full text-[9px]" style={{ fontFamily: "var(--font-mono)" }}>
+        <table className="w-full text-[11px]" style={{ fontFamily: "var(--font-mono)" }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
               <th className="text-left py-0.5 px-1" style={{ color: colors.dim }}>Time</th>

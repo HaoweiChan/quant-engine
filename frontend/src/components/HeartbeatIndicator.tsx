@@ -47,7 +47,7 @@ export function HeartbeatIndicator() {
             className="inline-block w-1.5 h-1.5 rounded-full"
             style={{ background: latencyColor(b.latency_ms) }}
           />
-          <span style={{ color: colors.muted }}>{b.broker}</span>
+          <span style={{ color: colors.muted }}>{b.account_id}</span>
           <span style={{ color: latencyColor(b.latency_ms) }}>
             {b.latency_ms !== null ? `${b.latency_ms}ms` : "DOWN"}
           </span>

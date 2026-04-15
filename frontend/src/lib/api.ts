@@ -413,6 +413,7 @@ export interface WarRoomSession {
   snapshot: {
     equity: number;
     unrealized_pnl: number;
+    realized_pnl: number;
     drawdown_pct: number;
     trade_count: number;
     instrument?: string;
@@ -492,8 +493,17 @@ export interface DeployLogEntry {
   source: string;
 }
 
-export async function fetchWarRoomTyped(): Promise<WarRoomData> {
-  return fetchJSON("/api/war-room");
+export async function fetchWarRoomTyped(opts?: { asOf?: string }): Promise<WarRoomData> {
+  const params = new URLSearchParams();
+  if (opts?.asOf) {
+    params.set("as_of", opts.asOf);
+  }
+  const url = params.toString() ? `/api/war-room?${params}` : "/api/war-room";
+  return fetchJSON(url);
+}
+
+export async function fetchWarRoomMockRange(): Promise<{ min_ts: string | null; max_ts: string | null }> {
+  return fetchJSON("/api/war-room/mock-range");
 }
 
 export async function deployToAccount(

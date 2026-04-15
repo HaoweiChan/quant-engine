@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { colors } from "@/lib/theme";
 import { updateEquityShare, batchUpdateEquityShare } from "@/lib/api";
@@ -21,14 +21,17 @@ interface AllocationSliderProps {
  */
 export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) {
   const [pendingShares, setPendingShares] = useState<Record<string, number>>({});
-  // Separate text draft for free-form input (only used for 3+ strategies)
   const [draftPct, setDraftPct] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const prevSharesRef = useRef<string>("");
 
-  // Whenever the upstream sessions change (e.g. after a poll), refresh the
-  // local pending state so we don't show stale values post-commit.
+  // Only reset local state when upstream equity_share values actually change,
+  // not on every poll. Prevents overwriting the user's in-progress edits.
   useEffect(() => {
+    const shareKey = sessions.map((s) => `${s.session_id}:${s.equity_share}`).join(",");
+    if (shareKey === prevSharesRef.current) return;
+    prevSharesRef.current = shareKey;
     const next: Record<string, number> = {};
     const nextDraft: Record<string, string> = {};
     for (const s of sessions) {
@@ -45,7 +48,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
     const s = sessions[0];
     return (
       <div
-        className="text-[9px] px-2 py-1 rounded"
+        className="text-[11px] px-2 py-1.5 rounded"
         style={{
           background: colors.card,
           border: `1px solid ${colors.cardBorder}`,
@@ -150,12 +153,12 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
         }}
       >
         <div
-          className="text-[8px] font-semibold tracking-wider"
+          className="text-[10px] font-semibold tracking-wider"
           style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}
         >
           ALLOCATION ({sessions.length} strategies)
         </div>
-        <div className="flex flex-col gap-1">
+        <div className="flex flex-col gap-1.5">
           {sessions.map((s) => {
             const draft = draftPct[s.session_id] ?? String(Math.round(s.equity_share * 100));
             const parsed = parseInt(draft, 10);
@@ -166,7 +169,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
                 className="flex items-center justify-between gap-2"
               >
                 <span
-                  className="text-[9px] flex-1 truncate"
+                  className="text-[11px] flex-1 truncate"
                   style={{ color: colors.text, fontFamily: "var(--font-mono)" }}
                   title={s.strategy_slug}
                 >
@@ -179,7 +182,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
                     value={draft}
                     onChange={(e) => handleDraftChange(s.session_id, e.target.value)}
                     disabled={busy}
-                    className="w-12 text-right text-[9px] px-1 py-0.5 rounded border-none"
+                    className="w-14 text-right text-[11px] px-1.5 py-1 rounded border-none"
                     style={{
                       background: "var(--color-qe-input)",
                       color: isInvalid ? colors.red : colors.text,
@@ -187,7 +190,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
                     }}
                   />
                   <span
-                    className="text-[9px]"
+                    className="text-[11px]"
                     style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}
                   >
                     %
@@ -199,7 +202,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
         </div>
         <div className="flex items-center justify-between">
           <span
-            className="text-[8px]"
+            className="text-[10px]"
             style={{
               color: canApply ? colors.green : colors.red,
               fontFamily: "var(--font-mono)",
@@ -212,7 +215,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
             type="button"
             onClick={handleCommit}
             disabled={!hasChanges || !canApply || anyBelowMin || busy}
-            className="text-[8px] font-semibold py-0.5 px-2 rounded cursor-pointer border-none"
+            className="text-[10px] font-semibold py-1 px-3 rounded cursor-pointer border-none"
             style={{
               background: hasChanges && canApply && !anyBelowMin ? colors.green : "rgba(255,255,255,0.08)",
               color: hasChanges && canApply && !anyBelowMin ? "#fff" : colors.dim,
@@ -225,7 +228,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
         </div>
         {error && (
           <div
-            className="text-[8px] px-1.5 py-0.5 rounded"
+            className="text-[9px] px-1.5 py-0.5 rounded"
             style={{
               background: "rgba(255,82,82,0.12)",
               color: colors.red,
@@ -247,14 +250,14 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
 
   return (
     <div
-      className="flex flex-col gap-1 p-2 rounded"
+      className="flex flex-col gap-1.5 p-2 rounded"
       style={{
         background: colors.card,
         border: `1px solid ${colors.cardBorder}`,
       }}
     >
       <div
-        className="flex items-center justify-between text-[9px]"
+        className="flex items-center justify-between text-[11px]"
         style={{ fontFamily: "var(--font-mono)" }}
       >
         <span style={{ color: colors.text }}>
@@ -268,8 +271,8 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
       </div>
       <div className="flex items-center gap-1.5">
         <span
-          className="text-[10px] font-semibold"
-          style={{ color: colors.green, fontFamily: "var(--font-mono)", minWidth: 24 }}
+          className="text-[12px] font-semibold"
+          style={{ color: colors.green, fontFamily: "var(--font-mono)", minWidth: 28 }}
         >
           {firstPct}%
         </span>
@@ -284,15 +287,15 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
           style={{ accentColor: colors.green }}
         />
         <span
-          className="text-[10px] font-semibold"
-          style={{ color: colors.blue, fontFamily: "var(--font-mono)", minWidth: 24 }}
+          className="text-[12px] font-semibold"
+          style={{ color: colors.blue, fontFamily: "var(--font-mono)", minWidth: 28 }}
         >
           {secondPct}%
         </span>
       </div>
       {error && (
         <div
-          className="text-[8px] px-1.5 py-0.5 rounded"
+          className="text-[9px] px-1.5 py-0.5 rounded"
           style={{
             background: "rgba(255,82,82,0.12)",
             color: colors.red,
@@ -307,7 +310,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
           type="button"
           onClick={handleCommit}
           disabled={!hasChanges || busy}
-          className="text-[8px] font-semibold py-0.5 px-2 rounded cursor-pointer border-none"
+          className="text-[10px] font-semibold py-1 px-3 rounded cursor-pointer border-none"
           style={{
             background: hasChanges ? colors.green : "rgba(255,255,255,0.08)",
             color: hasChanges ? "#fff" : colors.dim,
