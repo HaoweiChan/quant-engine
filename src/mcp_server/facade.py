@@ -345,6 +345,60 @@ def _aggregate_bars(raw, bar_agg: int):
     return aggregated
 
 
+def _get_spread_meta(strategy_slug: str) -> dict | None:
+    """Return spread_legs metadata if strategy is a spread strategy, else None."""
+    try:
+        from src.strategies.registry import get_info
+        info = get_info(strategy_slug)
+        legs = info.meta.get("spread_legs")
+        if legs and len(legs) == 2:
+            return info.meta
+    except (KeyError, AttributeError):
+        pass
+    return None
+
+
+def _build_spread_bars(db, leg1_sym: str, leg2_sym: str, start, end, bar_agg: int = 1):
+    """Construct synthetic spread bars: price = leg1 - leg2 + offset.
+
+    The spread (R1-R2) can be negative, but MarketSnapshot requires price>0.
+    A constant offset shifts all values positive without affecting z-score
+    signals (z = (x-mean)/std is shift-invariant).
+    """
+    from src.data.db import OHLCVBar
+    r1_raw = _load_bars_for_tf(db, leg1_sym, start, end, bar_agg)
+    r2_raw = _load_bars_for_tf(db, leg2_sym, start, end, bar_agg)
+    if not r1_raw or not r2_raw:
+        return None, f"Missing data: {leg1_sym}={len(r1_raw or [])} bars, {leg2_sym}={len(r2_raw or [])} bars"
+    r2_map = {b.timestamp: b for b in r2_raw}
+    # First pass: find min spread to determine offset
+    raw_closes = []
+    for b1 in r1_raw:
+        b2 = r2_map.get(b1.timestamp)
+        if b2 is not None:
+            raw_closes.append(b1.close - b2.close)
+    if not raw_closes:
+        return None, "No overlapping timestamps between legs"
+    offset = max(-min(raw_closes) + 100.0, 0.0)
+    # Second pass: build bars with offset applied
+    spread_bars = []
+    for b1 in r1_raw:
+        b2 = r2_map.get(b1.timestamp)
+        if b2 is None:
+            continue
+        sc = b1.close - b2.close + offset
+        so = b1.open - b2.open + offset
+        spread_bars.append(OHLCVBar(
+            timestamp=b1.timestamp,
+            open=so,
+            high=max(sc, so),
+            low=min(sc, so),
+            close=sc,
+            volume=min(b1.volume, b2.volume),
+        ))
+    return spread_bars, None
+
+
 def _build_runner(
     strategy: str,
     strategy_params: dict[str, Any] | None,
@@ -352,6 +406,7 @@ def _build_runner(
     fill_model=None,
     initial_equity: float = 2_000_000.0,
     instrument: str | None = None,
+    spread_meta: dict | None = None,
 ):
     """Build a BacktestRunner for any strategy. Single source of truth."""
     from src.simulator.backtester import BacktestRunner
@@ -371,7 +426,17 @@ def _build_runner(
     commission_fixed = float(merged.pop(
         "commission_fixed_per_contract", cost_config.commission_per_contract
     ))
-    if fill_model is None:
+    # Spread strategies: override cost model (4 legs, fixed per-fill cost)
+    if spread_meta and fill_model is None:
+        cost_per_fill = spread_meta.get("spread_cost_per_fill", 700.0)
+        impact_params = ImpactParams(
+            spread_bps=0.0,
+            commission_bps=0.0,
+            commission_fixed_per_contract=cost_per_fill,
+            k=0.0,
+        )
+        fm = MarketImpactFillModel(params=impact_params)
+    elif fill_model is None:
         impact_params = ImpactParams(
             spread_bps=slippage_bps,
             commission_bps=commission_bps,
@@ -686,9 +751,15 @@ def run_backtest_realdata_for_mcp(
     if cached is not None:
         return cached
 
-    # Load bars — use pre-aggregated table when available (5m, 1h),
-    # fall back to 1m + Python aggregation for other timeframes.
-    raw = _load_bars_for_tf(db, symbol, start_dt, end_dt, bar_agg)
+    # Spread strategies: construct synthetic bars from two legs
+    spread_meta = _get_spread_meta(resolved_slug)
+    if spread_meta:
+        legs = spread_meta["spread_legs"]
+        raw, err = _build_spread_bars(db, legs[0], legs[1], start_dt, end_dt, bar_agg)
+        if err:
+            return {"error": f"Spread bar construction failed: {err}"}
+    else:
+        raw = _load_bars_for_tf(db, symbol, start_dt, end_dt, bar_agg)
     if not raw:
         return {"error": f"No data for {symbol} in {start}–{end}"}
 
@@ -713,6 +784,7 @@ def run_backtest_realdata_for_mcp(
         periods_per_year=periods_per_year,
         initial_equity=initial_equity,
         instrument=symbol,
+        spread_meta=spread_meta,
     )
 
     bars = [
@@ -1328,12 +1400,17 @@ def run_sweep_for_mcp(
         if not db_path.exists():
             return {"error": f"Database not found at {db_path}"}
         db = Database(f"sqlite:///{db_path}")
-        # Load bars — use pre-aggregated table when available
-        raw = _load_bars_for_tf(
-            db, symbol,
-            datetime.fromisoformat(start), datetime.fromisoformat(end),
-            sweep_bar_agg,
-        )
+        start_dt = datetime.fromisoformat(start)
+        end_dt = datetime.fromisoformat(end)
+        # Spread-aware bar loading
+        sweep_spread_meta = _get_spread_meta(resolved_slug)
+        if sweep_spread_meta:
+            legs = sweep_spread_meta["spread_legs"]
+            raw, err = _build_spread_bars(db, legs[0], legs[1], start_dt, end_dt, sweep_bar_agg)
+            if err:
+                return {"error": f"Spread bar construction failed: {err}"}
+        else:
+            raw = _load_bars_for_tf(db, symbol, start_dt, end_dt, sweep_bar_agg)
         if not raw:
             return {"error": f"No data for {symbol} in {start}–{end}"}
         # Compute true daily ATR from bar high-low ranges
@@ -1377,8 +1454,18 @@ def run_sweep_for_mcp(
 
     adapter = _get_adapter()
     factory = resolve_factory(resolved_slug)
+    # Use spread-aware fill model when applicable
+    sweep_fill_model = None
+    if sweep_spread_meta:
+        from src.simulator.fill_model import ImpactParams, MarketImpactFillModel
+        cost_per_fill = sweep_spread_meta.get("spread_cost_per_fill", 700.0)
+        sweep_fill_model = MarketImpactFillModel(params=ImpactParams(
+            spread_bps=0.0, commission_bps=0.0,
+            commission_fixed_per_contract=cost_per_fill, k=0.0,
+        ))
     optimizer = StrategyOptimizer(
         adapter,
+        fill_model=sweep_fill_model,
         mode=mode,
         min_trade_count=min_trade_count,
         min_expectancy=min_expectancy,
@@ -1508,6 +1595,7 @@ def run_sweep_for_mcp(
                 resolved_slug, {**clamped_base, **result.best_params},
                 periods_per_year=_fp_ppy,
                 instrument=symbol,
+                spread_meta=sweep_spread_meta,
             )
             full_result = full_runner.run(
                 bars, timestamps=timestamps, force_flat_indices=sweep_force_flat,
@@ -1842,8 +1930,15 @@ def run_walk_forward_for_mcp(
     meta_bar_agg = get_bar_agg(resolved_slug)
     bar_agg = int((strategy_params or {}).get("bar_agg", meta_bar_agg))
 
-    # Load bars — use pre-aggregated table when available
-    raw = _load_bars_for_tf(db, symbol, start_dt, end_dt, bar_agg)
+    # Spread-aware bar loading
+    wf_spread_meta = _get_spread_meta(resolved_slug)
+    if wf_spread_meta:
+        legs = wf_spread_meta["spread_legs"]
+        raw, err = _build_spread_bars(db, legs[0], legs[1], start_dt, end_dt, bar_agg)
+        if err:
+            return {"error": f"Spread bar construction failed: {err}"}
+    else:
+        raw = _load_bars_for_tf(db, symbol, start_dt, end_dt, bar_agg)
     if not raw:
         return {"error": f"No data for {symbol} in {start}–{end}"}
 
@@ -1901,6 +1996,7 @@ def run_walk_forward_for_mcp(
         is_runner = _build_runner(
             resolved_slug, strategy_params, periods_per_year=ppy,
             initial_equity=initial_equity, instrument=symbol,
+            spread_meta=wf_spread_meta,
         )
         is_force_flat: set[int] | None = None
         if is_intraday:
@@ -1912,6 +2008,7 @@ def run_walk_forward_for_mcp(
         oos_runner = _build_runner(
             resolved_slug, strategy_params, periods_per_year=ppy,
             initial_equity=initial_equity, instrument=symbol,
+            spread_meta=wf_spread_meta,
         )
         oos_force_flat: set[int] | None = None
         if is_intraday:

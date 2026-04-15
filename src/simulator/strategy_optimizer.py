@@ -86,6 +86,14 @@ def _load_bars(path: str) -> tuple[list, list, set | None]:
 # Module-level worker (must be picklable for ProcessPoolExecutor)
 # ---------------------------------------------------------------------------
 
+def _rebuild_fill_model(fill_model_kwargs: dict[str, Any] | None) -> MarketImpactFillModel:
+    """Reconstruct a fill model from serialized ImpactParams kwargs."""
+    if not fill_model_kwargs:
+        return MarketImpactFillModel()
+    from src.core.types import ImpactParams
+    return MarketImpactFillModel(params=ImpactParams(**fill_model_kwargs))
+
+
 def _run_single_trial(
     bars_path: str,
     factory_module: str,
@@ -96,19 +104,17 @@ def _run_single_trial(
     adapter_kwargs: dict[str, Any],
     initial_equity: float,
     slippage: float,
+    fill_model_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Picklable worker: reconstruct adapter + factory, run one backtest trial."""
     bars, timestamps, force_flat_indices = _load_bars(bars_path)
-
     mod = importlib.import_module(factory_module)
     factory = getattr(mod, factory_name)
     engine = factory(**params)
-
     a_mod = importlib.import_module(adapter_module)
     a_cls = getattr(a_mod, adapter_class)
     adapter = a_cls(**adapter_kwargs)
-
-    fill_model = MarketImpactFillModel()
+    fill_model = _rebuild_fill_model(fill_model_kwargs)
     runner = BacktestRunner(
         config=lambda: engine,
         adapter=adapter,
@@ -131,19 +137,17 @@ def _run_single_trial_callable(
     adapter_kwargs: dict[str, Any],
     initial_equity: float,
     slippage: float,
+    fill_model_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Picklable worker for callable factory objects (e.g. _PicklableEngineFactory)."""
     bars, timestamps, force_flat_indices = _load_bars(bars_path)
-
     import pickle as _pickle
     factory = _pickle.loads(factory_pickle)
     engine = factory(**params)
-
     a_mod = importlib.import_module(adapter_module)
     a_cls = getattr(a_mod, adapter_class)
     adapter = a_cls(**adapter_kwargs)
-
-    fill_model = MarketImpactFillModel()
+    fill_model = _rebuild_fill_model(fill_model_kwargs)
     runner = BacktestRunner(
         config=lambda: engine,
         adapter=adapter,
@@ -495,6 +499,11 @@ class StrategyOptimizer:
 
         bars_path = _dump_bars(bars, timestamps, force_flat_indices)
         futures_map = {}
+        # Serialize fill model params for workers
+        from dataclasses import asdict as _asdict
+        _fm_kwargs: dict[str, Any] | None = None
+        if hasattr(self._fill_model, "_params"):
+            _fm_kwargs = _asdict(self._fill_model._params)
         # Use pre-initialized pool if provided; otherwise create one per-call.
         # The pre-initialized pool is forked before asyncio starts, avoiding
         # signal-handling deadlocks when called from a thread inside asyncio.
@@ -507,7 +516,6 @@ class StrategyOptimizer:
             pool = _owned_pool
         try:
             if inspect.isfunction(factory):
-                # Module-level function: serialize by module+name
                 mod_name = inspect.getmodule(factory).__name__  # type: ignore[union-attr]
                 fn_name = factory.__name__
                 for params in param_list:
@@ -517,10 +525,10 @@ class StrategyOptimizer:
                         mod_name, fn_name, params,
                         a_mod, a_cls, {},
                         self._initial_equity, self._slippage,
+                        _fm_kwargs,
                     )
                     futures_map[f] = params
             else:
-                # Callable class: serialize by pickling
                 import pickle as _pickle
                 factory_pickle = _pickle.dumps(factory)
                 for params in param_list:
@@ -530,6 +538,7 @@ class StrategyOptimizer:
                         factory_pickle, params,
                         a_mod, a_cls, {},
                         self._initial_equity, self._slippage,
+                        _fm_kwargs,
                     )
                     futures_map[f] = params
 

@@ -339,15 +339,20 @@ def get_thresholds_for_strategy(
     for the *next* level (what the strategy needs to pass to advance).
 
     Falls back to SHORT_TERM / L1 for unclassified strategies.
+
+    Mean-reversion strategies get a widened win_rate_max (0.96) since they
+    structurally produce many small wins and fewer large losses.
     """
     from src.strategies.registry import get_info
 
-    # Resolve holding period from strategy metadata
+    # Resolve holding period and category from strategy metadata
     period = HoldingPeriod.SHORT_TERM  # safe default
+    category: StrategyCategory | None = None
     try:
         info = get_info(slug)
         if info.holding_period is not None:
             period = info.holding_period
+        category = info.category
     except (KeyError, AttributeError):
         logger.debug("thresholds_fallback_short_term", slug=slug)
 
@@ -356,15 +361,21 @@ def get_thresholds_for_strategy(
         target_level = level
     else:
         current_level, _ = read_optimization_level(slug)
-        # Target = next level, capped at L3
         next_val = min(current_level.value + 1, OptimizationLevel.L3_PRODUCTION.value)
         target_level = OptimizationLevel(next_val)
 
-    # L0 has no gates — return L1 thresholds as the first meaningful target
     if target_level == OptimizationLevel.L0_UNOPTIMIZED:
         target_level = OptimizationLevel.L1_EXPLORATORY
 
-    return get_stage_thresholds(period, target_level)
+    base = get_stage_thresholds(period, target_level)
+
+    # Mean-reversion strategies structurally have high win rates (many small
+    # wins, few large losses).  Widen the upper bound to avoid false rejections.
+    if category == StrategyCategory.MEAN_REVERSION:
+        from dataclasses import replace
+        base = replace(base, win_rate=(base.win_rate[0], 0.96))
+
+    return base
 
 
 @runtime_checkable
