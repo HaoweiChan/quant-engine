@@ -305,6 +305,61 @@ def _resolve_deployment_info(session) -> dict:
     return info
 
 
+def _build_settlement_block(sessions: list[dict]) -> dict:
+    """Build settlement countdown + per-session roll urgency."""
+    try:
+        from src.data.settlement_calendar import (
+            days_to_settlement,
+            next_settlement,
+            roll_urgency,
+            settlement_month_code,
+            next_month_code,
+        )
+        today = datetime.now(_TAIPEI_TZ).date()
+        dts = days_to_settlement(today)
+        ns = next_settlement(today)
+        current_month = settlement_month_code(today)
+        next_month = next_month_code(today)
+        per_session: dict[str, dict] = {}
+        for s in sessions:
+            slug = s.get("strategy_slug", "")
+            hp = _infer_holding_period(slug)
+            urgency, days_left = roll_urgency(hp, today)
+            per_session[s["session_id"]] = {
+                "holding_period": hp,
+                "urgency": urgency,
+                "days_to_settlement": days_left,
+            }
+        return {
+            "days_to_settlement": dts,
+            "settlement_date": ns.isoformat(),
+            "current_month": current_month,
+            "next_month": next_month,
+            "per_session": per_session,
+        }
+    except Exception:
+        return {}
+
+
+def _infer_holding_period(strategy_slug: str) -> str:
+    """Best-effort holding period from slug path or STRATEGY_META."""
+    if not strategy_slug:
+        return "short_term"
+    parts = strategy_slug.split("/")
+    if len(parts) >= 1:
+        prefix = parts[0]
+        if prefix in ("short_term", "medium_term", "swing"):
+            return prefix
+    try:
+        from src.strategies.registry import get_strategy_info
+        info = get_strategy_info(strategy_slug)
+        if info and info.holding_period:
+            return info.holding_period.value
+    except Exception:
+        pass
+    return "short_term"
+
+
 @router.get("/war-room")
 async def war_room() -> dict:
     # Serve cached response when fresh (absorbs the 5s dashboard poll).
@@ -499,10 +554,12 @@ async def war_room() -> dict:
                 "equity_curve": session_equity_curves.get(s.session_id, []),
             }
         )
+    settlement_block = _build_settlement_block(sessions)
     response = {
         "accounts": accounts,
         "all_sessions": sessions,
         "sessions_by_account": data.get("sessions_by_account", {}),
+        "settlement": settlement_block,
         "fetched_at": fetched_at,
     }
     _WARROOM_CACHE["data"] = response
