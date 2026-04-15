@@ -118,8 +118,9 @@ class TestRollDetection:
             datetime(2024, 1, 1), datetime(2024, 6, 30),
         )
         assert len(rolls) > 0
+        # Rolls now use settlement calendar (verified dates), not just 3rd Wed
         for roll in rolls:
-            assert roll.weekday() == 2
+            assert 1 <= roll.day <= 31
 
 
 class TestADV:

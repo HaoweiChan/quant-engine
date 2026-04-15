@@ -1,12 +1,12 @@
 """Continuous contract stitcher: ratio-adjusted, panama, and backward-adjusted stitching."""
 from __future__ import annotations
 
-import calendar
 from datetime import datetime
 from typing import Literal
 
 from src.core.types import StitchedSeries
 from src.data.db import Database, OHLCVBar
+from src.data.settlement_calendar import get_settlement_date
 
 
 class ContractStitcher:
@@ -135,20 +135,18 @@ class ContractStitcher:
 
     @staticmethod
     def _calendar_fallback(start: datetime, end: datetime) -> list[datetime]:
-        """Generate 3rd-Wednesday roll dates between start and end."""
+        """Generate settlement-date roll dates between start and end.
+
+        Uses the settlement calendar (verified historical + algorithmic fallback)
+        instead of naive 3rd-Wednesday calculation.
+        """
         rolls: list[datetime] = []
-        year = start.year
-        month = start.month
+        year, month = start.year, start.month
         while True:
-            cal = calendar.Calendar(firstweekday=0)
-            wednesdays = [
-                day for day in cal.itermonthdays2(year, month)
-                if day[0] != 0 and day[1] == 2
-            ]
-            if len(wednesdays) >= 3:
-                third_wed = datetime(year, month, wednesdays[2][0])
-                if start <= third_wed <= end:
-                    rolls.append(third_wed)
+            sd = get_settlement_date(year, month)
+            sd_dt = datetime(sd.year, sd.month, sd.day)
+            if start <= sd_dt <= end:
+                rolls.append(sd_dt)
             month += 1
             if month > 12:
                 month = 1
