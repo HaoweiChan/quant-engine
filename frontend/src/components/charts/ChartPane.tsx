@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import {
   createChart,
   type IChartApi,
@@ -26,6 +26,17 @@ export interface VolumeData {
   color: string;
 }
 
+export interface MarkerData {
+  time: number;
+  position: "aboveBar" | "belowBar" | "inBar";
+  color: string;
+  shape: "arrowUp" | "arrowDown" | "circle" | "square";
+  text?: string;
+  size?: number;
+  strategyColor?: string;
+  _slug?: string;
+}
+
 export interface ChartPaneHandle {
   chart: () => IChartApi | null;
   firstSeries: () => ISeriesApi<any> | null;
@@ -38,6 +49,7 @@ interface ChartPaneProps {
   candles?: CandleData[];
   volume?: VolumeData[];
   series?: SeriesOutput[];
+  markers?: MarkerData[];
   showTimeScale?: boolean;
   timeframeMinutes?: number;
   onRequestOlderData?: () => void;
@@ -66,7 +78,7 @@ function normalizeTickTime(time: unknown): number {
 
 
 export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function ChartPane(
-  { height, candles, volume, series = [], showTimeScale = true, timeframeMinutes = 1, onRequestOlderData, tickMarkFormatter, onCrosshairMove },
+  { height, candles, volume, series = [], markers, showTimeScale = true, timeframeMinutes = 1, onRequestOlderData, tickMarkFormatter, onCrosshairMove },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -74,6 +86,10 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const extraSeriesRef = useRef<ISeriesApi<any>[]>([]);
+  const [overlayMarkers, setOverlayMarkers] = useState<{ x: number; y: number; color: string; text: string; strategyColor?: string }[]>([]);
+  const markersRef = useRef<MarkerData[]>([]);
+  const candlesRef = useRef<CandleData[] | undefined>(candles);
+  candlesRef.current = candles;
   const tickFormatterRef = useRef<((time: number) => string) | undefined>(tickMarkFormatter);
   const prevCandleLengthRef = useRef(0);
   const loadMoreCooldownRef = useRef(false);
@@ -82,6 +98,32 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
   onCrosshairMoveRef.current = onCrosshairMove;
   onRequestOlderDataRef.current = onRequestOlderData;
   tickFormatterRef.current = tickMarkFormatter;
+
+  const recalcOverlayPositions = useCallback(() => {
+    const chart = chartRef.current;
+    const cs = candleSeriesRef.current;
+    const rawMarkers = markersRef.current;
+    const bars = candlesRef.current;
+    if (!chart || !cs || rawMarkers.length === 0) {
+      setOverlayMarkers([]);
+      return;
+    }
+    const ts = chart.timeScale();
+    const positioned = rawMarkers
+      .map((m) => {
+        const x = ts.timeToCoordinate(m.time as any);
+        if (x === null) return null;
+        const bar = bars?.find((c) => c.time === m.time);
+        const price = m.position === "aboveBar" ? bar?.high : bar?.low;
+        if (price == null) return null;
+        const y = cs.priceToCoordinate(price);
+        if (y === null) return null;
+        const offset = m.position === "aboveBar" ? -22 : 8;
+            return { x: x - 10, y: y + offset, color: m.color, text: m.text ?? "", strategyColor: m.strategyColor };
+      })
+      .filter((m): m is NonNullable<typeof m> => m !== null);
+    setOverlayMarkers(positioned);
+  }, []);
 
   useImperativeHandle(ref, () => ({
     chart: () => chartRef.current,
@@ -107,7 +149,8 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
       onRequestOlderDataRef.current();
       setTimeout(() => { loadMoreCooldownRef.current = false; }, 3000);
     }
-  }, []);
+    recalcOverlayPositions();
+  }, [recalcOverlayPositions]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -200,6 +243,7 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
     return () => {
       window.removeEventListener("resize", handleResize);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
+      setOverlayMarkers([]);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
@@ -246,6 +290,8 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
           extraSeriesRef.current.push(s);
         }
       }
+      markersRef.current = markers ?? [];
+      recalcOverlayPositions();
       const isFirstLoad = prevCandleLengthRef.current === 0 && candleLen > 0;
       prevCandleLengthRef.current = candleLen;
       if (savedRange && prependedCount > 0) {
@@ -271,7 +317,38 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
     } catch {
       /* lightweight-charts assertion errors are non-fatal here */
     }
-  }, [candles, volume, series, tickMarkFormatter]);
+  }, [candles, volume, series, markers, tickMarkFormatter]);
 
-  return <div ref={containerRef} />;
+  return (
+    <div style={{ position: "relative" }}>
+      <div ref={containerRef} />
+      {overlayMarkers.map((m, i) => (
+        <div
+          key={i}
+          style={{
+            position: "absolute",
+            left: m.x,
+            top: m.y,
+            minWidth: 18,
+            height: 14,
+            padding: "0 3px",
+            background: m.color,
+            color: "#fff",
+            fontSize: 9,
+            fontWeight: 700,
+            fontFamily: "var(--font-mono)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: 2,
+            borderLeft: m.strategyColor ? `3px solid ${m.strategyColor}` : undefined,
+            pointerEvents: "none",
+            zIndex: 5,
+          }}
+        >
+          {m.text}
+        </div>
+      ))}
+    </div>
+  );
 });

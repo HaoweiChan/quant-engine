@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { IChartApi } from "lightweight-charts";
-import type { OHLCVBar } from "@/lib/api";
+import type { OHLCVBar, TradeSignal } from "@/lib/api";
 import type { ActiveIndicator, SeriesOutput } from "@/lib/indicatorRegistry";
 import { INDICATOR_REGISTRY, createActiveIndicator, getIndicatorDef } from "@/lib/indicatorRegistry";
 import { buildSequentialTimes, toProfessionalSessionBars, SEQ_BASE_EPOCH } from "@/lib/sessionChart";
-import { ChartPane, type ChartPaneHandle, type CandleData, type VolumeData } from "./ChartPane";
+import { ChartPane, type ChartPaneHandle, type CandleData, type VolumeData, type MarkerData } from "./ChartPane";
 import { colors } from "@/lib/theme";
 
 
@@ -41,6 +41,8 @@ interface ChartStackProps {
   showVolume?: boolean;
   /** Live tick bar — when provided, chart updates in real-time */
   liveTick?: OHLCVBar | null;
+  /** Trade signals to render as buy/sell markers on the chart */
+  signals?: TradeSignal[];
   /** Timeframe selector callback + options */
   onTimeframeChange?: (tf: number) => void;
   timeframeOptions?: TimeframeOption[];
@@ -60,6 +62,7 @@ export function ChartStack({
   timeframeMinutes = 1,
   showVolume = false,
   liveTick,
+  signals,
   onTimeframeChange,
   timeframeOptions,
   expandable = false,
@@ -91,8 +94,10 @@ export function ChartStack({
 
   const [secondaryId, setSecondaryId] = useState("volume");
   const [secondaryParams, setSecondaryParams] = useState<Record<string, number>>({});
+  const [secondaryVisible, setSecondaryVisible] = useState(false);
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
   const [expanded, setExpanded] = useState(false);
+  const [hiddenStrategies, setHiddenStrategies] = useState<Set<string>>(new Set());
 
   const [hoverBar, setHoverBar] = useState<{
     time: string; o: number; h: number; l: number; c: number; v: number;
@@ -178,6 +183,60 @@ export function ChartStack({
     () => mergedIndicators.filter((ai) => getIndicatorDef(ai.registryId)?.type === "overlay"),
     [mergedIndicators],
   );
+
+  const STRATEGY_COLORS = useMemo(() => ["#5a8af2", "#f2a65a", "#a65af2", "#5af2a6", "#f25a8a", "#8af25a"], []);
+
+  const signalLegend: { slug: string; label: string; color: string }[] = useMemo(() => {
+    if (!signals || signals.length === 0) return [];
+    const slugs = [...new Set(signals.map((s) => s.reason).filter(Boolean))];
+    return slugs.map((slug, i) => ({
+      slug,
+      label: slug.split("/").pop() ?? slug,
+      color: STRATEGY_COLORS[i % STRATEGY_COLORS.length],
+    }));
+  }, [signals, STRATEGY_COLORS]);
+
+  const signalMarkers: MarkerData[] = useMemo(() => {
+    if (!signals || signals.length === 0 || ds.length === 0) return [];
+    const slugs = [...new Set(signals.map((s) => s.reason).filter(Boolean))];
+    const slugColorMap = new Map(slugs.map((slug, i) => [slug, STRATEGY_COLORS[i % STRATEGY_COLORS.length]]));
+    const barEpochs = ds.map((b) => {
+      const n = b.timestamp.includes("T") ? b.timestamp : b.timestamp.replace(" ", "T");
+      const z = /(?:Z|[+-]\d{2}:\d{2})$/i.test(n) ? n : `${n}Z`;
+      return Math.floor(new Date(z).getTime() / 1000);
+    });
+    return signals
+      .map((s) => {
+        const n = s.timestamp.includes("T") ? s.timestamp : s.timestamp.replace(" ", "T");
+        const z = /(?:Z|[+-]\d{2}:\d{2})$/i.test(n) ? n : `${n}Z`;
+        const sigTime = Math.floor(new Date(z).getTime() / 1000);
+        let bestIdx = 0;
+        let bestDiff = Math.abs(sigTime - barEpochs[0]);
+        for (let i = 1; i < barEpochs.length; i++) {
+          const diff = Math.abs(sigTime - barEpochs[i]);
+          if (diff < bestDiff) { bestIdx = i; bestDiff = diff; }
+          if (barEpochs[i] > sigTime && diff > bestDiff) break;
+        }
+        const isBuy = s.side === "buy";
+        const qty = s.lots > 0 ? s.lots : 1;
+        return {
+          time: times[bestIdx],
+          position: isBuy ? "belowBar" as const : "aboveBar" as const,
+          color: isBuy ? "#26a69a" : "#ef5350",
+          shape: "square" as const,
+          size: 2,
+          text: `${isBuy ? "B" : "S"}${qty}`,
+          strategyColor: slugColorMap.get(s.reason),
+          _slug: s.reason,
+        };
+      })
+      .sort((a, b) => a.time - b.time);
+  }, [signals, ds, times]);
+
+  const visibleSignalMarkers = useMemo(() => {
+    if (hiddenStrategies.size === 0) return signalMarkers;
+    return signalMarkers.filter((m) => !m._slug || !hiddenStrategies.has(m._slug));
+  }, [signalMarkers, hiddenStrategies]);
 
   const overlaySeries = useMemo(() => {
     if (ds.length === 0) return [];
@@ -375,36 +434,58 @@ export function ChartStack({
   const noBars = bars.length === 0;
 
   // Calculate dynamic chart heights based on container
-  // Account for: header (~40px), overlay controls (~60px if shown), secondary header (~32px)
   const headerHeight = showHeader ? 40 : 0;
   const overlayControlsHeight = showOverlayControls ? Math.max(40, localIndicators.length * 24 + 40) : 0;
-  const secondaryHeaderHeight = 32;
+  const secondaryHeaderHeight = secondaryVisible ? 32 : 0;
   const totalChrome = headerHeight + overlayControlsHeight + secondaryHeaderHeight;
 
   const { primaryHeight, secondaryHeight } = useMemo(() => {
     if (expanded) {
-      return { primaryHeight: 520, secondaryHeight: DEFAULT_SECONDARY_HEIGHT };
+      return { primaryHeight: 520, secondaryHeight: secondaryVisible ? DEFAULT_SECONDARY_HEIGHT : 0 };
     }
     if (!containerHeight || containerHeight < 200) {
-      return { primaryHeight: DEFAULT_PRIMARY_HEIGHT, secondaryHeight: DEFAULT_SECONDARY_HEIGHT };
+      return { primaryHeight: DEFAULT_PRIMARY_HEIGHT, secondaryHeight: secondaryVisible ? DEFAULT_SECONDARY_HEIGHT : 0 };
     }
     const availableHeight = containerHeight - totalChrome;
+    if (!secondaryVisible) {
+      return { primaryHeight: Math.max(120, availableHeight), secondaryHeight: 0 };
+    }
     const primary = Math.max(120, Math.floor(availableHeight * PRIMARY_HEIGHT_RATIO));
     const secondary = Math.max(80, availableHeight - primary);
     return { primaryHeight: primary, secondaryHeight: secondary };
-  }, [containerHeight, totalChrome, expanded, localIndicators.length]);
+  }, [containerHeight, totalChrome, expanded, localIndicators.length, secondaryVisible]);
 
   return (
     <div ref={chartCardRef} style={{ height: "100%", display: "flex", flexDirection: "column", ...(expandable ? { background: colors.card, border: `1px solid ${colors.cardBorder}`, borderRadius: 4 } : {}) }}>
       {showHeader && (
         <div className="flex items-center justify-between p-2 border-b" style={{ borderColor: colors.cardBorder }}>
-          {headerLabel && (
-            <span className="text-[10px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>{headerLabel}</span>
-          )}
+          <div className="flex items-center gap-3">
+            {headerLabel && (
+              <span className="text-[11px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>{headerLabel}</span>
+            )}
+            {signalLegend.length > 0 && signalLegend.map((leg) => {
+              const isHidden = hiddenStrategies.has(leg.slug);
+              return (
+                <button
+                  key={leg.slug}
+                  onClick={() => setHiddenStrategies((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(leg.slug)) next.delete(leg.slug); else next.add(leg.slug);
+                    return next;
+                  })}
+                  className="flex items-center gap-1 text-[9px] cursor-pointer border-none bg-transparent p-0"
+                  style={{ fontFamily: "var(--font-mono)", opacity: isHidden ? 0.35 : 1 }}
+                >
+                  <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: isHidden ? colors.dim : leg.color }} />
+                  <span style={{ color: isHidden ? colors.dim : colors.text, textDecoration: isHidden ? "line-through" : "none" }}>{leg.label}</span>
+                </button>
+              );
+            })}
+          </div>
           <div className="flex gap-1 ml-auto">
             {onTimeframeChange && timeframeOptions && timeframeOptions.map((o) => (
               <button key={o.value} onClick={() => onTimeframeChange(o.value)}
-                className="px-1.5 py-0.5 rounded text-[8px] cursor-pointer border-none"
+                className="px-2 py-0.5 rounded text-[11px] cursor-pointer border-none"
                 style={{ fontFamily: "var(--font-mono)", background: timeframeMinutes === o.value ? "rgba(90,138,242,0.25)" : "transparent", color: timeframeMinutes === o.value ? colors.blue : colors.dim }}>
                 {o.label}
               </button>
@@ -419,10 +500,17 @@ export function ChartStack({
                 <path d="M2 5V2h3M11 2h3v3M14 11v3h-3M5 14H2v-3" />
               </svg>
             </button>
+            <button
+              onClick={() => setSecondaryVisible(!secondaryVisible)}
+              className="px-2 py-0.5 rounded text-[9px] cursor-pointer border-none"
+              style={{ fontFamily: "var(--font-mono)", background: secondaryVisible ? "rgba(90,138,242,0.25)" : "rgba(90,138,242,0.08)", color: secondaryVisible ? colors.blue : colors.dim }}
+            >
+              {secondaryVisible ? "Hide Sub" : "Sub Chart"}
+            </button>
             {expandable && (
               <button
                 onClick={toggleExpand}
-                className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none"
+                className="px-2 py-0.5 rounded text-[11px] cursor-pointer border-none"
                 style={{ fontFamily: "var(--font-mono)", background: "rgba(90,138,242,0.12)", color: colors.text }}
               >
                 {expanded ? "Collapse" : "Expand"}
@@ -565,6 +653,7 @@ export function ChartStack({
           candles={candles}
           volume={volume}
           series={overlaySeries}
+          markers={visibleSignalMarkers.length > 0 ? visibleSignalMarkers : undefined}
           showTimeScale={false}
           timeframeMinutes={timeframeMinutes}
           onRequestOlderData={handleLoadOlder}
@@ -572,6 +661,7 @@ export function ChartStack({
           onCrosshairMove={handleCrosshairMove}
         />
       </div>
+      {secondaryVisible && <>
       {/* Secondary chart header: indicator selector + params */}
       <div
         className="flex items-center gap-2 px-2 py-1"
@@ -618,6 +708,7 @@ export function ChartStack({
         timeframeMinutes={timeframeMinutes}
         tickMarkFormatter={formatTick}
       />
+      </>}
     </div>
   );
 }

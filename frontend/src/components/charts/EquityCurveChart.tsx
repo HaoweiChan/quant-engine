@@ -1,7 +1,11 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
 import { createChart, type IChartApi, type ISeriesApi, LineSeries } from "lightweight-charts";
 import { colors } from "@/lib/theme";
 import { parseTimestampSec } from "@/lib/time";
+
+export interface EquityCurveChartHandle {
+  fitContent: () => void;
+}
 
 interface EquityCurveChartProps {
   equity: number[];
@@ -11,6 +15,7 @@ interface EquityCurveChartProps {
   timeframeMinutes?: number;
   timestamps?: number[];
   visibleRange?: { fromTs: string; toTs: string } | null;
+  playbackActive?: boolean;
 }
 
 const MAX_CHART_POINTS = 2000;
@@ -57,7 +62,7 @@ function toChartData(samples: Sample[], timestamps: number[] | undefined, baseDa
 // Use shared parser for consistent timestamp handling across all charts
 const parseTimestamp = parseTimestampSec;
 
-export const EquityCurveChart = React.memo(function EquityCurveChart({
+export const EquityCurveChart = React.memo(forwardRef<EquityCurveChartHandle, EquityCurveChartProps>(function EquityCurveChart({
   equity,
   bnhEquity,
   height = 260,
@@ -65,12 +70,17 @@ export const EquityCurveChart = React.memo(function EquityCurveChart({
   timeframeMinutes,
   timestamps,
   visibleRange,
-}: EquityCurveChartProps) {
+  playbackActive,
+}, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const stratSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const bnhSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const initializedRef = useRef(false);
+
+  useImperativeHandle(ref, () => ({
+    fitContent: () => chartRef.current?.timeScale().fitContent(),
+  }));
 
   // Effect 1: Create chart once (deps: [height])
   useEffect(() => {
@@ -167,12 +177,13 @@ export const EquityCurveChart = React.memo(function EquityCurveChart({
       bnhSeriesRef.current = null;
     }
 
-    // Fit content on initial data load
     if (!initializedRef.current) {
       chartRef.current.timeScale().fitContent();
       initializedRef.current = true;
+    } else if (playbackActive) {
+      chartRef.current.timeScale().scrollToRealTime();
     }
-  }, [equity, bnhEquity, timestamps, startDate, timeframeMinutes]);
+  }, [equity, bnhEquity, timestamps, startDate, timeframeMinutes, playbackActive]);
 
   // Effect 3: Sync visible range from external chart (deps: [visibleRange, timestamps])
   useEffect(() => {
@@ -201,4 +212,4 @@ export const EquityCurveChart = React.memo(function EquityCurveChart({
   }, [visibleRange, timestamps]);
 
   return <div ref={containerRef} />;
-});
+}));
