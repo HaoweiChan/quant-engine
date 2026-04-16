@@ -1,7 +1,7 @@
 import { createStore } from "zustand/vanilla";
 import { useStore } from "zustand";
 import type { OHLCVBar } from "@/lib/api";
-import { parseTimestampMs, formatTaipeiTimestamp } from "@/lib/time";
+import { parseTimestampMs, formatTaipeiTimestamp, normalizeToNaiveTaipei } from "@/lib/time";
 
 
 // Re-export parseTimestampMs as parseBarTimestamp for backward compatibility
@@ -71,7 +71,10 @@ export function createMarketDataStore() {
     },
     processLiveTick: (tick) => {
       const state = get();
-      const tickTime = parseBarTimestamp(tick.timestamp);
+      // Normalize offset-tagged timestamps (e.g. +08:00) to naive Taipei format
+      // so epoch comparisons with naive DB bar timestamps work correctly.
+      const normalizedTs = normalizeToNaiveTaipei(tick.timestamp);
+      const tickTime = parseBarTimestamp(normalizedTs);
       if (!Number.isFinite(tickTime)) return;
       const tfMs = state.tfMinutes * 60_000;
       if (state.bars.length === 0) {
