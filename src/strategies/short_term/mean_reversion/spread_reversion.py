@@ -30,6 +30,7 @@ from src.core.types import (
     MarketSnapshot,
     Position,
 )
+from src.indicators import RollingZScore, compose_param_schema
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
 from src.strategies._session_utils import in_force_close
 
@@ -37,11 +38,22 @@ if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
 
 
+_INDICATOR_PARAMS = compose_param_schema({
+    "lookback": (RollingZScore, "period"),
+    "min_std": (RollingZScore, "min_std"),
+})
+# Override defaults / bounds to match 1-min spread semantics.
+_INDICATOR_PARAMS["lookback"]["default"] = 60
+_INDICATOR_PARAMS["lookback"]["min"] = 20
+_INDICATOR_PARAMS["lookback"]["max"] = 200
+_INDICATOR_PARAMS["lookback"]["description"] = "Rolling window for spread mean/std (1-min bars)."
+_INDICATOR_PARAMS["min_std"]["default"] = 1.0
+_INDICATOR_PARAMS["min_std"]["min"] = 0.1
+_INDICATOR_PARAMS["min_std"]["max"] = 5.0
+_INDICATOR_PARAMS["min_std"]["description"] = "Minimum spread std to consider the spread active."
+
 PARAM_SCHEMA: dict[str, dict] = {
-    "lookback": {
-        "type": "int", "default": 60, "min": 20, "max": 200,
-        "description": "Rolling window for spread mean/std (1-min bars).",
-    },
+    **_INDICATOR_PARAMS,
     "entry_z": {
         "type": "float", "default": 2.0, "min": 1.0, "max": 4.0,
         "description": "Z-score threshold to enter mean-reversion trade.",
@@ -58,15 +70,10 @@ PARAM_SCHEMA: dict[str, dict] = {
         "type": "int", "default": 180, "min": 30, "max": 600,
         "description": "Max bars to hold before time-exit (3h default).",
     },
-    "min_std": {
-        "type": "float", "default": 1.0, "min": 0.1, "max": 5.0,
-        "description": "Minimum spread std to consider the spread active.",
-    },
-    "lots": {
-        "type": "int", "default": 5, "min": 1, "max": 20,
-        "description": "Spread pairs per trade (1 lot = 1 R1 + 1 R2 contract).",
-    },
 }
+
+# Contract-roll gap threshold (points): calendar spread levels jump on roll.
+_SPREAD_JUMP_THRESHOLD = 40.0
 
 STRATEGY_META: dict = {
     "category": StrategyCategory.MEAN_REVERSION,
@@ -92,68 +99,16 @@ STRATEGY_META: dict = {
 }
 
 
-class _SpreadState:
-    """Rolling z-score tracker with auto-reset on rollover jumps.
-
-    Contract rolls cause abrupt spread jumps (200+ pts).  When detected,
-    the buffer is cleared to prevent stale mean/std from generating
-    false signals.  A timestamp guard avoids double-updates when both
-    entry and stop policies process the same bar.
-    """
-
-    JUMP_THRESHOLD = 40.0  # reset buffer if spread jumps > this in 1 bar
-
-    def __init__(self, lookback: int, min_std: float = 1.0) -> None:
-        self._lookback = lookback
-        self._min_std = min_std
-        self._prices: deque[float] = deque(maxlen=lookback)
-        self._last_price: float | None = None
-        self._last_ts: object = None  # dedup guard
-        self.z_score: float | None = None
-        self.mean: float = 0.0
-        self.std: float = 0.0
-
-    def update(self, spread_price: float, ts: object = None) -> None:
-        if ts is not None and ts == self._last_ts:
-            return
-        self._last_ts = ts
-        # Detect rollover / large gap and reset buffer
-        if self._last_price is not None and abs(spread_price - self._last_price) > self.JUMP_THRESHOLD:
-            self._prices.clear()
-            self.z_score = None
-        self._last_price = spread_price
-        self._prices.append(spread_price)
-        if len(self._prices) < self._lookback:
-            self.z_score = None
-            return
-        import numpy as np
-        arr = np.array(self._prices)
-        self.mean = float(np.mean(arr))
-        self.std = float(np.std(arr))
-        if self.std < self._min_std:
-            self.z_score = None
-            return
-        self.z_score = (spread_price - self.mean) / self.std
-
-    @property
-    def ready(self) -> bool:
-        return self.z_score is not None
-
-
 class SpreadReversionEntryPolicy(EntryPolicy):
     """Enter when spread z-score exceeds entry_z threshold."""
 
     def __init__(
         self,
-        state: _SpreadState,
+        z_score: RollingZScore,
         entry_z: float = 2.0,
-        lots: float = 1.0,
-        contract_type: str = "large",
     ) -> None:
-        self._state = state
+        self._z = z_score
         self._entry_z = entry_z
-        self._lots = lots
-        self._contract_type = contract_type
 
     def should_enter(
         self,
@@ -167,27 +122,27 @@ class SpreadReversionEntryPolicy(EntryPolicy):
         t = snapshot.timestamp.time()
         if in_force_close(t):
             return None
-        self._state.update(snapshot.price, ts=snapshot.timestamp)
-        if not self._state.ready:
+        self._z.update(snapshot.price, timestamp=snapshot.timestamp)
+        if not self._z.ready:
             return None
-        z = self._state.z_score
+        z = self._z.value
         # Spread overextended upward → short the spread (expect reversion down)
         if z >= self._entry_z:
             return EntryDecision(
-                lots=self._lots,
-                contract_type=self._contract_type,
+                lots=1,
+                contract_type="large",
                 initial_stop=snapshot.price + 1000,  # placeholder; StopPolicy overrides
                 direction="short",
-                metadata={"z": round(z, 2), "spread_mean": round(self._state.mean, 1)},
+                metadata={"z": round(z, 2), "spread_mean": round(self._z.mean, 1)},
             )
         # Spread overextended downward → long the spread
         if z <= -self._entry_z:
             return EntryDecision(
-                lots=self._lots,
-                contract_type=self._contract_type,
+                lots=1,
+                contract_type="large",
                 initial_stop=max(snapshot.price - 1000, 0.01),
                 direction="long",
-                metadata={"z": round(z, 2), "spread_mean": round(self._state.mean, 1)},
+                metadata={"z": round(z, 2), "spread_mean": round(self._z.mean, 1)},
             )
         return None
 
@@ -197,13 +152,13 @@ class SpreadReversionStopPolicy(StopPolicy):
 
     def __init__(
         self,
-        state: _SpreadState,
+        z_score: RollingZScore,
         entry_z: float = 2.0,
         exit_z: float = 0.3,
         stop_extra: float = 1.5,
         max_hold_bars: int = 180,
     ) -> None:
-        self._state = state
+        self._z = z_score
         self._entry_z = entry_z
         self._exit_z = exit_z
         self._stop_z = entry_z + stop_extra
@@ -213,7 +168,7 @@ class SpreadReversionStopPolicy(StopPolicy):
     def initial_stop(
         self, entry_price: float, direction: str, snapshot: MarketSnapshot,
     ) -> float:
-        stop_dist = self._stop_z * self._state.std if self._state.std > 0 else 20.0
+        stop_dist = self._stop_z * self._z.std if self._z.std > 0 else 20.0
         if direction == "short":
             return entry_price + stop_dist
         return max(entry_price - stop_dist, 0.01)
@@ -224,7 +179,7 @@ class SpreadReversionStopPolicy(StopPolicy):
         snapshot: MarketSnapshot,
         high_history: deque[float],
     ) -> float:
-        self._state.update(snapshot.price, ts=snapshot.timestamp)
+        self._z.update(snapshot.price, timestamp=snapshot.timestamp)
         t = snapshot.timestamp.time()
         pid = position.position_id
         self._bar_counts[pid] = self._bar_counts.get(pid, 0) + 1
@@ -232,9 +187,9 @@ class SpreadReversionStopPolicy(StopPolicy):
         if in_force_close(t) or self._bar_counts[pid] >= self._max_hold:
             self._bar_counts.pop(pid, None)
             return snapshot.price
-        if not self._state.ready:
+        if not self._z.ready:
             return position.stop_level
-        z = self._state.z_score
+        z = self._z.value
         # Take profit: z reverted past exit threshold
         if position.direction == "short" and z <= self._exit_z:
             return snapshot.price
@@ -250,8 +205,6 @@ class SpreadReversionStopPolicy(StopPolicy):
 
 def create_spread_reversion_engine(
     max_loss: float = 500_000.0,
-    lots: float = 1.0,
-    contract_type: str = "large",
     lookback: int = 60,
     entry_z: float = 2.0,
     exit_z: float = 0.3,
@@ -266,17 +219,19 @@ def create_spread_reversion_engine(
     """
     from src.core.position_engine import PositionEngine
 
-    state = _SpreadState(lookback=lookback, min_std=min_std)
+    z_score = RollingZScore(
+        period=lookback,
+        min_std=min_std,
+        jump_threshold=_SPREAD_JUMP_THRESHOLD,
+    )
     return PositionEngine(
         entry_policy=SpreadReversionEntryPolicy(
-            state=state,
+            z_score=z_score,
             entry_z=entry_z,
-            lots=lots,
-            contract_type=contract_type,
         ),
         add_policy=NoAddPolicy(),
         stop_policy=SpreadReversionStopPolicy(
-            state=state,
+            z_score=z_score,
             entry_z=entry_z,
             exit_z=exit_z,
             stop_extra=stop_extra,

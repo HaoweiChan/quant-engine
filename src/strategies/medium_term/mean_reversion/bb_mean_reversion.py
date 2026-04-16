@@ -235,8 +235,6 @@ class BBMeanReversionEntry(EntryPolicy):
 
     def __init__(
         self,
-        lots: float = 1.0,
-        contract_type: str = "large",
         bar_agg_trend: int = 4,
         bb_len: int = 40,
         bb_std: float = 3.0,
@@ -249,8 +247,6 @@ class BBMeanReversionEntry(EntryPolicy):
         atr_sl_mult: float = 1.5,
         allow_night: int = 1,
     ) -> None:
-        self._lots = lots
-        self._contract_type = contract_type
         self._rsi_oversold = rsi_oversold
         self._rsi_overbought = rsi_overbought
         self._macro_filter_atr = macro_filter_atr
@@ -300,8 +296,8 @@ class BBMeanReversionEntry(EntryPolicy):
         # Long: extreme oversold
         if price < ind.bb_lower and ind.rsi < self._rsi_oversold:
             return EntryDecision(
-                lots=self._lots,
-                contract_type=self._contract_type,
+                lots=1,
+                contract_type="large",
                 initial_stop=price - sl_pts,
                 direction="long",
                 metadata={
@@ -314,8 +310,8 @@ class BBMeanReversionEntry(EntryPolicy):
         # Short: extreme overbought
         if price > ind.bb_upper and ind.rsi > self._rsi_overbought:
             return EntryDecision(
-                lots=self._lots,
-                contract_type=self._contract_type,
+                lots=1,
+                contract_type="large",
                 initial_stop=price + sl_pts,
                 direction="short",
                 metadata={
@@ -403,8 +399,6 @@ class BBMeanReversionStop(StopPolicy):
 
 def create_bb_mean_reversion_engine(
     max_loss: float = 500_000,
-    lots: float = 1.0,
-    contract_type: str = "large",
     bar_agg_trend: int = 2,
     bb_len: int = 20,
     bb_std: float = 2.0,
@@ -418,16 +412,11 @@ def create_bb_mean_reversion_engine(
     time_stop_bars: int = 5,
     max_hold_bars: int = 60,
     allow_night: int = 1,
-    pyramid_risk_level: int = 0,
 ) -> "PositionEngine":
     """Build a PositionEngine wired with the BB Mean Reversion strategy."""
-    from src.core.policies import PyramidAddPolicy
     from src.core.position_engine import PositionEngine
-    from src.core.types import pyramid_config_from_risk_level
 
     entry = BBMeanReversionEntry(
-        lots=lots,
-        contract_type=contract_type,
         bar_agg_trend=bar_agg_trend,
         bb_len=bb_len, bb_std=bb_std,
         rsi_len=rsi_len,
@@ -446,13 +435,11 @@ def create_bb_mean_reversion_engine(
         max_hold_bars=max_hold_bars,
         bar_agg=bar_agg_trend,
     )
-    pcfg = pyramid_config_from_risk_level(pyramid_risk_level, max_loss, lots)
-    add_policy = PyramidAddPolicy(pcfg) if pcfg is not None else NoAddPolicy()
     engine = PositionEngine(
         entry_policy=entry,
-        add_policy=add_policy,
+        add_policy=NoAddPolicy(),
         stop_policy=stop,
-        config=EngineConfig(max_loss=max_loss, pyramid_risk_level=pyramid_risk_level),
+        config=EngineConfig(max_loss=max_loss),
     )
     engine.indicator_provider = entry.ind  # type: ignore[attr-defined]
     return engine

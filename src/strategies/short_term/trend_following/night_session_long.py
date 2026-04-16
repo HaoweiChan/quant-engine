@@ -15,10 +15,9 @@ Exit:
 - Optional trailing stop (chandelier-style, toggleable)
 - Force close before session end (configurable minutes before 05:00)
 
-Leverage:
-- Position size via lots parameter (static) or Kelly-based dynamic sizing
-- Dynamic sizing uses compute_risk_lots() for contract-agnostic risk exposure
-- No pyramiding — leverage comes from initial lot size
+Sizing:
+- Signal emitter: always emits lots=1, PortfolioSizer handles actual sizing
+- No pyramiding
 """
 from __future__ import annotations
 
@@ -27,7 +26,6 @@ from datetime import time
 from typing import TYPE_CHECKING
 
 from src.core.policies import EntryPolicy, NoAddPolicy, StopPolicy
-from src.core.sizing import compute_risk_lots
 from src.core.types import (
     AccountState,
     EngineConfig,
@@ -55,10 +53,6 @@ _INDICATOR_PARAMS["rsi_period"]["max"] = 30
 _INDICATOR_PARAMS["rsi_period"]["description"] = "RSI lookback period."
 
 PARAM_SCHEMA: dict[str, dict] = {
-    "lots": {
-        "type": "int", "default": 1, "min": 1, "max": 10,
-        "description": "Contracts per entry (primary leverage lever).",
-    },
     "entry_offset_min": {
         "type": "int", "default": 5, "min": 0, "max": 30,
         "description": "Minutes after 15:00 to enter (0=session open, 15=after OR window).",
@@ -148,14 +142,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "description": "Max RSI for entry. Skip if RSI is above this level.",
     },
     **_INDICATOR_PARAMS,
-    "sizing_mode": {
-        "type": "int", "default": 0, "min": 0, "max": 1,
-        "description": "0=static lots, 1=Kelly-based dynamic sizing via compute_risk_lots().",
-    },
-    "risk_pct": {
-        "type": "float", "default": 0.10, "min": 0.01, "max": 0.15,
-        "description": "Fraction of equity to risk per trade. TX needs ~0.10 (full Kelly) for 1 lot; MTX works at lower fractions.",
-    },
 }
 
 STRATEGY_META: dict = {
@@ -260,8 +246,6 @@ class NightSessionLongEntry(EntryPolicy):
     def __init__(
         self,
         indicators: _Indicators,
-        lots: int = 1,
-        contract_type: str = "large",
         entry_offset_min: int = 5,
         atr_sl_mult: float = 2.0,
         use_atr_filter: bool = False,
@@ -275,12 +259,8 @@ class NightSessionLongEntry(EntryPolicy):
         mr_min_drop_atr: float = 0.0,
         rsi_filter_enabled: bool = False,
         rsi_max_entry: float = 70.0,
-        sizing_mode: int = 0,
-        risk_pct: float = 0.10,
     ) -> None:
         self._ind = indicators
-        self._lots = lots
-        self._contract_type = contract_type
         self._entry_offset_min = entry_offset_min
         self._entry_time = _night_entry_time(entry_offset_min)
         self._atr_sl_mult = atr_sl_mult
@@ -295,8 +275,6 @@ class NightSessionLongEntry(EntryPolicy):
         self._rsi_max_entry = rsi_max_entry
         self._momentum_filter = momentum_filter
         self._mr_min_drop_atr = mr_min_drop_atr
-        self._sizing_mode = sizing_mode
-        self._risk_pct = risk_pct
         self._entered_this_session = False
         self._last_session_date = None
         self._session_open_price: float | None = None
@@ -427,25 +405,9 @@ class NightSessionLongEntry(EntryPolicy):
         sl_pts = effective_atr * self._atr_sl_mult
         self._entered_this_session = True
 
-        # Dynamic sizing: compute lots from equity and risk fraction
-        if self._sizing_mode == 1 and account is not None:
-            lots = compute_risk_lots(
-                equity=account.equity,
-                stop_distance=sl_pts,
-                point_value=snapshot.point_value,
-                margin_per_unit=snapshot.margin_per_unit,
-                max_equity_risk_pct=self._risk_pct,
-                margin_limit=0.3,
-            )
-        else:
-            lots = float(self._lots)
-
-        if lots < 1.0:
-            return None
-
         return EntryDecision(
-            lots=lots,
-            contract_type=self._contract_type,
+            lots=1,
+            contract_type="large",
             initial_stop=snapshot.price - sl_pts,
             direction="long",
             metadata={
@@ -454,8 +416,6 @@ class NightSessionLongEntry(EntryPolicy):
                 "trend_ema": self._ind.trend_ema,
                 "rsi": self._ind.rsi,
                 "session_open": self._session_open_price,
-                "sizing_mode": self._sizing_mode,
-                "risk_pct": self._risk_pct,
             },
         )
 
@@ -557,8 +517,6 @@ class NightSessionLongStop(StopPolicy):
 
 def create_night_session_long_engine(
     max_loss: float = 500_000.0,
-    lots: int = 1,
-    contract_type: str = "large",
     entry_offset_min: int = 5,
     exit_before_close_min: int = 5,
     atr_sl_mult: float = 2.0,
@@ -582,8 +540,6 @@ def create_night_session_long_engine(
     rsi_filter_enabled: int = 0,
     rsi_max_entry: float = 70.0,
     rsi_period: int = 14,
-    sizing_mode: int = 0,
-    risk_pct: float = 0.10,
 ) -> "PositionEngine":
     """Build a PositionEngine for night session long strategy."""
     from src.core.position_engine import PositionEngine
@@ -597,8 +553,6 @@ def create_night_session_long_engine(
     return PositionEngine(
         entry_policy=NightSessionLongEntry(
             indicators=indicators,
-            lots=lots,
-            contract_type=contract_type,
             entry_offset_min=entry_offset_min,
             atr_sl_mult=atr_sl_mult,
             use_atr_filter=bool(use_atr_filter),
@@ -612,8 +566,6 @@ def create_night_session_long_engine(
             mr_min_drop_atr=mr_min_drop_atr,
             rsi_filter_enabled=bool(rsi_filter_enabled),
             rsi_max_entry=rsi_max_entry,
-            sizing_mode=sizing_mode,
-            risk_pct=risk_pct,
         ),
         add_policy=NoAddPolicy(),
         stop_policy=NightSessionLongStop(

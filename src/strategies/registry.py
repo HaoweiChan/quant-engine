@@ -57,10 +57,6 @@ def _build_aliases(registry: dict[str, StrategyInfo]) -> dict[str, str]:
         if len(bare_counts.get(bare, [])) == 1:
             aliases[bare] = slug
 
-    # Legacy alias
-    if "swing/trend_following/pyramid_wrapper" in registry:
-        aliases["pyramid"] = "swing/trend_following/pyramid_wrapper"
-
     return aliases
 
 

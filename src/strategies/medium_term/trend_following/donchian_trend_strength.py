@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 
 from src.core.policies import AddPolicy, EntryPolicy, NoAddPolicy, StopPolicy
 from src.core.types import (
+    METADATA_EXPOSURE_MULTIPLIER,
     AccountState,
     AddDecision,
     EngineConfig,
@@ -66,10 +67,6 @@ PARAM_SCHEMA: dict[str, dict] = {
     "rsi_short_thresh": {
         "type": "float", "default": 45.0, "min": 0.0, "max": 60.0,
         "description": "RSI must be above this for short entries (0=disabled).",
-    },
-    "risk_per_trade": {
-        "type": "float", "default": 0.0, "min": 0.0, "max": 1_000_000.0,
-        "description": "Target risk per trade in NT$. 0=use fixed lots.",
     },
     "min_channel_atr": {
         "type": "float", "default": 0.3, "min": 0.0, "max": 3.0,
@@ -173,8 +170,6 @@ class DonchianTrendStrengthEntry(EntryPolicy):
     def __init__(
         self,
         indicators: _Indicators,
-        lots: float = 1.0,
-        risk_per_trade: float = 0.0,
         rsi_long_thresh: float = 55.0,
         rsi_short_thresh: float = 45.0,
         min_channel_atr: float = 0.3,
@@ -182,8 +177,6 @@ class DonchianTrendStrengthEntry(EntryPolicy):
         atr_tp_multi: float = 3.0,
     ) -> None:
         self._ind = indicators
-        self._lots = lots
-        self._risk_per_trade = risk_per_trade
         self._rsi_long_thresh = rsi_long_thresh
         self._rsi_short_thresh = rsi_short_thresh
         self._min_channel_atr = min_channel_atr
@@ -214,10 +207,6 @@ class DonchianTrendStrengthEntry(EntryPolicy):
             return None
         price = snapshot.price
         sl_pts = daily_atr * self._atr_sl_multi
-        if self._risk_per_trade > 0 and sl_pts > 0:
-            lots = max(1.0, round(self._risk_per_trade / (sl_pts * snapshot.point_value)))
-        else:
-            lots = self._lots
         uptrend = ind.vwap > ind.donchian_mid
         downtrend = ind.vwap < ind.donchian_mid
         rsi_long_ok = ind.rsi is None or self._rsi_long_thresh >= 100 or ind.rsi < self._rsi_long_thresh
@@ -230,7 +219,7 @@ class DonchianTrendStrengthEntry(EntryPolicy):
         ct = snapshot.contract_specs.contract_type
         if uptrend and price <= ind.donchian_mid and rsi_long_ok:
             return EntryDecision(
-                lots=lots,
+                lots=1,
                 contract_type=ct,
                 initial_stop=price - sl_pts,
                 direction="long",
@@ -238,7 +227,7 @@ class DonchianTrendStrengthEntry(EntryPolicy):
             )
         if downtrend and price >= ind.donchian_mid and rsi_short_ok:
             return EntryDecision(
-                lots=lots,
+                lots=1,
                 contract_type=ct,
                 initial_stop=price + sl_pts,
                 direction="short",
@@ -248,7 +237,14 @@ class DonchianTrendStrengthEntry(EntryPolicy):
 
 
 class DonchianTrendStrengthAdd(AddPolicy):
-    """Anti-martingale pyramid: add into winners at ATR-based profit thresholds."""
+    """Anti-martingale pyramid: add into winners at ATR-based profit thresholds.
+
+    Emits ``AddDecision.lots`` as a **multiplier of the base position lots**
+    (e.g. gamma=0.5, level=1 → 0.5×base). PortfolioSizer resolves the
+    multiplier to absolute contracts via ``METADATA_EXPOSURE_MULTIPLIER=True``,
+    so the strategy stays a pure signal emitter and contract-count math
+    lives in the sizer / engine config.
+    """
 
     def __init__(
         self,
@@ -256,13 +252,11 @@ class DonchianTrendStrengthAdd(AddPolicy):
         max_levels: int = 3,
         trigger_atr: float = 1.0,
         gamma: float = 0.5,
-        base_lots: float = 1.0,
     ) -> None:
         self._ind = indicators
         self._max_levels = max_levels
         self._trigger_atr = trigger_atr
         self._gamma = gamma
-        self._base_lots = base_lots
 
     def should_add(
         self,
@@ -288,11 +282,16 @@ class DonchianTrendStrengthAdd(AddPolicy):
         trigger = level * self._trigger_atr * daily_atr
         if floating_profit < trigger:
             return None
-        lots = max(self._base_lots * (self._gamma ** level), 0.25)
+        multiplier = max(self._gamma ** level, 0.25)
         return AddDecision(
-            lots=lots,
+            lots=multiplier,
             contract_type=pos.contract_type,
             move_existing_to_breakeven=True,
+            metadata={
+                METADATA_EXPOSURE_MULTIPLIER: True,
+                "gamma": self._gamma,
+                "level": level,
+            },
         )
 
 
@@ -370,8 +369,6 @@ class DonchianTrendStrengthStop(StopPolicy):
 
 def create_donchian_trend_strength_engine(
     max_loss: float = 500_000.0,
-    lots: float = 1.0,
-    risk_per_trade: float = 0.0,
     lookback_period: int = 20,
     rsi_len: int = 5,
     rsi_long_thresh: float = 55.0,
@@ -392,14 +389,13 @@ def create_donchian_trend_strength_engine(
     from src.core.types import pyramid_config_from_risk_level
 
     indicators = _Indicators(lookback_period=lookback_period, rsi_len=rsi_len)
-    pcfg = pyramid_config_from_risk_level(pyramid_risk_level, max_loss, lots)
+    pcfg = pyramid_config_from_risk_level(pyramid_risk_level, max_loss, 1.0)
     if pcfg is not None:
         add_policy = DonchianTrendStrengthAdd(
             indicators=indicators,
             max_levels=pcfg.max_levels,
             trigger_atr=pcfg.add_trigger_atr[0] if pcfg.add_trigger_atr else 1.0,
             gamma=pcfg.gamma or 0.5,
-            base_lots=lots,
         )
     else:
         add_policy = NoAddPolicy()
@@ -407,8 +403,6 @@ def create_donchian_trend_strength_engine(
     return PositionEngine(
         entry_policy=DonchianTrendStrengthEntry(
             indicators=indicators,
-            lots=lots,
-            risk_per_trade=risk_per_trade,
             rsi_long_thresh=rsi_long_thresh,
             rsi_short_thresh=rsi_short_thresh,
             min_channel_atr=min_channel_atr,
