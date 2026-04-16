@@ -8,8 +8,12 @@ from typing import Any
 
 from src.core.adapter import BaseAdapter
 from src.core.position_engine import PositionEngine, create_pyramid_engine
+from src.core.sizing import PortfolioSizer, SizingConfig
 from src.core.types import (
+    METADATA_EXPOSURE_MULTIPLIER,
     AccountState,
+    AddDecision,
+    EntryDecision,
     Event,
     EventEngineConfig,
     EventType,
@@ -17,10 +21,9 @@ from src.core.types import (
     MarketEvent,
     MarketSignal,
     MarketSnapshot,
-    Order,
     OrderEvent,
+    Position,
     PyramidConfig,
-    SignalEvent,
 )
 from src.simulator.event_engine import EventEngine
 from src.simulator.fill_model import FillModel, MarketImpactFillModel
@@ -42,6 +45,7 @@ class BacktestRunner:
         initial_equity: float = 2_000_000.0,
         periods_per_year: float = 252.0,
         event_engine_config: EventEngineConfig | None = None,
+        sizing_config: SizingConfig | None = None,
     ) -> None:
         if callable(config) and not isinstance(config, PyramidConfig):
             self._engine_factory = config
@@ -52,6 +56,8 @@ class BacktestRunner:
         self._initial_equity = initial_equity
         self._periods_per_year = periods_per_year
         self._ee_config = event_engine_config
+        self._sizing_config = sizing_config
+        self._sizer = PortfolioSizer(sizing_config) if sizing_config else None
 
     def run(
         self,
@@ -61,6 +67,7 @@ class BacktestRunner:
         force_flat_indices: set[int] | None = None,
     ) -> BacktestResult:
         engine = self._engine_factory()
+        self._attach_sizer(engine)
         equity = self._initial_equity
         equity_curve: list[float] = [equity]
         trade_log: list[Fill] = []
@@ -193,6 +200,7 @@ class BacktestRunner:
                     ))
                 open_entries.clear()
                 engine = self._engine_factory()
+                self._attach_sizer(engine)
                 _ind_provider = getattr(engine, "indicator_provider", None)
 
             unrealized = self._calc_unrealized(open_entries, snapshot)
@@ -321,3 +329,71 @@ class BacktestRunner:
             else:
                 total += (entry_price - snapshot.price) * lots * snapshot.point_value
         return total
+
+    def _attach_sizer(self, engine: PositionEngine) -> None:
+        """Attach PortfolioSizer hooks (entry + add) if sizing_config is set."""
+        if self._sizer is None:
+            return
+        sizer = self._sizer
+        initial_equity = self._initial_equity
+
+        def _size_entry(
+            decision: EntryDecision,
+            snapshot: MarketSnapshot,
+            account: AccountState | None,
+        ) -> EntryDecision | None:
+            equity = account.equity if account is not None else initial_equity
+            stop_dist = abs(snapshot.price - decision.initial_stop)
+            result = sizer.size_entry(
+                equity=equity,
+                stop_distance=stop_dist,
+                point_value=snapshot.point_value,
+                margin_per_unit=snapshot.margin_per_unit,
+            )
+            if result.lots < 1:
+                return None
+            return EntryDecision(
+                lots=result.lots,
+                contract_type=decision.contract_type,
+                initial_stop=decision.initial_stop,
+                direction=decision.direction,
+                metadata={**decision.metadata, "sizer": result.method, "sizer_caps": result.caps_applied},
+            )
+
+        def _size_add(
+            decision: AddDecision,
+            snapshot: MarketSnapshot,
+            positions: list[Position],
+        ) -> AddDecision | None:
+            from src.core.sizing import _base_position_lots
+
+            is_multiplier = bool(decision.metadata.get(METADATA_EXPOSURE_MULTIPLIER, False))
+            base_lots = _base_position_lots(positions) if is_multiplier else 0.0
+            existing_margin = sum(p.lots * snapshot.margin_per_unit for p in positions)
+            # Estimate equity from initial + realised via positions; the sizer
+            # caps by margin headroom so exact equity is not required here.
+            # We fall back to initial_equity to mirror _size_entry.
+            equity = initial_equity
+            result = sizer.size_add(
+                equity=equity,
+                existing_margin_used=existing_margin,
+                margin_per_unit=snapshot.margin_per_unit,
+                requested_lots=decision.lots,
+                base_lots=base_lots,
+                is_multiplier=is_multiplier,
+            )
+            if result.lots < 1:
+                return None
+            return AddDecision(
+                lots=result.lots,
+                contract_type=decision.contract_type,
+                move_existing_to_breakeven=decision.move_existing_to_breakeven,
+                metadata={
+                    **decision.metadata,
+                    "sizer": result.method,
+                    "sizer_caps": result.caps_applied,
+                },
+            )
+
+        engine.entry_sizer = _size_entry
+        engine.add_sizer = _size_add
