@@ -18,10 +18,13 @@ def format_entry(result: ExecutionResult) -> str:
 
 def format_exit(result: ExecutionResult) -> str:
     o = result.order
+    realized_pnl = result.metadata.get("realized_pnl", 0.0) if result.metadata else 0.0
+    pnl_sign = "+" if realized_pnl >= 0 else ""
+    pnl_line = f"\nP&L: {pnl_sign}{realized_pnl:,.0f}" if realized_pnl != 0 else ""
     return (
         f"<b>EXIT</b> {o.side.upper()} {o.symbol}\n"
         f"Lots: {result.fill_qty}  Price: {result.fill_price:,.0f}\n"
-        f"Reason: {o.reason}"
+        f"Reason: {o.reason}{pnl_line}"
     )
 
 
