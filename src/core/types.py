@@ -1,10 +1,10 @@
 import uuid
-from enum import Enum
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
+from typing import Any, Literal
 
 _TAIPEI_TZ = timezone(timedelta(hours=8))
-from typing import Any, Literal
-from dataclasses import dataclass, field
 
 
 @dataclass
@@ -196,6 +196,10 @@ class PyramidConfig:
             )
 
 
+# Reserved metadata keys for Decision classes — typed to prevent silent typos.
+METADATA_EXPOSURE_MULTIPLIER = "exposure_multiplier"
+
+
 @dataclass
 class EntryDecision:
     lots: float
@@ -213,6 +217,14 @@ class EntryDecision:
 
 @dataclass
 class AddDecision:
+    """Add-order decision emitted by AddPolicy.should_add().
+
+    metadata reserved keys:
+        "exposure_multiplier" (bool): When True, ``lots`` is interpreted as a
+            multiplier of the base position's lots (positions[0].lots), not
+            an absolute contract count. Runtime (PortfolioSizer.size_add)
+            resolves to absolute contracts via ``is_multiplier=True``.
+    """
     lots: float
     contract_type: str
     move_existing_to_breakeven: bool = False

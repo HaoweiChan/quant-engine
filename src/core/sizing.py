@@ -115,6 +115,15 @@ class SizingResult:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+def _base_position_lots(positions: list) -> float:
+    """Return positions[0].lots (the base position) or 0.0 if empty.
+
+    Use this when resolving AddDecision multipliers — NEVER use positions[-1]
+    because after an overlay add, positions[-1] is the overlay itself.
+    """
+    return positions[0].lots if positions else 0.0
+
+
 class PortfolioSizer:
     """Centralised sizing layer for the live pipeline.
 
@@ -210,19 +219,28 @@ class PortfolioSizer:
         existing_margin_used: float,
         margin_per_unit: float,
         requested_lots: float,
+        base_lots: float = 0.0,
+        is_multiplier: bool = False,
     ) -> SizingResult:
         """Compute lots for a pyramid add order.
 
         Caps at available margin headroom while respecting max_lots.
+
+        If ``is_multiplier`` is True and ``base_lots > 0``, ``requested_lots``
+        is interpreted as a ratio of the base position's lots rather than an
+        absolute contract count.
         """
         cfg = self._config
+        resolved_requested = requested_lots
+        if is_multiplier and base_lots > 0:
+            resolved_requested = requested_lots * base_lots
         available = equity * cfg.margin_cap - existing_margin_used
         caps: list[str] = []
         if margin_per_unit <= 0 or available <= 0:
             return SizingResult(lots=0, method="add", caps_applied=["no_margin"])
         max_add = math.floor(available / margin_per_unit)
-        lots = min(requested_lots, max_add)
-        if lots > requested_lots:
+        lots = min(resolved_requested, max_add)
+        if lots < resolved_requested:
             caps.append("margin_headroom")
         lots = min(lots, cfg.max_lots)
         lots = max(lots, 0)
@@ -233,5 +251,11 @@ class PortfolioSizer:
             lots=float(math.floor(lots)),
             method="add",
             caps_applied=caps,
-            details={"available_margin": available, "max_add": max_add},
+            details={
+                "available_margin": available,
+                "max_add": max_add,
+                "is_multiplier": is_multiplier,
+                "base_lots": base_lots,
+                "resolved_requested": resolved_requested,
+            },
         )

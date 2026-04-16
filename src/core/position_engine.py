@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import structlog
-from datetime import datetime
 from collections import deque
+from collections.abc import Callable
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
+
+import structlog
 
 from src.core.policies import (
     AddPolicy,
@@ -31,6 +33,20 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# Signature: (decision, snapshot, account) → modified decision or None to skip
+EntrySizerFn = Callable[
+    [EntryDecision, MarketSnapshot, AccountState | None],
+    EntryDecision | None,
+]
+
+# Signature: (decision, snapshot, positions) → modified decision or None to skip.
+# Mirrors EntrySizerFn: hook returns None to abort the add silently (e.g. margin cap,
+# multiplier resolved to 0 lots).
+AddSizerFn = Callable[
+    [AddDecision, MarketSnapshot, list[Position]],
+    AddDecision | None,
+]
+
 
 class PositionEngine:
     def __init__(
@@ -46,10 +62,28 @@ class PositionEngine:
         self._stop_policy = stop_policy
         self._config = config
         self._pre_trade_check = pre_trade_check
+        self._entry_sizer: EntrySizerFn | None = None
+        self._add_sizer: AddSizerFn | None = None
         self._positions: list[Position] = []
         self._mode: Literal["model_assisted", "rule_only", "halted"] = "model_assisted"
         self._high_history: deque[float] = deque(maxlen=config.trail_lookback)
         self._pre_trade_rejection_events: list[dict[str, Any]] = []
+
+    @property
+    def entry_sizer(self) -> EntrySizerFn | None:
+        return self._entry_sizer
+
+    @entry_sizer.setter
+    def entry_sizer(self, fn: EntrySizerFn | None) -> None:
+        self._entry_sizer = fn
+
+    @property
+    def add_sizer(self) -> AddSizerFn | None:
+        return self._add_sizer
+
+    @add_sizer.setter
+    def add_sizer(self, fn: AddSizerFn | None) -> None:
+        self._add_sizer = fn
 
     # -- public API --
 
@@ -78,6 +112,8 @@ class PositionEngine:
         # Priority 4: entry signal (delegate to policy)
         if not self._positions and self._mode != "halted":
             decision = self._entry_policy.should_enter(snapshot, effective_signal, state, account)
+            if decision is not None and self._entry_sizer is not None:
+                decision = self._entry_sizer(decision, snapshot, account)
             if decision is not None:
                 if not self._passes_entry_margin_gate(decision, snapshot, account):
                     decision = None
@@ -264,6 +300,13 @@ class PositionEngine:
     def _execute_add(self, decision: AddDecision, snapshot: MarketSnapshot) -> list[Order]:
         if not self._positions:
             return []
+        # Sizing hook — resolves AddDecision multipliers and applies margin caps.
+        # Mirrors the entry_sizer pattern; a None return (or lots<=0) aborts silently.
+        if self._add_sizer is not None:
+            sized = self._add_sizer(decision, snapshot, self._positions)
+            if sized is None or sized.lots <= 0:
+                return []
+            decision = sized
         direction = self._positions[0].direction
         entry_side = "buy" if direction == "long" else "sell"
 
@@ -387,7 +430,7 @@ class PositionEngine:
             )
             return False
         try:
-            available_margin = float(getattr(account, "margin_available"))
+            available_margin = float(account.margin_available)
         except (TypeError, ValueError):
             return True
         if available_margin < required_margin:
