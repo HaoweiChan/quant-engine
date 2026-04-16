@@ -174,26 +174,155 @@ Never block the signal evaluation thread with order I/O.
 
 ---
 
+## Portfolio-Level Position Sizing
+
+Lot sizes are NOT determined by individual strategies. The `PortfolioSizer` (`src/core/sizing.py`)
+centralizes all sizing decisions at the pipeline level, ensuring consistent risk management
+across all strategies running on the same account.
+
+### Architecture
+
+```
+PositionEngine → Order(lots=1, hint)
+        ↓
+LiveStrategyRunner._apply_portfolio_sizing()
+        ↓
+PortfolioSizer.size_entry(equity, stop_distance, point_value, margin_per_unit)
+        ↓
+SizingResult(lots=3, method="risk_based", risk_pct=0.02)
+        ↓
+Order(lots=3, resized) → Executor
+```
+
+### SizingConfig (set at pipeline level)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `risk_per_trade` | 0.02 | Fraction of equity risked per trade |
+| `margin_cap` | 0.50 | Max fraction of equity used as margin |
+| `max_lots` | 10 | Hard ceiling per order |
+| `min_lots` | 1 | Floor — orders below this are dropped |
+
+### Sizing Methods (priority order)
+1. **Risk-based**: `equity × risk_per_trade / (stop_distance × point_value)` — preferred when stop distance is known
+2. **Margin-based**: `equity × margin_cap / margin_per_unit` — fallback when stop distance is unavailable
+3. **Caps applied**: `min(risk_lots, margin_lots, max_lots)`, floored at `min_lots`
+
+### Runtime API
+- `GET /api/paper-trade/sizing` — current config
+- `PATCH /api/paper-trade/sizing` — update config (applies to all runners immediately)
+
+### Key Rules
+- **Strategies emit signals, not sizes.** `EntryDecision.lots` is a hint only.
+- **Stop distance is required for risk-based sizing.** `StopPolicy.initial_stop()` must return a valid stop.
+- **Sizer runs inside `LiveStrategyRunner`**, between the `PositionEngine` and the executor.
+- **Pyramid adds use margin headroom**, not the initial risk budget.
+- **Config changes propagate immediately** to all active runners via the pipeline manager.
+
+---
+
 ## Paper Trading Protocol
 
-Before any strategy goes live:
-1. Run in paper mode for minimum 5 complete sessions (both day and night counted separately).
-2. Record every fill using `FillRecord` schema above.
-3. Compute mean slippage over all paper fills.
-4. Pass criterion: mean slippage ≤ 2× the model assumption from `INSTRUMENT_COSTS[symbol].slippage_pct` in `src/core/types.py`.
-5. Produce fill quality report and submit to Risk Auditor as part of promotion checklist.
+Before any strategy goes live, run in paper (simulation) mode on the real broker API.
+This validates the entire execution stack end-to-end — order routing, fill recording,
+session management, and kill-switch protection — using real market data but simulated fills.
 
-Fill quality report format:
-```
-PAPER TRADE REPORT — [Strategy] — [Sessions run: N]
-Sessions: [list dates and session type]
-Total fills: N
-Mean slippage: X.X ticks
-P90 slippage: X.X ticks
-Max slippage: X.X ticks
-Order type mix: MARKET X% / LIMIT X%
-Kill-switch triggers: N (detail if any)
-Position mismatches: N (detail if any)
+### Setup
+1. Set `sandbox_mode=true` on the broker account (Sinopac simulation mode).
+2. Deploy strategies via `PATCH /api/accounts/{id}/strategies` with correct equity shares.
+3. Start all sessions via `POST /api/sessions/{session_id}/start`.
+4. Clear any stale equity history: `DELETE FROM account_equity_history WHERE account_id='{id}'`.
 
-VERDICT: PASS (≤ 2× model) / FAIL (reason: ...)
+### Duration
+- **Minimum**: 5 complete sessions (both day and night counted separately).
+  TAIFEX has 2 sessions per trading day → minimum 3 trading days.
+- **Recommended**: 10–20 sessions (1–2 weeks) to cover diverse market conditions.
+
+### What to Monitor During Paper Trading
+
+Run `GET /api/paper-trade/health?account_id={id}` (see automated monitoring endpoint)
+or manually check each criterion:
+
+| # | Check | Source | Pass Criterion |
+|---|-------|--------|----------------|
+| 1 | Signal generation | Session snapshots, fills table | Strategies produce entries/exits during active sessions |
+| 2 | Order execution | Fill records in `trading.db` | Simulation fills execute without API errors |
+| 3 | Slippage | Mean of `slippage_ticks` across fills | Mean ≤ 2× model (1.5 ticks for TX, 1.5 for MTX) |
+| 4 | Session flatten | Last position state at session end | All positions closed by 04:59 (night) / 13:44 (day) |
+| 5 | Kill switch | Manual test each button | HALT→halted, RESUME→active, FLATTEN→flattening (verified) |
+| 6 | Equity tracking | `account_equity_history` table | No jumps > 20%, no negative equity, monotonic timestamps |
+| 7 | Clean logs | Backend stderr/stdout | No ERROR-level entries during active sessions |
+| 8 | Position reconciliation | Reconciler output | System position matches broker-reported position |
+| 9 | Contract roll | Around expiration dates | Roll badges appear, positions transition cleanly |
+| 10 | Session boundary reset | VWAP, ATR, OR window values | All indicators reset at session open, no carryover |
+
+### Automated Monitoring
+
+The `/api/paper-trade/health` endpoint produces a live health report:
+```json
+{
+  "account_id": "sinopac-main",
+  "sessions_completed": 7,
+  "total_fills": 42,
+  "mean_slippage_ticks": 0.8,
+  "p90_slippage_ticks": 1.2,
+  "session_flat_violations": 0,
+  "error_count": 0,
+  "position_mismatches": 0,
+  "equity_anomalies": 0,
+  "checks": {
+    "signal_generation": "PASS",
+    "order_execution": "PASS",
+    "slippage": "PASS",
+    "session_flatten": "PASS",
+    "kill_switch": "PASS",
+    "equity_tracking": "PASS",
+    "clean_logs": "PASS",
+    "position_reconciliation": "PASS"
+  },
+  "verdict": "PASS — ready for live",
+  "min_sessions_met": true
+}
 ```
+
+### Fill Quality Report
+
+Record every fill using `FillRecord` schema above. After the paper trading period:
+
+```
+PAPER TRADE REPORT — [Account] — [Sessions run: N]
+Period: [start_date] to [end_date]
+Sessions: [list dates and session types]
+Strategies: [list strategy slugs with equity shares]
+
+EXECUTION METRICS:
+  Total fills: N
+  Mean slippage: X.X ticks
+  P90 slippage: X.X ticks
+  Max slippage: X.X ticks
+  Order type mix: MARKET X% / LIMIT X%
+
+SESSION MANAGEMENT:
+  Session flat violations: N (detail if any)
+  Kill-switch triggers: N (detail if any)
+  Position mismatches: N (detail if any)
+
+EQUITY:
+  Starting equity: $X
+  Ending equity: $X
+  Max drawdown: X.X%
+  Anomalies: N (detail if any)
+
+VERDICT: PASS / FAIL
+  If FAIL: [specific failures and what must be fixed]
+```
+
+Submit report to Risk Auditor as part of the go-live sign-off.
+
+### Go-Live Transition
+1. Paper trading report: PASS verdict from all checks above.
+2. Risk Auditor sign-off: paper trade report reviewed and approved.
+3. Switch account from `sandbox_mode=true` to `sandbox_mode=false`.
+4. Clear equity history (fresh start for live tracking).
+5. Restart backend to reconnect gateway in live mode.
+6. Verify first few fills manually before leaving unattended.

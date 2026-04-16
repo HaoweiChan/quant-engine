@@ -83,6 +83,14 @@ Risk Auditor: [agent instance]
 ━━━ EXECUTION READINESS ━━━
 [ ] +1 tick slippage: recheck Phase 2 Sharpe — still ≥ 0.5
 [ ] Paper trade report from Live Systems Engineer: attached and PASS verdict
+[ ] Paper trade sessions completed: ___ (minimum 5, recommended 10+)
+[ ] Mean slippage ≤ 2× model (TX: ≤1.5 ticks, MTX: ≤1.5 ticks)
+[ ] Session flatten: 0 violations (all positions closed before session end)
+[ ] Kill switch tested: HALT, FLATTEN, RESUME all verified
+[ ] Position reconciliation: 0 mismatches during paper period
+[ ] Equity tracking: no anomalies (jumps >20%, negative equity)
+[ ] Backend error log: 0 ERROR-level entries during active sessions
+[ ] Contract roll handling: tested if paper period spans a rollover
 
 ━━━ VERDICT ━━━
 PROMOTE / REJECT / INCONCLUSIVE
@@ -168,6 +176,57 @@ Note: `tests/regression_baseline.json` is to be created as strategies reach L3. 
 regression gating is performed by running `run_walk_forward` against each active L2+ strategy
 and confirming validation Sharpe does not degrade by more than 5% vs the last archived run
 (accessible via `get_run_history`).
+
+---
+
+## Paper Trading Go-Live Review
+
+When the Live Systems Engineer submits a paper trade report for go-live approval,
+verify each item independently. Do not rubber-stamp — check the actual data.
+
+### Automated Check
+Query `GET /api/paper-trade/health?account_id={id}` and verify all checks pass.
+Cross-reference against `account_equity_history` and fill records in `trading.db`.
+
+### Manual Review Items
+1. **Fill distribution**: Are fills spread across both day and night sessions?
+   A strategy that only fills in one session type may not be robust.
+2. **Slippage outliers**: P90 slippage should be < 3× mean. Large outliers
+   indicate unstable execution around session open/close.
+3. **Equity curve shape**: Should resemble the backtest curve in character.
+   Large divergence suggests execution issues or model misfit.
+4. **Session coverage**: Minimum 3 night + 3 day sessions. Night-only or
+   day-only validation is insufficient.
+5. **Error logs**: Any WARNING-level entries mentioning "timeout", "reconnect",
+   "mismatch", or "reject" must be investigated and explained.
+
+### Go-Live Sign-Off Format
+```
+GO-LIVE REVIEW — [Account] — [Date]
+Risk Auditor: [agent instance]
+
+Paper trade period: [start] to [end]
+Sessions completed: N (N_day day + N_night night)
+Account: [account_id] on [broker]
+Strategies: [list with equity shares]
+
+━━━ PAPER TRADE CHECKS ━━━
+[ ] Fill count sufficient (≥ 10 per strategy minimum)
+[ ] Mean slippage within bounds
+[ ] No session flat violations
+[ ] Kill switch verified
+[ ] Position reconciliation clean
+[ ] Equity tracking clean
+[ ] Error log clean
+[ ] Day + night sessions both covered
+
+━━━ VERDICT ━━━
+APPROVE / REJECT
+
+If REJECT:
+  Failures: [specific]
+  Required before re-submission: [specific]
+```
 
 ---
 

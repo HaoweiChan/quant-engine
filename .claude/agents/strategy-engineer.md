@@ -190,6 +190,34 @@ Rules:
 
 ---
 
+## Position Sizing — Strategy vs Pipeline Boundary
+
+**Strategies do NOT determine lot sizes.** A strategy's `EntryDecision` emits the signal
+(direction, conviction), but the actual number of lots is determined by the pipeline-level
+`PortfolioSizer` (`src/core/sizing.py`).
+
+### What strategies must provide
+- `EntryDecision.lots` — a **hint** (typically 1). The pipeline may override it.
+- `StopPolicy.initial_stop()` — the stop distance is used by the sizer to compute risk-based lots.
+
+### What strategies must NOT do
+- Never hardcode lot sizes based on account equity.
+- Never query broker margin or account state to decide lots.
+- Never import `PortfolioSizer` or `SizingConfig` — that's the pipeline's job.
+
+### How sizing works at runtime
+The `LiveStrategyRunner` intercepts every order from the `PositionEngine` and passes it
+through `PortfolioSizer.size_entry()` or `PortfolioSizer.size_add()`. The sizer computes
+the correct lots based on:
+1. **Risk-based**: `equity × risk_per_trade / (stop_distance × point_value)`
+2. **Margin-based**: `equity × margin_cap / margin_per_unit`
+3. **Caps**: `min(risk_lots, margin_lots, max_lots)`, floored at `min_lots`
+
+The `SizingConfig` is set at the pipeline level (default: 2% risk, 50% margin cap, 10 max lots)
+and can be updated at runtime via `PATCH /api/paper-trade/sizing`.
+
+---
+
 ## Code Standards
 
 - All public methods: type annotations required.
