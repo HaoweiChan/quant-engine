@@ -5,19 +5,19 @@ backward-compatible fallback and for human readability.
 """
 from __future__ import annotations
 
-import structlog
-from datetime import datetime, timezone, timedelta
-
-_TAIPEI_TZ = timezone(timedelta(hours=8))
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import structlog
+import tomli_w
 
 try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
-import tomli_w
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 logger = structlog.get_logger(__name__)
 
@@ -40,8 +40,9 @@ def save_strategy_params(
         ).fetchone()
         if candidates is None:
             # No existing run — create a minimal run + candidate and activate it
-            from src.simulator.types import OptimizerResult
             import polars as pl
+
+            from src.simulator.types import OptimizerResult
             dummy_result = OptimizerResult(
                 trials=pl.DataFrame([{**params, "sharpe": 0, "calmar": 0}]),
                 best_params=params,
@@ -81,27 +82,72 @@ def save_strategy_params(
     return path
 
 
+def _filter_known_params(name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Drop kwargs not in the strategy's PARAM_SCHEMA with a warning.
+
+    Stale registry entries (e.g. pre-refactor params like ``initial_capital``
+    or ``boost_lots``) would otherwise cause a factory TypeError. Filter them
+    out so the live runner can still construct the engine from defaults.
+    """
+    try:
+        from src.strategies.registry import get_info
+        info = get_info(name)
+        import importlib
+        mod = importlib.import_module(info.module)
+        schema = getattr(mod, "PARAM_SCHEMA", None)
+    except Exception:
+        logger.debug("param_loader_schema_lookup_failed", strategy=name, exc_info=True)
+        return params
+    if not isinstance(schema, dict) or not schema:
+        return params
+    known = set(schema.keys())
+    filtered: dict[str, Any] = {}
+    dropped: list[str] = []
+    for k, v in params.items():
+        if k in known:
+            filtered[k] = v
+        else:
+            dropped.append(k)
+    if dropped:
+        logger.warning(
+            "param_loader_dropped_unknown_keys",
+            strategy=name,
+            dropped=dropped,
+            known=sorted(known),
+        )
+    return filtered
+
+
 def load_strategy_params(name: str) -> dict[str, Any] | None:
-    """Load active params from registry DB, falling back to TOML if no DB entry."""
+    """Load active params from registry DB, falling back to TOML if no DB entry.
+
+    Unknown keys (not in the strategy's PARAM_SCHEMA) are dropped with a
+    warning so stale registry entries cannot crash the factory.
+    """
     # Resolve old slug aliases to canonical new slugs
     try:
         from src.strategies.registry import _resolve_slug
         name = _resolve_slug(name)
     except Exception:
         pass
+    loaded: dict[str, Any] | None = None
     try:
         from src.strategies.param_registry import ParamRegistry
         registry = ParamRegistry()
         active = registry.get_active(name)
         registry.close()
         if active is not None:
-            return active
+            loaded = active
     except Exception:
         logger.debug("param_loader_registry_read_failed", strategy=name, exc_info=True)
-    # TOML fallback
-    path = _CONFIGS_DIR / f"{name}.toml"
-    if not path.exists():
+    if loaded is None:
+        # TOML fallback
+        path = _CONFIGS_DIR / f"{name}.toml"
+        if not path.exists():
+            return None
+        with open(path, "rb") as f:
+            doc = tomllib.load(f)
+        loaded = doc.get("params")
+    if loaded is None:
         return None
-    with open(path, "rb") as f:
-        doc = tomllib.load(f)
-    return doc.get("params")
+    return _filter_known_params(name, loaded)
