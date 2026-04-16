@@ -128,17 +128,25 @@ Each strategy module MUST export:
 ### `PARAM_SCHEMA` — parameter definitions
 
 ```python
+from src.indicators import compose_param_schema
+from src.indicators.adx import ADX
+
 PARAM_SCHEMA: dict[str, dict] = {
     "param_name": {
         "type": "int" | "float",
         "default": <value>,
         "min": <value>,
         "max": <value>,
+        "step": <value>,
         "description": "...",
-        "grid": [v1, v2, v3],  # optional
     },
+    # Reuse indicator param specs via compose_param_schema():
+    **compose_param_schema("adx_period", ADX),
 }
 ```
+
+No `grid` key — Optuna samples within `min`/`max`/`step` bounds using TPE.
+No pyramid parameters — pyramiding is account-level via `EngineConfig.pyramid_risk_level`.
 
 ### `STRATEGY_META` — classification metadata
 
@@ -155,7 +163,7 @@ STRATEGY_META: dict = {
 
 ### `create_<slug>_engine()` — factory function
 
-Factory kwarg names MUST match `PARAM_SCHEMA` keys (excluding `max_loss`, `lots`, `contract_type`).
+Factory kwarg names MUST match `PARAM_SCHEMA` keys (excluding `max_loss`, `lots`, `contract_type`, `pyramid_risk_level`).
 
 ## Intraday Session Helpers
 

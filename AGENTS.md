@@ -35,7 +35,7 @@ src/
   core/             # PositionEngine, types, policies, sizing — DO NOT edit without Risk Auditor sign-off
   data/             # Bar ingestion, crawl, daemon, session_utils, gap_detector, contracts, aggregator
   execution/        # Execution engine ABC, live and paper engines, disaster stop monitor
-  indicators/       # 25+ technical indicators (ATR, EMA, RSI, Bollinger, MACD, …)
+  indicators/       # 25+ streaming indicators (ATR, EMA, RSI, Bollinger, MACD, …) with PARAM_SPEC + compose_param_schema()
   mcp_server/       # MCP tools, facade, validation, run history
   monte_carlo/      # Block-bootstrap Monte Carlo
   oms/              # Order management system and volume profiling
@@ -74,13 +74,23 @@ and Risk Auditor sign-off before implementation begins.
 
 4. **Anti-martingale pyramid**: `Size_k = Size_0 × γ^k`. Max loss is bounded by the
    initial stop distance regardless of how many levels are added.
+   Pyramid configuration is NOT per-strategy — it is derived from the account-level
+   `RiskLevel` (0–3) set in `EngineConfig.pyramid_risk_level`. The mapping function
+   `pyramid_config_from_risk_level()` in `src/core/types.py` converts this to a
+   `PyramidConfig`. Strategies must not define pyramid parameters in `PARAM_SCHEMA`.
 
 5. **Session resets**: VWAP, ATR calibration windows, and OR windows must all respect
    TAIFEX session boundaries. Never carry these values across a session gap.
    The canonical session utility is `src/data/session_utils.py` — import from there,
    never hardcode session times elsewhere.
 
-6. **Intraday strategies go flat at session close**: Any strategy operating on 1m or 5m
+6. **Centralized indicators**: All reusable technical indicators live in `src/indicators/`.
+   Each indicator module exposes a `PARAM_SPEC` dict defining its tunable parameters
+   and bounds. Strategies import indicators from `src/indicators/` and use
+   `compose_param_schema()` to inherit indicator parameter definitions into their
+   `PARAM_SCHEMA`. Do not duplicate indicator math inside strategy files.
+
+7. **Intraday strategies go flat at session close**: Any strategy operating on 1m or 5m
    bars must close all positions by the last bar of each session. No overnight or
    inter-session carries. This is enforced in the backtest engine and must be enforced
    in live execution. See the Intraday Position and Benchmark Rules section below.
@@ -176,7 +186,7 @@ All agents with research or implementation tasks can call the backtest MCP serve
 - `run_backtest` — single path, quick parameter check on synthetic data
 - `run_backtest_realdata` — backtest on real historical OHLCV from database
 - `run_monte_carlo` — distributional robustness across N synthetic paths (prefer over single backtest)
-- `run_parameter_sweep` — grid/random search (max 3 params per sweep, gates-aware)
+- `run_parameter_sweep` — Optuna TPE Bayesian search with pruning (max 3 params per sweep, gates-aware)
 - `run_stress_test` — tail scenarios: gap_down, flash_crash, vol_regime_shift, liquidity_crisis, slow_bleed
 
 **Out-of-sample validation**
@@ -221,7 +231,7 @@ These are checked and signed by the Risk Auditor. No exceptions.
 - MC P50 Sharpe ≥ 0.4 on `sideways`
 - MDD < 25% on `flash_crash`
 - ±20% parameter perturbation causes < 30% Sharpe degradation
-- Optimal parameters not at the boundary of the search range
+- Optimal parameters not at `min`/`max` boundary of their PARAM_SCHEMA range
 
 **Historical alpha validation (Phase 2 — required for sign-off)**
 - Walk-forward validation Sharpe ≥ 1.0 on real OHLCV bars (out-of-sample only)

@@ -19,7 +19,9 @@ the intra-bar simulator that the backtester uses to evaluate them.
 - `src/strategies/__init__.py` — `HoldingPeriod`, `StrategyCategory`, `SignalTimeframe`,
   `StopArchitecture`, `OptimizationLevel`, and the holding-period × level quality gate matrix
 - `src/bar_simulator/` — intra-bar price sequence, entry checker, stop checker, simulator
-- `src/indicators/` — shared technical indicator library (ATR, EMA, RSI, Bollinger, MACD, …)
+- `src/indicators/` — centralized streaming indicator library (ATR, EMA, RSI, ADX, Bollinger,
+  Keltner, MACD, VWAP, Donchian, SMA, …). Each indicator module has a `PARAM_SPEC` dict
+  and `compose_param_schema()` builds `PARAM_SCHEMA` entries from it.
 - `src/core/` — only with Risk Auditor sign-off and a full regression run
 - Unit tests under `tests/unit/strategies/` and `tests/integration/strategies/`
 - The shared indicator state pattern (dataclass injected by reference across policies)
@@ -74,10 +76,17 @@ from src.strategies import (
 
 
 # --- Parameter schema — single source of truth for defaults, types, ranges ---
+# Use min/max/step (Optuna samples within these bounds). No "grid" key.
+# For indicator params, use compose_param_schema() to inherit from indicator PARAM_SPEC.
+from src.indicators import compose_param_schema
+
 PARAM_SCHEMA: dict[str, dict] = {
-    "lookback":      {"type": "int",   "default": 20,   "min": 5,   "max": 100, "grid": [10, 20, 40]},
-    "threshold":     {"type": "float", "default": 1.5,  "min": 0.5, "max": 5.0, "grid": [1.0, 1.5, 2.0]},
-    "stop_atr_mult": {"type": "float", "default": 2.0,  "min": 1.0, "max": 5.0, "grid": [1.5, 2.0, 2.5]},
+    "lookback":      {"type": "int",   "default": 20,   "min": 5,   "max": 100, "step": 5},
+    "threshold":     {"type": "float", "default": 1.5,  "min": 0.5, "max": 5.0, "step": 0.25},
+    "stop_atr_mult": {"type": "float", "default": 2.0,  "min": 1.0, "max": 5.0, "step": 0.5},
+    # Reuse indicator param specs — avoids duplicating bounds per strategy:
+    # **compose_param_schema("adx_period", ADX),
+    # **compose_param_schema("rsi_period", RSI),
 }
 
 
@@ -154,7 +163,7 @@ def create_[name]_engine(**params) -> "PositionEngine":
 
 `src/strategies/registry.py` scans `src/strategies/` recursively on import. A module is
 registered automatically if it exports **all three** of:
-1. `PARAM_SCHEMA: dict[str, dict]` — parameter bounds, types, and optional `grid`
+1. `PARAM_SCHEMA: dict[str, dict]` — parameter bounds (`min`/`max`/`step`), types, defaults
 2. `STRATEGY_META: dict` — category, holding_period, signal_timeframe, stop_architecture, …
 3. `create_<name>_engine(**params)` — factory returning a `PositionEngine`
 
@@ -218,6 +227,50 @@ and can be updated at runtime via `PATCH /api/paper-trade/sizing`.
 
 ---
 
+## Centralized Indicators
+
+Strategies must use the centralized streaming indicators from `src/indicators/` wherever
+possible (ADX, RSI, EMA, SMA, VWAP, Donchian, Bollinger, Keltner, MACD, SmoothedATR).
+Do not duplicate indicator math inside strategy files.
+
+Each indicator module exposes a `PARAM_SPEC: dict` with `min`/`max`/`step`/`default` for
+its tunable parameters. Use `compose_param_schema(param_name, IndicatorClass)` to pull
+these specs into your strategy's `PARAM_SCHEMA`:
+
+```python
+from src.indicators import compose_param_schema
+from src.indicators.adx import ADX
+
+PARAM_SCHEMA: dict[str, dict] = {
+    **compose_param_schema("adx_period", ADX),
+    "stop_atr_mult": {"type": "float", "default": 2.0, "min": 1.0, "max": 5.0, "step": 0.5},
+}
+```
+
+Custom signal-specific computations that don't exist in `src/indicators/` (e.g. squeeze
+detection, custom volume filters) may remain in the strategy's `_Indicators` class.
+
+---
+
+## Pyramid Configuration
+
+**Strategies must NOT define pyramid parameters** (max_levels, gamma, trigger_atr) in
+`PARAM_SCHEMA`. Pyramiding is controlled at the account level via `EngineConfig.pyramid_risk_level`
+(0–3), and the mapping function `pyramid_config_from_risk_level()` in `src/core/types.py`
+derives the `PyramidConfig`.
+
+Strategy factories accept `pyramid_risk_level: int = 0` and use it like this:
+
+```python
+from src.core.types import EngineConfig, pyramid_config_from_risk_level
+
+pyramid_cfg = pyramid_config_from_risk_level(pyramid_risk_level, max_loss=max_loss)
+add_policy = PyramidAddPolicy(pyramid_cfg, ...) if pyramid_cfg else NoAddPolicy()
+config = EngineConfig(max_loss=max_loss, pyramid_risk_level=pyramid_risk_level)
+```
+
+---
+
 ## Code Standards
 
 - All public methods: type annotations required.
@@ -234,7 +287,7 @@ and can be updated at runtime via `PATCH /api/paper-trade/sizing`.
 
 ```
 [ ] File at src/strategies/<holding_period>/<category>/<name>.py
-[ ] PARAM_SCHEMA defined with type/default/min/max (and grid where sweep-relevant)
+[ ] PARAM_SCHEMA defined with type/default/min/max/step (no grid key; use compose_param_schema for indicators)
 [ ] STRATEGY_META includes category, holding_period, signal_timeframe, stop_architecture
 [ ] create_<name>_engine(**params) factory auto-fills defaults from PARAM_SCHEMA
 [ ] get_info('<holding_period>/<category>/<name>') returns a StrategyInfo without error

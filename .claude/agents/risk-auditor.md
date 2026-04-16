@@ -50,7 +50,7 @@ Risk Auditor: [agent instance]
 [ ] MDD < 25% on flash_crash
 [ ] ±20% param perturbation: Sharpe drop < 30%
 [ ] N sweeps run: ___  Bonferroni-corrected Sharpe threshold: ___
-[ ] Optimal params NOT at the boundary of the search range
+[ ] Optimal params NOT at min/max boundary of their PARAM_SCHEMA range
 
 ━━━ PHASE 2: HISTORICAL ALPHA VALIDATION ━━━  (no exceptions)
 [ ] Data source confirmed as real OHLCV bars (not synthetic)
@@ -74,7 +74,9 @@ Risk Auditor: [agent instance]
 
 ━━━ CODE QUALITY ━━━
 [ ] Strategy registered via auto-discovery: `get_info('<holding_period>/<category>/<name>')` returns a valid StrategyInfo
-[ ] PARAM_SCHEMA and STRATEGY_META exported; STRATEGY_META fields match holding_period in the checklist
+[ ] PARAM_SCHEMA exported with min/max/step (no grid key); indicator params use compose_param_schema()
+[ ] STRATEGY_META exported; fields match holding_period in the checklist
+[ ] No pyramid parameters in PARAM_SCHEMA (pyramiding is account-level via EngineConfig.pyramid_risk_level)
 [ ] Unit test suite reviewed: all required test cases present (see Strategy Engineer checklist)
 [ ] All unit tests green (`uv run pytest -m "not integration"`)
 [ ] No forbidden imports in strategy files (os, sys, subprocess, socket, requests, shutil)
@@ -147,9 +149,9 @@ Questions for every signal in the policy file:
 
 ## Overfitting Review
 
-After Phase 1 parameter sweep:
-- If any optimal parameter sits at the boundary of the search range, the true optimum
-  is likely outside the tested range. Send back to Quant Researcher to extend the range.
+After Phase 1 parameter sweep (Optuna TPE):
+- If any optimal parameter sits at the `min` or `max` boundary of its PARAM_SCHEMA range,
+  the true optimum is likely outside the tested range. Send back to Quant Researcher to extend the range.
 - Bonferroni correction: if N independent sweeps were run, the effective threshold for
   claiming a parameter is significant is p < 0.05/N. For Sharpe: multiply reported
   Sharpe by sqrt(1/N) to get the deflated estimate.

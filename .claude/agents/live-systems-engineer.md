@@ -217,6 +217,9 @@ Order(lots=3, resized) → Executor
 - **Stop distance is required for risk-based sizing.** `StopPolicy.initial_stop()` must return a valid stop.
 - **Sizer runs inside `LiveStrategyRunner`**, between the `PositionEngine` and the executor.
 - **Pyramid adds use margin headroom**, not the initial risk budget.
+- **Pyramid configuration** is account-level: `EngineConfig.pyramid_risk_level` (0–3) maps to
+  a `PyramidConfig` via `pyramid_config_from_risk_level()` in `src/core/types.py`.
+  Strategies do not define pyramid parameters; they accept the risk level from the engine config.
 - **Config changes propagate immediately** to all active runners via the pipeline manager.
 
 ---

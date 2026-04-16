@@ -231,8 +231,8 @@ Rules:
 **Read references:** `references/position-sizing.md` (if changing position sizing)
 **MCP tools:** `run_parameter_sweep`, `read_strategy_file`, `write_strategy_file`, `run_backtest`
 
-For **parameter changes**: use `run_parameter_sweep` to search a small range
-around your hypothesis (e.g., trail_atr_mult=[3.0, 3.5, 4.0, 4.5]).
+For **parameter changes**: use `run_parameter_sweep` (Optuna TPE) to search the
+parameter space defined by `min`/`max`/`step` in `PARAM_SCHEMA`.
 Use `mode="research"` with `require_real_data=false` for fast synthetic iteration.
 
 For **logic changes**: use `read_strategy_file` to understand current code,
@@ -265,7 +265,7 @@ Use three-layer evaluation:
    This checks for overfitting and parameter cliff-edges.
    - MUST PASS: max Sharpe drop < 30%
    - MUST PASS: all parameters have stability CV < 0.20
-   - MUST PASS: no parameter has a cliff (>30% drop between adjacent grid points)
+   - MUST PASS: no parameter has a cliff (>30% drop between adjacent sample points)
    If sensitivity check fails, the candidate is overfit — reject and return to HYPOTHESIZE.
 
 3. **Real-data termination gate (mandatory for accept/stop decisions)**  
@@ -353,11 +353,14 @@ NEVER optimize these — they are risk management constraints:
 When optimizing, follow this sequence (from `references/statistical-validity.md`):
 1. Entry parameters (ADX threshold, Keltner mult, RSI thresholds, VWAP filter)
 2. Stop parameters (atr_sl_multi, atr_tp_multi, max_hold_bars)
-3. Position sizing (add_trigger_atr, lot_schedule, kelly_fraction)
+3. Position sizing (kelly_fraction); pyramid params are account-level, not tunable
 4. Time/volume filters (time_gate, vol_mult, cooldown_bars)
 5. Final validation on held-out data (different date range)
 
 ## Default Sweep Configuration
+
+All sweeps use Optuna TPE (Bayesian optimization with pruning). Parameter ranges
+are defined by `min`/`max`/`step` in each strategy's `PARAM_SCHEMA`.
 
 When running `run_parameter_sweep`, use one of these profiles:
 

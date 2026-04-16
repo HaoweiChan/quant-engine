@@ -65,7 +65,7 @@ Available MCP tools: all 17 tools including `promote_optimization_level` for lev
 | Strategy hypothesis, signal logic, parameter optimization, backtest analysis (via MCP) | Quant Researcher |
 | Historical bar ingestion, quality validation, resampling, session handling, data daemon, gap detection | Market Data Engineer |
 | Strategy policy code (EntryPolicy / AddPolicy / StopPolicy), auto-discovery registry, unit tests | Strategy Engineer |
-| Shared indicator library (`src/indicators/`), intra-bar simulator (`src/bar_simulator/`) | Strategy Engineer |
+| Centralized indicator library (`src/indicators/`, PARAM_SPEC, compose_param_schema), intra-bar simulator (`src/bar_simulator/`) | Strategy Engineer |
 | ML prediction engine (`src/prediction/`) — signal design | Quant Researcher |
 | ML prediction engine (`src/prediction/`) — implementation | Strategy Engineer |
 | React War Room dashboard, FastAPI endpoints, WebSocket feeds, chart rendering | Platform Engineer |
@@ -100,7 +100,9 @@ DEPENDS ON: [task number that must complete first]
 
 **On simulation vs alpha**: If any agent describes a Monte Carlo result as "the strategy performs well" or "strong alpha," immediately send it back. Require the agent to restate whether the result is from simulated or real data, and in-sample or out-of-sample. This is a hard rule, not a style preference.
 
-**On parameter sweeps**: No sweep over more than 2 parameters simultaneously. If a researcher proposes a 3-parameter joint sweep, require them to decompose it into sequential pairs before proceeding.
+**On parameter sweeps**: All sweeps use Optuna TPE (Bayesian). Maximum 3 parameters per sweep.
+Pyramid parameters (max_levels, gamma, trigger_atr) are NOT tunable — they are derived from
+`EngineConfig.pyramid_risk_level` (0–3) at the account level.
 
 **On core engine changes**: Any proposed change to `src/core/` requires Risk Auditor sign-off and a full regression run before it can be merged.
 

@@ -35,13 +35,17 @@ but you make no code changes and you touch no production systems.
 
 **Purpose**: Find parameters that survive distributional stress. Not an alpha claim.
 
-Tools: `run_monte_carlo`, `run_parameter_sweep`, `run_stress_test`
+Tools: `run_monte_carlo`, `run_parameter_sweep` (Optuna TPE), `run_stress_test`
 
 Protocol:
 1. Call `get_parameter_schema` first — understand the parameter space before sweeping anything.
+   Parameters use `min`/`max`/`step` bounds (no `grid` key). Optuna samples within these bounds
+   using TPE (Tree-structured Parzen Estimator) with optional pruning.
 2. Establish a baseline on `sideways` scenario first. If the strategy shows strong positive Sharpe in sideways, that is a warning sign, not a good result — investigate before continuing.
 3. Optimize sequentially: model parameters first (lookback, threshold, multiplier), then position parameters (ATR mult, Kelly fraction). Never jointly.
-4. Maximum 2 parameters per sweep. Decompose anything larger.
+   **Note**: Pyramid parameters (max_levels, gamma, trigger_atr) are NOT tunable — they are
+   derived from `EngineConfig.pyramid_risk_level` (0–3) at the account level.
+4. Maximum 3 parameters per sweep. Decompose anything larger.
 5. Run `run_stress_test` last — the strategy must survive all 5 scenarios without ruin.
 
 Phase 1 acceptance:
@@ -135,7 +139,7 @@ Never write "the strategy has alpha," "strong performance," or "ready for live" 
 
 ## Current Strategies
 
-The registry (`src/strategies/registry.py`) auto-discovers 16 strategies as of 2026-04-12.
+The registry (`src/strategies/registry.py`) auto-discovers 17 strategies as of 2026-04-16.
 Slug format is `<holding_period>/<category>/<name>`. Query `get_active_params(slug)` or
 `get_run_history(slug)` via the MCP server for current optimization state instead of
 hard-coding status here — the list below is informational only.
@@ -147,6 +151,7 @@ hard-coding status here — the list below is informational only.
 | `short_term/breakout/keltner_vwap_breakout` | breakout | short_term | 15min |
 | `short_term/mean_reversion/atr_mean_reversion` | mean_reversion | short_term | 1min |
 | `short_term/mean_reversion/bollinger_pinbar` | mean_reversion | short_term | 1min |
+| `short_term/mean_reversion/spread_reversion` | mean_reversion | short_term | 1min |
 | `short_term/mean_reversion/vwap_statistical_deviation` | mean_reversion | short_term | 1min |
 | `short_term/trend_following/night_session_long` | trend_following | short_term | 15min |
 | `medium_term/breakout/ta_orb` | breakout | medium_term | 15min |
