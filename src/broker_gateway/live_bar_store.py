@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from datetime import datetime
+from typing import Callable
 from dataclasses import dataclass
 
 from src.data.db import DEFAULT_DB_PATH
@@ -17,6 +18,8 @@ NIGHT_START_MIN = 15 * 60
 NIGHT_END_MIN = 5 * 60
 DAY_START_MIN = 8 * 60 + 45
 DAY_END_MIN = 13 * 60 + 45
+
+BarCompleteCallback = Callable[[str, "MinuteBar"], None]
 
 
 @dataclass
@@ -39,6 +42,11 @@ class LiveMinuteBarStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._bars: dict[str, MinuteBar] = {}
         self._lock = threading.Lock()
+        self._on_bar_complete: list[BarCompleteCallback] = []
+
+    def register_bar_callback(self, callback: BarCompleteCallback) -> None:
+        """Register a callback fired when a minute bar completes (new minute arrived)."""
+        self._on_bar_complete.append(callback)
 
     def ingest_tick(self, symbol: str, price: float, volume: int, tick_ts: datetime) -> None:
         if price <= 0:
@@ -49,9 +57,19 @@ class LiveMinuteBarStore:
         if not self._is_trading_minute(minute_of_day):
             return
         tick_volume = max(int(volume), 0)
+        completed_bar: MinuteBar | None = None
         with self._lock:
             current = self._bars.get(symbol)
             if current is None or current.timestamp != minute_ts:
+                if current is not None and current.timestamp != minute_ts:
+                    completed_bar = MinuteBar(
+                        timestamp=current.timestamp,
+                        open=current.open,
+                        high=current.high,
+                        low=current.low,
+                        close=current.close,
+                        volume=current.volume,
+                    )
                 current = MinuteBar(
                     timestamp=minute_ts,
                     open=price,
@@ -67,6 +85,13 @@ class LiveMinuteBarStore:
                 current.close = price
                 current.volume += tick_volume
             self._upsert_locked(symbol, current)
+        # Fire callbacks outside the lock to avoid deadlocks
+        if completed_bar is not None:
+            for cb in self._on_bar_complete:
+                try:
+                    cb(symbol, completed_bar)
+                except Exception:
+                    logger.exception("bar_complete_callback_error", symbol=symbol)
 
     @staticmethod
     def _is_trading_minute(minute_of_day: int) -> bool:

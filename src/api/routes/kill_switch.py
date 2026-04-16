@@ -5,7 +5,7 @@ import structlog
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from src.api.helpers import get_session_manager
+from src.api.helpers import get_session_manager, sync_live_pipeline
 
 
 router = APIRouter(prefix="/api/kill-switch", tags=["kill-switch"])
@@ -27,6 +27,7 @@ async def halt_all(body: ConfirmBody) -> dict:
     _require_confirm(body)
     mgr = get_session_manager()
     mgr.halt()
+    sync_live_pipeline()
     log.warning("kill_switch.halt", action="halt_all")
     return {"status": "halted"}
 
@@ -37,6 +38,7 @@ async def flatten_all(body: ConfirmBody) -> dict:
     _require_confirm(body)
     mgr = get_session_manager()
     mgr.flatten()
+    sync_live_pipeline()
     log.warning("kill_switch.flatten", action="flatten_all")
     return {"status": "flattening"}
 
@@ -47,5 +49,6 @@ async def resume_all(body: ConfirmBody) -> dict:
     _require_confirm(body)
     mgr = get_session_manager()
     mgr.resume()
+    sync_live_pipeline()
     log.info("kill_switch.resume", action="resume_all")
     return {"status": "resumed"}

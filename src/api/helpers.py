@@ -665,14 +665,30 @@ _session_manager = None
 _gateway_registry = None
 _account_equity_store = None
 _market_data_subscriber = None
+_live_bar_store = None
+_live_pipeline = None
+_telegram_dispatcher = None
+
+
+_subscriber_tick_count = 0
+_subscriber_last_tick_ts = None
+
+
+def get_subscriber_stats() -> dict:
+    """Return market data subscriber health stats."""
+    return {
+        "tick_count": _subscriber_tick_count,
+        "last_tick_ts": _subscriber_last_tick_ts.isoformat() if _subscriber_last_tick_ts else None,
+        "status": "connected" if _market_data_subscriber and _market_data_subscriber != "initializing" else "disconnected",
+    }
 
 
 def _start_market_data_subscriber() -> None:
-    """Start a standalone market data subscription for WebSocket live feed.
+    """Start a standalone market data subscription with auto-reconnect.
 
-    This runs independently of account gateways, ensuring live ticks are pushed
-    to the WebSocket broadcaster even when accounts are in simulation mode.
-    Uses the same GSM credentials as the data daemon.
+    Feeds ticks into:
+    1. WebSocket broadcaster for live UI updates
+    2. Shared LiveMinuteBarStore for strategy evaluation pipeline
     """
     global _market_data_subscriber
     if _market_data_subscriber is not None:
@@ -706,87 +722,141 @@ def _start_market_data_subscriber() -> None:
         logger.warning("market_data_subscriber: failed to load credentials: %s", exc)
         return
 
-    # Use sentinel to prevent double-login race condition
     _market_data_subscriber = "initializing"
+    bar_store = _live_bar_store
+
+    def _connect_and_subscribe(sj_mod) -> Any:
+        """Login and subscribe to tick data. Returns the api object."""
+        api = sj_mod.Shioaji(simulation=False)
+        api.login(api_key=api_key, secret_key=secret_key)
+        logger.info("market_data_subscriber: connected to Sinopac")
+        time.sleep(2)
+        futures_groups = [("TX", "TXF"), ("MTX", "MXF"), ("TMF", "TMF")]
+        for symbol, group_name in futures_groups:
+            try:
+                group = getattr(api.Contracts.Futures, group_name)
+                candidates = [c for c in group if getattr(c, "code", "")[-2:] not in ("R1", "R2")]
+                if not candidates:
+                    continue
+                contract = min(candidates, key=lambda c: getattr(c, "delivery_date", "9999"))
+                api.quote.subscribe(
+                    contract,
+                    quote_type=sj_mod.constant.QuoteType.Tick,
+                    version=sj_mod.constant.QuoteVersion.v1,
+                )
+                logger.info("market_data_subscriber: subscribed to %s (%s)", symbol, getattr(contract, "code", "?"))
+            except Exception as exc:
+                logger.warning("market_data_subscriber: subscribe failed for %s: %s", symbol, exc)
+        return api
 
     def _run_subscriber() -> None:
-        global _market_data_subscriber
-        try:
-            from src.api.ws.live_feed import push_tick
-            from src.api.main import get_main_loop
+        global _market_data_subscriber, _subscriber_tick_count, _subscriber_last_tick_ts
+        tick_loop = None
 
-            api = sj.Shioaji(simulation=False)
-            api.login(api_key=api_key, secret_key=secret_key)
-            _market_data_subscriber = api
-            logger.info("market_data_subscriber: connected to Sinopac")
-
-            tick_loop = None
-
-            def _on_tick(exchange, tick) -> None:
-                nonlocal tick_loop
-                code = getattr(tick, "code", "")
-                # Skip continuous contract codes (R1/R2) to avoid price corruption
-                if code.endswith("R1") or code.endswith("R2"):
-                    return
-                price = float(getattr(tick, "close", 0))
-                volume = int(getattr(tick, "volume", 0))
-                if price <= 0:
-                    return
-
-                symbol = "TX" if code.startswith("TXF") else "MTX" if code.startswith("MXF") else "TMF" if code.startswith("TMF") else None
-                if symbol is None:
-                    return
-
-                raw_ts = getattr(tick, "datetime", None)
-                if isinstance(raw_ts, datetime):
-                    tick_ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=ZoneInfo("Asia/Taipei"))
-                else:
-                    tick_ts = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
-
+        def _on_tick(exchange, tick) -> None:
+            nonlocal tick_loop
+            global _subscriber_tick_count, _subscriber_last_tick_ts
+            code = getattr(tick, "code", "")
+            if code.endswith("R1") or code.endswith("R2"):
+                return
+            price = float(getattr(tick, "close", 0))
+            volume = int(getattr(tick, "volume", 0))
+            if price <= 0:
+                return
+            symbol = "TX" if code.startswith("TXF") else "MTX" if code.startswith("MXF") else "TMF" if code.startswith("TMF") else None
+            if symbol is None:
+                return
+            raw_ts = getattr(tick, "datetime", None)
+            if isinstance(raw_ts, datetime):
+                tick_ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=ZoneInfo("Asia/Taipei"))
+            else:
+                tick_ts = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
+            _subscriber_tick_count += 1
+            _subscriber_last_tick_ts = tick_ts
+            if bar_store is not None:
                 try:
-                    loop = tick_loop
-                    if not loop or loop.is_closed():
-                        loop = get_main_loop()
-                        tick_loop = loop
-                    if loop and loop.is_running():
-                        asyncio.run_coroutine_threadsafe(push_tick(symbol, price, volume, tick_ts), loop)
+                    bar_store.ingest_tick(symbol, price, volume, tick_ts)
                 except Exception:
                     pass
+            try:
+                from src.api.ws.live_feed import push_tick
+                from src.api.main import get_main_loop
+                loop = tick_loop
+                if not loop or loop.is_closed():
+                    loop = get_main_loop()
+                    tick_loop = loop
+                if loop and loop.is_running():
+                    asyncio.run_coroutine_threadsafe(push_tick(symbol, price, volume, tick_ts), loop)
+            except Exception:
+                pass
 
-            api.quote.set_on_tick_fop_v1_callback(_on_tick)
-            time.sleep(2)  # wait for contracts to load
-
-            futures_groups = [("TX", "TXF"), ("MTX", "MXF"), ("TMF", "TMF")]
-            for symbol, group_name in futures_groups:
-                try:
-                    group = getattr(api.Contracts.Futures, group_name)
-                    candidates = [c for c in group if getattr(c, "code", "")[-2:] not in ("R1", "R2")]
-                    if not candidates:
-                        logger.warning("market_data_subscriber: no candidates for %s", symbol)
-                        continue
-                    contract = min(candidates, key=lambda c: getattr(c, "delivery_date", "9999"))
-                    api.quote.subscribe(
-                        contract,
-                        quote_type=sj.constant.QuoteType.Tick,
-                        version=sj.constant.QuoteVersion.v1,
-                    )
-                    logger.info("market_data_subscriber: subscribed to %s (%s)", symbol, getattr(contract, "code", "?"))
-                except Exception as exc:
-                    logger.warning("market_data_subscriber: subscribe failed for %s: %s", symbol, exc)
-        except Exception as exc:
-            logger.warning("market_data_subscriber: startup failed: %s", exc)
-            _market_data_subscriber = None
+        while True:
+            try:
+                api = _connect_and_subscribe(sj)
+                api.quote.set_on_tick_fop_v1_callback(_on_tick)
+                _market_data_subscriber = api
+                # Health monitor: check for tick stalls every 120s during trading hours
+                while True:
+                    time.sleep(120)
+                    now_taipei = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
+                    h, m = now_taipei.hour, now_taipei.minute
+                    mins = h * 60 + m
+                    in_session = mins >= 15 * 60 or mins < 5 * 60 or (8 * 60 + 45 <= mins <= 13 * 60 + 45)
+                    if in_session and _subscriber_last_tick_ts:
+                        stale_secs = (now_taipei - _subscriber_last_tick_ts).total_seconds()
+                        if stale_secs > 300:
+                            logger.warning("market_data_subscriber: no ticks for %.0fs, reconnecting", stale_secs)
+                            try:
+                                api.logout()
+                            except Exception:
+                                pass
+                            break
+            except Exception as exc:
+                logger.warning("market_data_subscriber: error, reconnecting in 30s: %s", exc)
+                _market_data_subscriber = "reconnecting"
+                time.sleep(30)
 
     threading.Thread(target=_run_subscriber, daemon=True, name="market-data-subscriber").start()
 
 
+def _init_telegram_dispatcher():
+    """Create a Telegram dispatcher if credentials are configured."""
+    try:
+        from src.secrets.manager import get_secret_manager
+        sm = get_secret_manager()
+        bot_token = sm.get("TELEGRAM_BOT_TOKEN")
+        chat_id = sm.get("TELEGRAM_CHAT_ID")
+        if not bot_token or not chat_id:
+            import structlog
+            structlog.get_logger(__name__).info("telegram_not_configured")
+            return None
+        from src.alerting.dispatcher import NotificationDispatcher
+        import structlog
+        dispatcher = NotificationDispatcher(bot_token=bot_token, chat_id=chat_id)
+        structlog.get_logger(__name__).info("telegram_dispatcher_ready", chat_id=chat_id[:4] + "...")
+        return dispatcher
+    except Exception:
+        import structlog
+        structlog.get_logger(__name__).warning("telegram_init_failed", exc_info=True)
+        return None
+
+
+def get_telegram_dispatcher():
+    """Get the global Telegram dispatcher (may be None if not configured)."""
+    _init_war_room()
+    return _telegram_dispatcher
+
+
 def _init_war_room() -> None:
-    """Lazy-init the SessionManager and GatewayRegistry singletons."""
+    """Lazy-init the SessionManager, GatewayRegistry, and LivePipeline singletons."""
     global _session_manager, _gateway_registry, _account_equity_store
+    global _live_bar_store, _live_pipeline
     if _gateway_registry is not None:
         return
     from src.broker_gateway.account_db import AccountDB
+    from src.broker_gateway.live_bar_store import LiveMinuteBarStore
     from src.broker_gateway.registry import GatewayRegistry
+    from src.execution.live_pipeline import LivePipelineManager
     from src.trading_session.manager import SessionManager
     from src.trading_session.session_db import SessionDB
     from src.trading_session.store import AccountEquityStore, SnapshotStore
@@ -798,19 +868,34 @@ def _init_war_room() -> None:
     _session_manager = SessionManager(registry=_gateway_registry, store=store, session_db=session_db)
     _session_manager.restore_from_db()
     _account_equity_store = AccountEquityStore()
-    # Seed sandbox accounts with synthetic equity history (idempotent).
-    # Skip the legacy GBM seeder for `mock_dev` when the real-backtest seeder
-    # is enabled — `seed_mock_warroom` owns that account's equity curve.
+    _live_bar_store = LiveMinuteBarStore()
+    # Seed mock accounts with synthetic equity history (idempotent).
     _warroom_seed_enabled = os.environ.get("QUANT_WARROOM_SEED") == "1"
     try:
         all_configs = db.load_all_accounts()
         for config in all_configs:
             if _warroom_seed_enabled and config.id == "mock-dev":
                 continue
-            if config.sandbox_mode and not _account_equity_store.has_history(config.id):
+            if config.broker == "mock" and not _account_equity_store.has_history(config.id):
                 _account_equity_store.seed_sandbox_equity(config.id)
     except Exception:
-        pass  # Non-critical: seeding failure doesn't block war room
+        pass
+    # Initialize Telegram notification dispatcher
+    global _telegram_dispatcher
+    _telegram_dispatcher = _init_telegram_dispatcher()
+    # Start the live execution pipeline (bar → signal → fill)
+    _live_pipeline = LivePipelineManager(
+        session_manager=_session_manager,
+        bar_store=_live_bar_store,
+        equity_store=_account_equity_store,
+        notifier=_telegram_dispatcher,
+    )
+    try:
+        from src.api.main import get_main_loop
+        loop = get_main_loop()
+    except Exception:
+        loop = None
+    _live_pipeline.start(loop=loop)
     # Start standalone market data subscriber for WebSocket live feed
     _start_market_data_subscriber()
 
@@ -877,3 +962,14 @@ def get_gateway_registry():
 def get_session_manager():
     _init_war_room()
     return _session_manager
+
+
+def get_live_pipeline():
+    _init_war_room()
+    return _live_pipeline
+
+
+def sync_live_pipeline() -> None:
+    """Re-sync live pipeline runners after session state changes."""
+    if _live_pipeline is not None:
+        _live_pipeline.sync()

@@ -40,6 +40,14 @@ def _get_session_manager():
     return get_session_manager()
 
 
+def _sync_pipeline() -> None:
+    from src.api.helpers import sync_live_pipeline
+    try:
+        sync_live_pipeline()
+    except Exception:
+        pass
+
+
 @router.post("/{session_id}/start")
 async def start_session(session_id: str) -> dict:
     mgr = _get_session_manager()
@@ -50,6 +58,7 @@ async def start_session(session_id: str) -> dict:
         if "not found" in msg:
             raise HTTPException(status_code=404, detail=msg)
         raise HTTPException(status_code=409, detail=msg)
+    _sync_pipeline()
     return {"session_id": session.session_id, "status": session.status}
 
 
@@ -63,6 +72,7 @@ async def stop_session(session_id: str) -> dict:
         if "not found" in msg:
             raise HTTPException(status_code=404, detail=msg)
         raise HTTPException(status_code=409, detail=msg)
+    _sync_pipeline()
     return {"session_id": session.session_id, "status": session.status}
 
 
@@ -76,6 +86,7 @@ async def pause_session(session_id: str) -> dict:
         if "not found" in msg:
             raise HTTPException(status_code=404, detail=msg)
         raise HTTPException(status_code=409, detail=msg)
+    _sync_pipeline()
     return {"session_id": session.session_id, "status": session.status}
 
 
@@ -93,6 +104,7 @@ async def flatten_session(session_id: str) -> dict:
         if "not found" in msg:
             raise HTTPException(status_code=404, detail=msg)
         raise HTTPException(status_code=409, detail=msg)
+    _sync_pipeline()
     return {"session_id": session.session_id, "status": session.status}
 
 

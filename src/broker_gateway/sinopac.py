@@ -295,11 +295,23 @@ class SinopacGateway(BrokerGateway):
             return AccountSnapshot.disconnected()
 
     def _build_snapshot(self) -> AccountSnapshot:
-        margin_data = self._api.margin()
-        equity = float(getattr(margin_data, "equity", 0))
-        margin_used = float(getattr(margin_data, "margin", 0))
-        available = float(getattr(margin_data, "available_margin", 0))
-        pnl_today = float(getattr(margin_data, "pnl", 0))
+        equity = 0.0
+        margin_used = 0.0
+        available = 0.0
+        pnl_today = 0.0
+        try:
+            margin_data = self._api.margin()
+            equity = float(getattr(margin_data, "equity", 0))
+            margin_used = float(getattr(margin_data, "margin", 0))
+            available = float(getattr(margin_data, "available_margin", 0))
+            pnl_today = float(getattr(margin_data, "pnl", 0))
+        except Exception:
+            # Simulation mode doesn't support margin(); use configured equity
+            if getattr(self, "_simulation", False):
+                equity = getattr(self, "_sim_equity", 1_000_000.0)
+                available = equity
+            else:
+                raise
 
         positions = self._fetch_positions()
         unrealized = sum(p.unrealized_pnl for p in positions)
