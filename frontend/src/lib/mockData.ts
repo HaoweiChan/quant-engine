@@ -91,6 +91,7 @@ export function getMockWarRoomData(config: MockConfig = DEFAULT_CONFIG): WarRoom
     snapshot: {
       equity: config.initialEquity + (currentPrice - config.basePrice) * 10,
       unrealized_pnl: (currentPrice - config.basePrice) * 5,
+      realized_pnl: 12500,
       drawdown_pct: Math.random() * 2,
       trade_count: 47,
       positions: [
