@@ -1,33 +1,28 @@
 """Volatility-Managed Buy-and-Hold — Inverse-Vol Overlay + DD Circuit Breaker.
 
 Architecture (Moreira & Muir 2017 + Faber TAA):
-  - Base position (1 lot, pyramid_level=0) is NEVER stopped -> tracks B&H exactly
-  - Overlay sized by inverse realized volatility: target_lots = vol_target / realized_vol
-  - DD circuit breaker: exit overlay when price < SMA AND drawdown > threshold
+  - Base lot (pyramid_level=0) held permanently -> tracks B&H exactly.
+  - Overlay sized by inverse realized vol: lots = vol_target / realized_vol.
+  - DD circuit breaker exits overlay when price < SMA AND drawdown > threshold.
 
-Alpha source: conditioning on second moment (vol) rather than first moment (trend
-direction). Low-vol periods get more overlay exposure; high-vol periods reduce.
+Alpha source: conditioning on second moment (vol) rather than first moment (trend).
+Low-vol periods get more overlay; high-vol periods reduce.
 
-Signal timeframe: 5m bars (converted internally to daily closes for vol calc).
+Signal timeframe: 5m bars synthesized into daily closes internally for vol calc.
+Warmup: ~70 min for SmoothedATR + 10 trading days for RealizedVol.
 
-Warmup Behavior:
-  - First entry occurs ~70 minutes after launch (SmoothedATR requires 14 samples
-    at 5m bar intervals before ready=True).
-  - Full overlay sizing activates after 10 trading days (_RealizedVol requires
-    10 daily closes for the vol_lookback window).
-  - This warmup is intentional for a swing strategy with 30-180 day expected
-    holding period (warmup represents 0.03%-0.16% of hold duration).
+Indicators sourced from src.indicators: RealizedVol, DDCircuitBreaker,
+DailyCloseStream, SMA, SmoothedATR.
 """
 from __future__ import annotations
 
-import math
 from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 import structlog
 
-from src.core.policies import AddPolicy, EntryPolicy, NoAddPolicy, StopPolicy
+from src.core.policies import AddPolicy, EntryPolicy, StopPolicy
 from src.core.types import (
     AccountState,
     AddDecision,
@@ -39,7 +34,14 @@ from src.core.types import (
     Position,
     PyramidConfig,
 )
-from src.indicators import SMA, SmoothedATR
+from src.indicators import (
+    SMA,
+    DailyCloseStream,
+    DDCircuitBreaker,
+    RealizedVol,
+    SmoothedATR,
+    compose_param_schema,
+)
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
 
 if TYPE_CHECKING:
@@ -48,15 +50,23 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Parameter schema — ~8 meaningful params, each with economic motivation
+# Parameter schema — composed from centralized indicator PARAM_SPECs
 # ---------------------------------------------------------------------------
 
-PARAM_SCHEMA: dict[str, dict] = {
-    # Realized volatility estimation
-    "vol_lookback_days": {
-        "type": "int", "default": 10, "min": 5, "max": 60,
-        "description": "Days of close-to-close returns for realized vol (10 = 2 weeks, more reactive).",
-    },
+_INDICATOR_PARAMS = compose_param_schema({
+    "vol_lookback_days": (RealizedVol, "period"),
+    "trend_sma_days": (SMA, "period"),
+    "dd_breaker_pct": (DDCircuitBreaker, "breaker_pct"),
+    "dd_reentry_pct": (DDCircuitBreaker, "reentry_pct"),
+})
+
+# Override defaults to match validated active params (vol_managed_bnh.toml)
+_INDICATOR_PARAMS["vol_lookback_days"]["default"] = 10
+_INDICATOR_PARAMS["trend_sma_days"]["default"] = 20
+_INDICATOR_PARAMS["dd_breaker_pct"]["default"] = 0.15
+_INDICATOR_PARAMS["dd_reentry_pct"]["default"] = 0.05
+
+_STRATEGY_PARAMS: dict[str, dict] = {
     "vol_target_annual": {
         "type": "float", "default": 0.20, "min": 0.05, "max": 0.40,
         "description": "Target annualized vol for overlay sizing (0.20 = 20%).",
@@ -65,21 +75,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "type": "float", "default": 2.0, "min": 0.5, "max": 5.0,
         "description": "Max overlay lots (cap on inverse-vol sizing).",
     },
-    # Trend filter (SMA gate for DD breaker)
-    "trend_sma_days": {
-        "type": "int", "default": 20, "min": 20, "max": 400,
-        "description": "SMA period in days for trend gate / DD breaker.",
-    },
-    # Drawdown circuit breaker (Faber TAA)
-    "dd_breaker_pct": {
-        "type": "float", "default": 0.15, "min": 0.03, "max": 0.25,
-        "description": "Price drawdown % to exit overlay (0.15 = 15%).",
-    },
-    "dd_reentry_pct": {
-        "type": "float", "default": 0.05, "min": 0.01, "max": 0.15,
-        "description": "Drawdown must recover to this level before re-entry.",
-    },
-    # Golden cross boost
     "boost_sma_fast_days": {
         "type": "int", "default": 0, "min": 0, "max": 100,
         "description": "Fast SMA for golden-cross boost (0 = disabled).",
@@ -88,12 +83,13 @@ PARAM_SCHEMA: dict[str, dict] = {
         "type": "float", "default": 0.0, "min": 0.0, "max": 3.0,
         "description": "Extra lots on golden cross (0 = disabled).",
     },
-    # Nominal stop (wide, base never triggers due to min_hold_lots)
     "stop_atr_mult": {
         "type": "float", "default": 15.0, "min": 1.0, "max": 20.0,
         "description": "Nominal stop multiplier (base lot protected by min_hold_lots).",
     },
 }
+
+PARAM_SCHEMA: dict[str, dict] = {**_INDICATOR_PARAMS, **_STRATEGY_PARAMS}
 
 STRATEGY_META: dict = {
     "category": StrategyCategory.TREND_FOLLOWING,
@@ -110,141 +106,11 @@ STRATEGY_META: dict = {
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# _OverlayHub — centralized state for the inverse-vol overlay system
 # ---------------------------------------------------------------------------
 
-# TAIFEX: day session ~60 5m bars, night ~168, total ~228 bars/day
-_TRADING_DAYS_PER_YEAR = 252
-_DEFAULT_BARS_PER_DAY = 228  # conservative for TAIFEX day+night
-
-
-class _DailyCloseStream:
-    """Converts 5m bar stream into daily close prices via date rollover.
-
-    Each time the calendar date changes (based on timestamp), the previous
-    day's last price is emitted as a daily close.
-    """
-
-    __slots__ = ("_last_date", "_last_price", "_daily_closes")
-
-    def __init__(self) -> None:
-        self._last_date: str | None = None
-        self._last_price: float = 0.0
-        self._daily_closes: list[float] = []
-
-    def update(self, price: float, timestamp: datetime) -> float | None:
-        """Feed one 5m bar close. Returns a daily close when date rolls over."""
-        current_date = timestamp.strftime("%Y-%m-%d")
-
-        if self._last_date is None:
-            self._last_date = current_date
-            self._last_price = price
-            return None
-
-        if current_date != self._last_date:
-            # Date changed -> emit previous day's close
-            daily_close = self._last_price
-            self._daily_closes.append(daily_close)
-            self._last_date = current_date
-            self._last_price = price
-            return daily_close
-
-        self._last_price = price
-        return None
-
-    @property
-    def closes(self) -> list[float]:
-        return self._daily_closes
-
-
-class _RealizedVol:
-    """Close-to-close realized volatility, annualized.
-
-    vol = std(daily_returns) * sqrt(252)
-    """
-
-    __slots__ = ("_lookback", "_returns", "_value")
-
-    def __init__(self, lookback_days: int) -> None:
-        self._lookback = lookback_days
-        self._returns: deque[float] = deque(maxlen=lookback_days)
-        self._value: float | None = None
-
-    def update(self, prev_close: float, curr_close: float) -> float | None:
-        """Feed one daily return, return annualized vol (None during warmup)."""
-        if prev_close <= 0:
-            return self._value
-        ret = math.log(curr_close / prev_close)
-        self._returns.append(ret)
-        if len(self._returns) < self._lookback:
-            return None
-        mean_ret = sum(self._returns) / len(self._returns)
-        var = sum((r - mean_ret) ** 2 for r in self._returns) / len(self._returns)
-        self._value = math.sqrt(var * _TRADING_DAYS_PER_YEAR)
-        return self._value
-
-    @property
-    def value(self) -> float | None:
-        return self._value
-
-    @property
-    def ready(self) -> bool:
-        return self._value is not None
-
-
-class _DDCircuitBreaker:
-    """Faber TAA-style drawdown circuit breaker with hysteresis.
-
-    State machine:
-      ACTIVE -> TRIPPED when dd >= dd_breaker_pct AND price < sma
-      TRIPPED -> ACTIVE when dd <= dd_reentry_pct OR price > sma
-    """
-
-    __slots__ = ("_dd_breaker_pct", "_dd_reentry_pct", "_peak_price",
-                 "_current_dd", "_tripped")
-
-    def __init__(self, dd_breaker_pct: float, dd_reentry_pct: float) -> None:
-        self._dd_breaker_pct = dd_breaker_pct
-        self._dd_reentry_pct = dd_reentry_pct
-        self._peak_price = 0.0
-        self._current_dd = 0.0
-        self._tripped = False
-
-    def update(self, price: float, below_sma: bool) -> None:
-        """Update drawdown state and circuit breaker."""
-        if price > self._peak_price:
-            self._peak_price = price
-        self._current_dd = (
-            1.0 - price / self._peak_price if self._peak_price > 0 else 0.0
-        )
-
-        if not self._tripped:
-            # Trip when drawdown exceeds threshold AND price below trend SMA
-            if (self._dd_breaker_pct > 0
-                    and self._current_dd >= self._dd_breaker_pct
-                    and below_sma):
-                self._tripped = True
-        else:
-            # Re-enter when drawdown recovers OR price back above SMA
-            if (self._current_dd <= self._dd_reentry_pct
-                    or not below_sma):
-                self._tripped = False
-
-    @property
-    def tripped(self) -> bool:
-        return self._tripped
-
-    @property
-    def current_dd(self) -> float:
-        return self._current_dd
-
-
 class _OverlayHub:
-    """Centralized state for the inverse-vol overlay system.
-
-    Ticked once per 5m bar (idempotent via timestamp guard).
-    Internally synthesizes daily closes for vol calculation.
-    """
+    """Centralized state for the inverse-vol overlay, fed one 5m bar per tick."""
 
     def __init__(
         self,
@@ -261,62 +127,61 @@ class _OverlayHub:
         self._max_overlay = vol_overlay_max_lots
         self._boost_lots = boost_lots
 
-        # Daily close synthesis
-        self._daily_stream = _DailyCloseStream()
+        self._daily_stream = DailyCloseStream()
+        self._rv = RealizedVol(period=vol_lookback_days)
+        self._trend_sma = SMA(period=trend_sma_days)
+        self._dd_breaker = DDCircuitBreaker(
+            breaker_pct=dd_breaker_pct, reentry_pct=dd_reentry_pct,
+        )
+        self.smoothed_atr = SmoothedATR(period=14)
+        self._boost_sma_fast = SMA(period=boost_sma_fast_days) if boost_sma_fast_days > 0 else None
+
         self._prev_daily_close: float | None = None
-
-        # Realized vol
-        self._rv = _RealizedVol(vol_lookback_days)
-
-        # Trend SMA (on daily closes)
-        self._trend_sma = SMA(trend_sma_days)
-
-        # Golden-cross boost SMAs (on daily closes)
-        self._boost_sma_fast = SMA(boost_sma_fast_days) if boost_sma_fast_days > 0 else None
-        # Slow SMA is shared with trend_sma
-
-        # DD circuit breaker
-        self._dd_breaker = _DDCircuitBreaker(dd_breaker_pct, dd_reentry_pct)
-
-        # Smoothed ATR for initial stop
-        self._smoothed_atr = SmoothedATR(14)
-
-        # Idempotency
         self._last_ts: datetime | None = None
-
-        # Public state (updated each tick)
-        self.desired_overlay_lots: float = 0.0
-        self.golden_cross_active: bool = False
-        self.base_lots: float = 1.0  # set by entry policy after risk-based sizing
-        self.rv_value: float | None = None
-        self.trend_sma_value: float | None = None
-        self.boost_sma_fast_value: float | None = None
-        # Daily-level overlay decision (sticky until next daily close)
+        # Daily overlay decision persists between daily-close events.
         self._daily_overlay_lots: float = 0.0
         self._daily_golden_cross: bool = False
 
+        # Public per-tick state; set by entry policy / tick().
+        self.desired_overlay_lots: float = 0.0
+        self.golden_cross_active: bool = False
+        self.base_lots: float = 1.0
+
+    # Public passthroughs for indicator inspection.
+    @property
+    def dd_breaker(self) -> DDCircuitBreaker:
+        return self._dd_breaker
+
+    @property
+    def rv_value(self) -> float | None:
+        return self._rv.value
+
+    @property
+    def trend_sma_value(self) -> float | None:
+        return self._trend_sma.value
+
+    @property
+    def boost_sma_fast_value(self) -> float | None:
+        return self._boost_sma_fast.value if self._boost_sma_fast is not None else None
+
     def tick(self, price: float, raw_atr: float, timestamp: datetime) -> None:
-        """Update all state from one 5m bar."""
+        """Update all state from one 5m bar (idempotent on timestamp)."""
         if timestamp == self._last_ts:
             return
         self._last_ts = timestamp
 
-        # Update smoothed ATR
         if raw_atr > 0:
-            self._smoothed_atr.update(raw_atr)
+            self.smoothed_atr.update(raw_atr)
 
-        # Update DD breaker with current price (runs on every 5m bar for responsiveness)
-        below_sma = False
-        if self._trend_sma.ready and self._trend_sma.value is not None:
-            below_sma = price < self._trend_sma.value
+        below_sma = (
+            self._trend_sma.value is not None and price < self._trend_sma.value
+        )
         self._dd_breaker.update(price, below_sma)
 
-        # Synthesize daily close
         daily_close = self._daily_stream.update(price, timestamp)
         if daily_close is not None:
             self._process_daily_close(daily_close)
 
-        # Overlay decision: use daily-sticky value, only override for DD breaker
         if self._dd_breaker.tripped:
             self.desired_overlay_lots = 0.0
             self.golden_cross_active = False
@@ -325,67 +190,41 @@ class _OverlayHub:
             self.golden_cross_active = self._daily_golden_cross
 
     def _process_daily_close(self, close: float) -> None:
-        """Process a new daily close: update vol, SMA, golden cross, overlay decision."""
-        # Realized vol
         if self._prev_daily_close is not None:
             self._rv.update(self._prev_daily_close, close)
         self._prev_daily_close = close
 
-        # Trend SMA
         self._trend_sma.update(close)
-        self.trend_sma_value = self._trend_sma.value
-
-        # Boost SMA
         if self._boost_sma_fast is not None:
             self._boost_sma_fast.update(close)
-            self.boost_sma_fast_value = self._boost_sma_fast.value
 
-        self.rv_value = self._rv.value
+        self._recompute_daily_overlay(close)
 
-        # Recompute daily overlay decision (sticky until next daily close)
-        self._compute_daily_overlay(close)
-
-    def _compute_daily_overlay(self, daily_close: float) -> None:
-        """Compute desired overlay lots — called once per daily close, not per 5m bar."""
-        # If vol not ready -> no overlay yet (warmup)
+    def _recompute_daily_overlay(self, daily_close: float) -> None:
         if not self._rv.ready or self._rv.value is None:
             self._daily_overlay_lots = 0.0
             self._daily_golden_cross = False
             return
 
-        # Inverse-vol sizing: target_lots = vol_target / realized_vol
-        rv = max(self._rv.value, 0.01)  # floor to prevent division explosion
-        raw_lots = self._vol_target / rv
+        # Inverse-vol sizing capped at max, with rv floor to avoid blow-up.
+        overlay_lots = min(self._vol_target / max(self._rv.value, 0.01), self._max_overlay)
 
-        # Cap at max
-        overlay_lots = min(raw_lots, self._max_overlay)
+        # Trend gate: no overlay when price closed below trend SMA.
+        trend_val = self._trend_sma.value
+        if trend_val is not None and daily_close < trend_val:
+            overlay_lots = 0.0
 
-        # Trend gate: only add overlay when daily close > SMA
-        if self._trend_sma.ready and self._trend_sma.value is not None:
-            if daily_close < self._trend_sma.value:
-                overlay_lots = 0.0
+        # Golden cross boost.
+        fast = self._boost_sma_fast
+        gc = (
+            fast is not None and fast.value is not None
+            and trend_val is not None and fast.value > trend_val
+        )
+        self._daily_golden_cross = gc
+        if gc:
+            overlay_lots += self._boost_lots
 
-        # Golden cross boost
-        self._daily_golden_cross = False
-        if (self._boost_sma_fast is not None
-                and self._boost_sma_fast.ready
-                and self._trend_sma.ready
-                and self._boost_sma_fast.value is not None
-                and self._trend_sma.value is not None):
-            if self._boost_sma_fast.value > self._trend_sma.value:
-                self._daily_golden_cross = True
-                overlay_lots += self._boost_lots
-
-        # Final cap
         self._daily_overlay_lots = min(overlay_lots, self._max_overlay + self._boost_lots)
-
-    @property
-    def dd_breaker(self) -> _DDCircuitBreaker:
-        return self._dd_breaker
-
-    @property
-    def smoothed_atr(self) -> SmoothedATR:
-        return self._smoothed_atr
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +234,9 @@ class _OverlayHub:
 class InverseVolEntryPolicy(EntryPolicy):
     """Enter risk-sized base position on first bar (permanent B&H). Tick overlay hub."""
 
-    def __init__(self, config: PyramidConfig, hub: _OverlayHub, initial_capital: float = 2_000_000.0) -> None:
+    def __init__(
+        self, config: PyramidConfig, hub: _OverlayHub, initial_capital: float = 2_000_000.0,
+    ) -> None:
         self._config = config
         self.hub = hub
         self._initial_capital = initial_capital
@@ -407,36 +248,29 @@ class InverseVolEntryPolicy(EntryPolicy):
         engine_state: EngineState,
         account: AccountState | None = None,
     ) -> EntryDecision | None:
-        raw_atr = snapshot.atr.get("daily", 0.0)
-        self.hub.tick(snapshot.price, raw_atr, snapshot.timestamp)
+        self.hub.tick(snapshot.price, snapshot.atr.get("daily", 0.0), snapshot.timestamp)
 
-        if engine_state.mode in ("halted", "rule_only"):
-            return None
-        if len(engine_state.positions) > 0:
+        if engine_state.mode in ("halted", "rule_only") or engine_state.positions:
             return None
 
         atr = self.hub.smoothed_atr.value
         if atr is None or atr <= 0:
             return None
 
-        stop_distance = self._config.stop_atr_mult * atr
-        equity = account.equity if account is not None else self._initial_capital
-
-        # Use margin-based sizing: B&H base lot has a nominal stop that never
-        # triggers (protected by min_hold_lots), so stop-distance risk sizing
-        # is not meaningful. margin_fraction controls capital deployment.
+        # Margin-based sizing: base lot's nominal stop is protected by min_hold_lots,
+        # so risk-per-trade sizing is not meaningful; margin fraction gates capital.
         from src.core.sizing import compute_margin_lots
         base_lots = compute_margin_lots(
-            equity=equity,
+            equity=account.equity if account is not None else self._initial_capital,
             margin_per_unit=snapshot.margin_per_unit,
-            margin_fraction=self._config.margin_limit * 0.20,  # 20% of margin budget for base
+            margin_fraction=self._config.margin_limit * 0.20,
             min_lot=snapshot.min_lot,
         )
         if base_lots <= 0:
             return None
-        # Store on hub so add policy can scale overlay proportionally
         self.hub.base_lots = base_lots
 
+        stop_distance = self._config.stop_atr_mult * atr
         return EntryDecision(
             lots=base_lots,
             contract_type="large",
@@ -485,34 +319,18 @@ class InverseVolAddPolicy(AddPolicy):
         signal: MarketSignal | None,
         engine_state: EngineState,
     ) -> AddDecision | None:
-        if engine_state.mode == "halted":
+        if engine_state.mode == "halted" or not engine_state.positions:
             return None
-        if not engine_state.positions:
-            return None
-        # Only 1 overlay level (level 1)
-        if engine_state.pyramid_level >= 2:
+        if engine_state.pyramid_level >= 2:  # single overlay level
             return None
 
-        # Tick hub (idempotent)
-        raw_atr = snapshot.atr.get("daily", 0.0)
-        self._hub.tick(snapshot.price, raw_atr, snapshot.timestamp)
-
-        desired = self._hub.desired_overlay_lots
-        if desired <= 0:
+        self._hub.tick(snapshot.price, snapshot.atr.get("daily", 0.0), snapshot.timestamp)
+        if self._hub.desired_overlay_lots <= 0:
             return None
 
-        # Scale overlay by base position size for contract-agnostic sizing.
-        # Hub computes desired lots as "units of exposure"; multiply by
-        # base_lots so MTX (4x base) gets proportionally more overlay lots.
-        lots = desired * self._hub.base_lots
-        # Round to nearest whole lot
-        lots = max(1.0, round(lots))
-
-        return AddDecision(
-            lots=lots,
-            contract_type="large",
-            move_existing_to_breakeven=False,
-        )
+        # Scale by base_lots so MTX (more base lots) gets proportionally more overlay.
+        lots = max(1.0, round(self._hub.desired_overlay_lots * self._hub.base_lots))
+        return AddDecision(lots=lots, contract_type="large", move_existing_to_breakeven=False)
 
 
 class InverseVolStopPolicy(StopPolicy):
@@ -535,19 +353,14 @@ class InverseVolStopPolicy(StopPolicy):
         snapshot: MarketSnapshot,
         high_history: deque[float],
     ) -> float:
-        # Tick hub (main update path for base lot)
-        raw_atr = snapshot.atr.get("daily", 0.0)
-        self._hub.tick(snapshot.price, raw_atr, snapshot.timestamp)
+        self._hub.tick(snapshot.price, snapshot.atr.get("daily", 0.0), snapshot.timestamp)
 
-        # Base lot: never move stop
+        # Base lot never moves stop. Overlay exits (ratchet stop to price) when
+        # desired overlay drops to 0 (DD breaker tripped, trend gate failed, or vol spike).
         if position.pyramid_level == 0:
             return position.stop_level
-
-        # Overlay: exit when desired overlay drops to 0
-        # (DD breaker tripped, trend gate failed, or vol spike)
         if self._hub.desired_overlay_lots <= 0:
-            return snapshot.price  # ratchet stop up -> triggers exit
-
+            return snapshot.price
         return position.stop_level
 
 
@@ -558,33 +371,22 @@ class InverseVolStopPolicy(StopPolicy):
 def create_vol_managed_bnh_engine(
     max_loss: float = 500_000.0,
     initial_capital: float = 2_000_000.0,
-    # Vol overlay — optimized 2026-04-11, validated TX Sharpe=1.67 MTX Sharpe=1.62
     vol_lookback_days: int = 10,
     vol_target_annual: float = 0.20,
     vol_overlay_max_lots: float = 2.0,
-    # Trend filter
     trend_sma_days: int = 20,
-    # DD circuit breaker
     dd_breaker_pct: float = 0.15,
     dd_reentry_pct: float = 0.05,
-    # Golden cross boost
     boost_sma_fast_days: int = 0,
     boost_lots: float = 0.0,
-    # Nominal stop
     stop_atr_mult: float = 15.0,
-    # Legacy compat (accepted, unused)
-    trail_atr_mult: float = 15.0,
-    trail_lookback: int = 22,
-    max_levels: int = 2,
-    add_spacing_atr: float = 4.0,
-    gamma: float = 0.80,
-    margin_cap_pct: float = 0.60,
-    reentry_cooldown: int = 0,
-) -> "PositionEngine":
+) -> PositionEngine:
     """Build a PositionEngine for vol-managed B&H (inverse-vol overlay).
 
-    Base lot (1 TX) held permanently = B&H floor.
-    Overlay sized by inverse realized vol with DD circuit breaker.
+    Pyramid is NOT tuned here — account-level pyramid_risk_level in EngineConfig
+    governs all pyramid behavior (AGENTS.md invariant #4). The PyramidConfig
+    below encodes this strategy's structural 2-level B&H design as internal
+    constants. Defaults validated 2026-04-11 (TX Sharpe 1.67, MTX Sharpe 1.62).
     """
     from src.core.position_engine import PositionEngine
 
@@ -592,11 +394,11 @@ def create_vol_managed_bnh_engine(
         max_loss=max_loss,
         max_levels=2,
         lot_schedule=[[1, 0], [1, 0]],
-        add_trigger_atr=[999.0],  # unused — InverseVolAddPolicy controls adds
+        add_trigger_atr=[999.0],  # sentinel — InverseVolAddPolicy controls adds
         stop_atr_mult=stop_atr_mult,
-        trail_atr_mult=trail_atr_mult,
-        trail_lookback=trail_lookback,
-        margin_limit=margin_cap_pct,
+        trail_atr_mult=stop_atr_mult,  # unused; required by PyramidConfig
+        trail_lookback=22,
+        margin_limit=0.60,
         long_only_compat_mode=True,
     )
     engine_config = EngineConfig(
@@ -616,12 +418,10 @@ def create_vol_managed_bnh_engine(
         boost_sma_fast_days=boost_sma_fast_days,
         boost_lots=boost_lots,
     )
-
     entry = InverseVolEntryPolicy(config, hub, initial_capital=initial_capital)
-    add_policy: AddPolicy = InverseVolAddPolicy(hub)
     engine = PositionEngine(
         entry_policy=entry,
-        add_policy=add_policy,
+        add_policy=InverseVolAddPolicy(hub),
         stop_policy=InverseVolStopPolicy(hub, config),
         config=engine_config,
     )
