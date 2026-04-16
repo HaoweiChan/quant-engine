@@ -1,18 +1,14 @@
 """Unit tests for Donchian Trend-Strength structural parameters.
 
-Tests adaptive trailing stop, breakeven logic, and entry slack.
+Tests adaptive trailing stop, breakeven logic, and factory wiring.
 """
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, time
-from unittest.mock import MagicMock, patch
-
-import pytest
+from datetime import datetime
 
 from src.core.types import (
     ContractSpecs,
-    EngineState,
     MarketSnapshot,
     Position,
     TradingHours,
@@ -78,7 +74,7 @@ def _make_position(
 
 def _warmed_indicators(n: int = 25, lookback: int = 20) -> _Indicators:
     """Return indicators with enough bars to produce Donchian / VWAP / RSI."""
-    ind = _Indicators(lookback_period=lookback, adx_len=14, rsi_len=5)
+    ind = _Indicators(lookback_period=lookback, rsi_len=5)
     base = 20000.0
     for i in range(n):
         ts = datetime(2025, 6, 1, 9, i)
@@ -243,67 +239,6 @@ class TestBreakevenStop:
         assert new_stop <= entry
 
 
-class TestEntrySlack:
-    """Verify entry_slack_atr relaxes pullback requirement."""
-
-    def _make_entry_policy(
-        self, indicators: _Indicators, entry_slack_atr: float = 0.0
-    ) -> DonchianTrendStrengthEntry:
-        return DonchianTrendStrengthEntry(
-            indicators=indicators,
-            lots=1.0,
-            adx_threshold=0.0,
-            rsi_long_thresh=100.0,
-            rsi_short_thresh=0.0,
-            vol_mult=0.0,
-            min_channel_atr=0.0,
-            atr_sl_multi=2.0,
-            atr_tp_multi=3.0,
-            time_gate=False,
-            entry_slack_atr=entry_slack_atr,
-        )
-
-    def _setup_uptrend(self, ind: _Indicators) -> None:
-        """Set indicator values for an uptrend (VWAP > mid)."""
-        ind.vwap = 20200.0
-        ind.donchian_mid = 20100.0
-        ind.donchian_upper = 20300.0
-        ind.donchian_lower = 19900.0
-        ind.adx = 30.0
-        ind.rsi = 50.0
-        ind.channel_width = 400.0
-        ind.bar_volume = 100.0
-        ind.avg_volume = 100.0
-
-    @patch.object(_Indicators, "update")
-    def test_strict_entry_rejects_above_mid(self, mock_update: MagicMock) -> None:
-        ind = _warmed_indicators()
-        entry = self._make_entry_policy(ind, entry_slack_atr=0.0)
-        self._setup_uptrend(ind)
-        price = 20150.0
-        snap = _make_snapshot(price, datetime(2025, 6, 1, 10, 0), 200.0)
-        engine_state = EngineState(
-            positions=(), pyramid_level=0, mode="active", total_unrealized_pnl=0.0,
-        )
-        decision = entry.should_enter(snap, None, engine_state)
-        assert decision is None  # price > mid, no slack
-
-    @patch.object(_Indicators, "update")
-    def test_slack_allows_entry_above_mid(self, mock_update: MagicMock) -> None:
-        ind = _warmed_indicators()
-        entry = self._make_entry_policy(ind, entry_slack_atr=0.5)
-        self._setup_uptrend(ind)
-        # Price 50 above mid; slack = 0.5 * 200 = 100 → within tolerance
-        price = 20150.0
-        snap = _make_snapshot(price, datetime(2025, 6, 1, 10, 0), 200.0)
-        engine_state = EngineState(
-            positions=(), pyramid_level=0, mode="active", total_unrealized_pnl=0.0,
-        )
-        decision = entry.should_enter(snap, None, engine_state)
-        assert decision is not None
-        assert decision.direction == "long"
-
-
 class TestMaxHoldBarsTimeout:
     """Verify that max_hold_bars triggers a time exit."""
 
@@ -340,14 +275,9 @@ class TestFactoryWiresNewParams:
             profit_lock_atr=1.5,
             locked_trail_ratio=0.6,
             breakeven_atr=1.0,
-            entry_slack_atr=0.3,
         )
         assert engine is not None
-        # Verify stop policy received the params
         stop = engine._stop_policy
         assert stop._profit_lock_atr == 1.5
         assert stop._locked_trail_ratio == 0.6
         assert stop._breakeven_atr == 1.0
-        # Verify entry policy received the params
-        entry = engine._entry_policy
-        assert entry._entry_slack_atr == 0.3
