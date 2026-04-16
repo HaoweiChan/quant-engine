@@ -182,7 +182,11 @@ export function WarRoomLayout() {
   // Periodic refresh only fetches bars after the latest cached bar (incremental).
   const CACHE_BARS = 3000;
   const loadBars = useCallback((tf: number, symbol: string, incremental = false) => {
-    const today = new Date().toISOString().slice(0, 10);
+    // DB timestamps are naive Taipei local; use Taipei calendar date for
+    // range bounds so post-midnight Taipei bars (still today's UTC date yesterday)
+    // are not cut off by the API's lexicographic date filter.
+    const toTaipeiDate = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Taipei" });
+    const today = toTaipeiDate(new Date());
     const cached = warRoomStore.getState().bars;
     let start: string;
 
@@ -191,7 +195,7 @@ export function WarRoomLayout() {
       start = lastTs.slice(0, 10);
     } else {
       const lookbackDays = Math.max(1, Math.ceil((CACHE_BARS * tf) / 1440));
-      const defaultStart = new Date(Date.now() - lookbackDays * 86400000).toISOString().slice(0, 10);
+      const defaultStart = toTaipeiDate(new Date(Date.now() - lookbackDays * 86400000));
       // In playback mode, load bars from WARMUP_BARS before range start.
       // This gives strategies visual context (indicators, moving averages) and
       // ensures the chart isn't empty when playback begins.
