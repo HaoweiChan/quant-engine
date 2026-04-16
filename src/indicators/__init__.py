@@ -8,14 +8,14 @@ All indicators follow the same interface pattern:
 - ``reset()``: clear all state for session boundary resets
 """
 from src.indicators.adx import ADX
-from src.indicators.daily_close_stream import DailyCloseStream
 from src.indicators.atr import ATR, ATRPercentile, SmoothedATR
 from src.indicators.bollinger import BollingerBands
 from src.indicators.cmf import CMF
+from src.indicators.daily_close_stream import DailyCloseStream
 from src.indicators.dd_circuit_breaker import DDCircuitBreaker
 from src.indicators.donchian import Donchian
 from src.indicators.ema import EMA, ema_step
-from src.indicators.fisher_transform import FisherTransform, FisherResult
+from src.indicators.fisher_transform import FisherResult, FisherTransform
 from src.indicators.hurst import HurstExponent
 from src.indicators.itrend import ITrend
 from src.indicators.keltner import KeltnerChannel
@@ -26,6 +26,7 @@ from src.indicators.obv import OBV
 from src.indicators.parabolic_sar import ParabolicSAR, PSARResult
 from src.indicators.realized_vol import RealizedVol
 from src.indicators.roc import ROC
+from src.indicators.rolling_zscore import RollingZScore
 from src.indicators.rsi import RSI
 from src.indicators.sma import SMA
 from src.indicators.stc import STC
@@ -33,9 +34,10 @@ from src.indicators.stochastic import Stochastic, StochasticResult
 from src.indicators.supertrend import SuperTrend, SuperTrendResult
 from src.indicators.true_atr import TrueATR
 from src.indicators.twap import TWAP
-from src.indicators.volume_profile import VolumeProfile, ProfileResult, ProfileBin
+from src.indicators.volume_profile import ProfileBin, ProfileResult, VolumeProfile
 from src.indicators.vwap import VWAP
 from src.indicators.williams_r import WilliamsR
+
 
 def compose_param_schema(
     indicator_map: dict[str, tuple[type, str]],
@@ -103,6 +105,7 @@ __all__ = [
     "RealizedVol",
     "ROC",
     "RSI",
+    "RollingZScore",
     "SMA",
     "STC",
     "SmoothedATR",
