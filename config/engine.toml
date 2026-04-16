@@ -50,6 +50,7 @@ max_contracts_per_order = 2
 max_total_contracts = 10
 
 [alerting]
+enabled = true
 telegram_chat_id = ""
 daily_summary_time = "15:00"
 
