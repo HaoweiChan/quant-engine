@@ -454,7 +454,13 @@ class TestShortDirection:
     def _make_short_engine(config: PyramidConfig) -> PositionEngine:
         """Build engine with a short-biased entry policy for testing."""
         from src.core.policies import EntryPolicy
-        from src.core.types import AccountState, EngineState, EntryDecision, MarketSignal, MarketSnapshot
+        from src.core.types import (
+            AccountState,
+            EngineState,
+            EntryDecision,
+            MarketSignal,
+            MarketSnapshot,
+        )
 
         class ShortEntryPolicy(EntryPolicy):
             def __init__(self, cfg: PyramidConfig) -> None:

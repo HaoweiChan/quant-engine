@@ -1,21 +1,22 @@
-"""Structural/smoke tests for the vol_managed_bnh swing strategy.
+"""Structural/smoke tests for the vol_managed_bnh swing strategy (post-refactor).
 
 Covers:
-  - PARAM_SCHEMA composition from indicator PARAM_SPECs
-  - No pyramid params in schema (AGENTS.md invariant #4)
-  - Strategy-specific param presence and types
-  - Factory builds a PositionEngine with indicator_provider
-  - STRATEGY_META values
-  - Base-lot entry on first valid bar after warmup
-  - Overlay stays zero before vol warmup (< 10 daily closes)
-  - DD breaker zeroes overlay when tripped
-  - Registry auto-discovers the strategy
+  - PARAM_SCHEMA has exactly the 5 signal params (pure signal emitter)
+  - No pyramid, no sizing, no boost kwargs in schema
+  - Factory rejects unknown kwargs, accepts deprecated with warning
+  - AddDecision carries exposure_multiplier metadata
+  - EntryDecision emits lots=1.0 hint (PortfolioSizer resolves)
+  - STRATEGY_META values and registry discovery
 """
 from __future__ import annotations
 
+import warnings
 from datetime import datetime, timedelta
 
+import pytest
+
 from src.core.types import (
+    METADATA_EXPOSURE_MULTIPLIER,
     AccountState,
     ContractSpecs,
     MarketSnapshot,
@@ -25,6 +26,8 @@ from src.strategies import HoldingPeriod, SignalTimeframe, StrategyCategory
 from src.strategies.swing.trend_following.vol_managed_bnh import (
     PARAM_SCHEMA,
     STRATEGY_META,
+    InverseVolAddPolicy,
+    InverseVolEntryPolicy,
     _OverlayHub,
     create_vol_managed_bnh_engine,
 )
@@ -87,11 +90,23 @@ def _make_account(equity: float = 2_000_000.0) -> AccountState:
 
 
 # ---------------------------------------------------------------------------
-# 1. PARAM_SCHEMA composition
+# 1. PARAM_SCHEMA composition — pure signal emitter has exactly 5 params
 # ---------------------------------------------------------------------------
 
 class TestParamSchemaComposition:
-    def test_param_schema_is_composed(self) -> None:
+    def test_param_schema_has_5_signal_params(self) -> None:
+        expected = {
+            "vol_lookback_days",
+            "trend_sma_days",
+            "dd_breaker_pct",
+            "dd_reentry_pct",
+            "vol_target_annual",
+        }
+        assert set(PARAM_SCHEMA) == expected, (
+            f"Expected 5 signal params, got {set(PARAM_SCHEMA)}"
+        )
+
+    def test_param_schema_is_composed_from_indicators(self) -> None:
         assert PARAM_SCHEMA["vol_lookback_days"]["description"].startswith("[RealizedVol]")
         assert PARAM_SCHEMA["trend_sma_days"]["description"].startswith("[SMA]")
         assert PARAM_SCHEMA["dd_breaker_pct"]["description"].startswith("[DDCircuitBreaker]")
@@ -102,27 +117,17 @@ class TestParamSchemaComposition:
             "max_levels", "gamma", "trail_atr_mult", "trail_lookback",
             "margin_cap_pct", "add_spacing_atr", "reentry_cooldown",
         }
-        assert forbidden.isdisjoint(PARAM_SCHEMA.keys()), (
-            f"Pyramid params found in PARAM_SCHEMA: {forbidden & PARAM_SCHEMA.keys()}"
-        )
+        assert forbidden.isdisjoint(PARAM_SCHEMA.keys())
 
-    def test_param_schema_has_strategy_specific_params(self) -> None:
-        required = {
-            "vol_target_annual",
-            "vol_overlay_max_lots",
+    def test_param_schema_has_no_sizing_or_boost_params(self) -> None:
+        forbidden = {
+            "initial_capital",
             "boost_sma_fast_days",
             "boost_lots",
+            "vol_overlay_max_lots",
             "stop_atr_mult",
         }
-        for key in required:
-            assert key in PARAM_SCHEMA, f"Missing strategy param: {key}"
-
-        assert PARAM_SCHEMA["vol_target_annual"]["type"] == "float"
-        assert PARAM_SCHEMA["vol_target_annual"]["min"] >= 0.0
-        assert PARAM_SCHEMA["vol_overlay_max_lots"]["type"] == "float"
-        assert PARAM_SCHEMA["boost_sma_fast_days"]["type"] == "int"
-        assert PARAM_SCHEMA["boost_lots"]["type"] == "float"
-        assert PARAM_SCHEMA["stop_atr_mult"]["type"] == "float"
+        assert forbidden.isdisjoint(PARAM_SCHEMA.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +143,33 @@ class TestFactory:
         assert hasattr(engine, "indicator_provider")
         assert engine.indicator_provider is not None
 
+    def test_factory_rejects_typo_kwargs(self) -> None:
+        with pytest.raises(TypeError, match="unknown kwargs"):
+            create_vol_managed_bnh_engine(vol_targe_annual=0.2)  # typo
+
+    def test_factory_accepts_legacy_kwargs_with_warning(self) -> None:
+        legacy = {
+            "trail_atr_mult": 3.0,
+            "trail_lookback": 22,
+            "max_levels": 2,
+            "add_spacing_atr": 1.5,
+            "gamma": 0.5,
+            "margin_cap_pct": 0.5,
+            "reentry_cooldown": 5,
+            "initial_capital": 2_000_000.0,
+            "boost_sma_fast_days": 0,
+            "boost_lots": 0.0,
+            "vol_overlay_max_lots": 2.0,
+            "stop_atr_mult": 15.0,
+        }
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            engine = create_vol_managed_bnh_engine(**legacy)
+            assert any(
+                issubclass(warning.category, DeprecationWarning) for warning in w
+            ), f"Expected DeprecationWarning, got {[x.category for x in w]}"
+        assert engine is not None
+
 
 # ---------------------------------------------------------------------------
 # 3. Strategy meta
@@ -151,30 +183,29 @@ class TestStrategyMeta:
 
 
 # ---------------------------------------------------------------------------
-# 4. Base-lot entry after ATR warmup
+# 4. Base-lot entry after ATR warmup — emits lots=1.0 hint
 # ---------------------------------------------------------------------------
 
 class TestBaseLotEntry:
     def test_base_lot_entry_on_first_valid_bar(self) -> None:
-        """After 20 x 5m bars (> SmoothedATR 14-bar warmup), engine enters."""
+        """After ATR warmup bars, engine enters with lots=1.0 hint."""
         engine = create_vol_managed_bnh_engine()
         account = _make_account()
 
         base_ts = datetime(2024, 1, 2, 15, 0)
         n_bars = 20
-        prices = [17000.0 + i * 20 for i in range(n_bars)]  # rising trend
+        prices = [17000.0 + i * 20 for i in range(n_bars)]
 
-        orders_all: list = []
         for i, price in enumerate(prices):
             ts = base_ts + timedelta(minutes=5 * i)
             snap = _snapshot(price, ts, atr=80.0)
-            orders = engine.on_snapshot(snap, signal=None, account=account)
-            orders_all.extend(orders)
+            engine.on_snapshot(snap, signal=None, account=account)
 
         state = engine.get_state()
-        assert state.positions, "Expected at least one position after warmup bars"
-        hub = engine._entry_policy.hub
-        assert hub.base_lots > 0
+        assert state.positions, "Expected at least one position after warmup"
+        # EntryDecision emits lots=1.0 and engine stores it (no PortfolioSizer
+        # is attached in this bare-engine test).
+        assert state.positions[0].lots == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -183,18 +214,12 @@ class TestBaseLotEntry:
 
 class TestOverlayDuringVolWarmup:
     def test_overlay_add_disabled_during_vol_warmup(self) -> None:
-        """Before 10 daily closes, RealizedVol is not ready → overlay == 0."""
         engine = create_vol_managed_bnh_engine()
         hub = engine._entry_policy.hub
 
-        # Feed 5m bars for only 3 calendar days (well below 10-day RV warmup).
-        # Use timestamps all within a single continuous night session to avoid
-        # accidentally crossing enough daily boundaries.
         base_ts = datetime(2024, 1, 2, 15, 0)
-        # 3 days * 12 hours * 12 bars/hour = 432 bars, but stay to 3 daily closes only
-        # Just feed 3 * 78 bars (78 x 5m ≈ 6.5 hours per session)
         n_days = 3
-        bars_per_day = 78  # 5m bars in one ~6.5 h session
+        bars_per_day = 78
         for d in range(n_days):
             day_base = base_ts + timedelta(days=d)
             for b in range(bars_per_day):
@@ -202,10 +227,7 @@ class TestOverlayDuringVolWarmup:
                 price = 17000.0 + d * 10 + b * 0.1
                 hub.tick(price, 80.0, ts)
 
-        # After only 3 daily closes, RV is not yet ready
-        assert hub.rv_value is None, (
-            f"Expected rv_value=None during warmup, got {hub.rv_value}"
-        )
+        assert hub.rv_value is None
         assert hub.desired_overlay_lots == 0.0
 
 
@@ -215,54 +237,105 @@ class TestOverlayDuringVolWarmup:
 
 class TestDDBreaker:
     def test_dd_breaker_zeroes_overlay_when_tripped(self) -> None:
-        """Manually trip the DD breaker and verify overlay drops to 0.
-
-        tick() internally recomputes below_sma from _trend_sma.value, so we
-        must warm the SMA to a value above crash_price — otherwise the SMA
-        returns None and the breaker immediately re-enters (hysteresis resets).
-        """
         hub = _OverlayHub(
             vol_lookback_days=10,
             vol_target_annual=0.20,
-            vol_overlay_max_lots=2.0,
-            trend_sma_days=3,   # short period so we can warm it fast
+            trend_sma_days=3,
             dd_breaker_pct=0.15,
             dd_reentry_pct=0.05,
-            boost_sma_fast_days=0,
-            boost_lots=0.0,
         )
 
-        # Manually inject daily overlay and golden cross as if warmed up.
         hub._daily_overlay_lots = 1.5
-        hub._daily_golden_cross = True
 
         peak_price = 20000.0
-        crash_price = peak_price * 0.78  # 22% drawdown > 15% breaker_pct
+        crash_price = peak_price * 0.78
 
-        # Warm trend SMA to a value well above crash_price so that
-        # below_sma=True inside tick() after the crash.
         for _ in range(3):
             hub._trend_sma.update(peak_price)
 
-        # Build up peak in the breaker, then crash it.
         hub._dd_breaker.update(peak_price, below_sma=False)
         hub._dd_breaker.update(crash_price, below_sma=True)
-        assert hub._dd_breaker.tripped, "DD breaker should be tripped after 22% crash below SMA"
+        assert hub._dd_breaker.tripped
 
-        # tick() recomputes below_sma: trend_sma.value (~20000) > crash_price (~15600)
-        # → below_sma=True → breaker stays tripped → overlay zeroed.
         ts = datetime(2024, 2, 1, 10, 0)
         hub.tick(crash_price, 80.0, ts)
-
-        assert hub.desired_overlay_lots == 0.0, (
-            "Expected desired_overlay_lots=0.0 when DD breaker tripped, "
-            f"got {hub.desired_overlay_lots}"
-        )
-        assert hub.golden_cross_active is False
+        assert hub.desired_overlay_lots == 0.0
 
 
 # ---------------------------------------------------------------------------
-# 7. Registry discovers strategy
+# 7. AddDecision emits exposure_multiplier metadata
+# ---------------------------------------------------------------------------
+
+class TestAddDecisionMultiplier:
+    def test_add_decision_emits_exposure_multiplier(self) -> None:
+        """AddPolicy emits lots as a raw multiplier with metadata flag."""
+        from src.core.types import EngineState, Position
+
+        hub = _OverlayHub(
+            vol_lookback_days=10,
+            vol_target_annual=0.20,
+            trend_sma_days=3,
+            dd_breaker_pct=0.15,
+            dd_reentry_pct=0.05,
+        )
+        # Inject a daily overlay multiplier.
+        hub._daily_overlay_lots = 1.5
+        ts = datetime(2024, 2, 1, 10, 0)
+        hub.tick(20000.0, 80.0, ts)
+
+        policy = InverseVolAddPolicy(hub)
+        # Fake a base position so engine_state.positions is non-empty.
+        base_pos = Position(
+            entry_price=20000.0, lots=5.0, contract_type="large",
+            stop_level=19000.0, pyramid_level=0,
+            entry_timestamp=ts, direction="long",
+        )
+        engine_state = EngineState(
+            positions=(base_pos,), pyramid_level=1,
+            mode="model_assisted", total_unrealized_pnl=0.0,
+        )
+        snap = _snapshot(20000.0, ts)
+        decision = policy.should_add(snap, signal=None, engine_state=engine_state)
+        assert decision is not None
+        assert decision.metadata[METADATA_EXPOSURE_MULTIPLIER] is True
+        assert 0 < decision.lots <= 2.0, (
+            f"Overlay multiplier must be in (0, 2.0], got {decision.lots}"
+        )
+
+    def test_add_policy_guards_against_compound(self) -> None:
+        """Once pyramid_level >= 2, no further adds emitted."""
+        from src.core.types import EngineState, Position
+
+        hub = _OverlayHub(
+            vol_lookback_days=10,
+            vol_target_annual=0.20,
+            trend_sma_days=3,
+            dd_breaker_pct=0.15,
+            dd_reentry_pct=0.05,
+        )
+        hub._daily_overlay_lots = 1.5
+
+        policy = InverseVolAddPolicy(hub)
+        base_pos = Position(
+            entry_price=20000.0, lots=5.0, contract_type="large",
+            stop_level=19000.0, pyramid_level=0,
+            entry_timestamp=datetime(2024, 2, 1, 10, 0), direction="long",
+        )
+        overlay_pos = Position(
+            entry_price=20000.0, lots=7.0, contract_type="large",
+            stop_level=19000.0, pyramid_level=1,
+            entry_timestamp=datetime(2024, 2, 1, 10, 0), direction="long",
+        )
+        engine_state = EngineState(
+            positions=(base_pos, overlay_pos), pyramid_level=2,
+            mode="model_assisted", total_unrealized_pnl=0.0,
+        )
+        snap = _snapshot(20000.0, datetime(2024, 2, 1, 10, 0))
+        assert policy.should_add(snap, signal=None, engine_state=engine_state) is None
+
+
+# ---------------------------------------------------------------------------
+# 8. Registry discovers strategy
 # ---------------------------------------------------------------------------
 
 class TestRegistry:
@@ -270,6 +343,39 @@ class TestRegistry:
         from src.strategies.registry import get_all
 
         strategies = get_all()
-        assert "swing/trend_following/vol_managed_bnh" in strategies, (
-            f"Strategy not found. Available: {sorted(strategies.keys())}"
+        assert "swing/trend_following/vol_managed_bnh" in strategies
+
+
+# ---------------------------------------------------------------------------
+# 9. EntryDecision is a pure signal — no account inspection
+# ---------------------------------------------------------------------------
+
+class TestEntryPolicyNoAccountInspection:
+    def test_entry_decision_emits_unit_lots_hint(self) -> None:
+        """EntryPolicy emits lots=1.0 without reading account.equity."""
+        from src.core.types import EngineState
+
+        hub = _OverlayHub(
+            vol_lookback_days=10,
+            vol_target_annual=0.20,
+            trend_sma_days=20,
+            dd_breaker_pct=0.15,
+            dd_reentry_pct=0.05,
         )
+        # Warm the SmoothedATR with positive raw ATR values.
+        base_ts = datetime(2024, 1, 2, 15, 0)
+        for i in range(20):
+            hub.tick(17000.0 + i * 5, 80.0, base_ts + timedelta(minutes=5 * i))
+
+        policy = InverseVolEntryPolicy(hub)
+        engine_state = EngineState(
+            positions=(), pyramid_level=0,
+            mode="model_assisted", total_unrealized_pnl=0.0,
+        )
+        ts = base_ts + timedelta(minutes=5 * 21)
+        snap = _snapshot(17500.0, ts, atr=80.0)
+        # Pass account=None: strategy must not require it for sizing.
+        decision = policy.should_enter(snap, signal=None, engine_state=engine_state, account=None)
+        assert decision is not None
+        assert decision.lots == 1.0
+        assert decision.metadata["sizing_mode"] == "base"

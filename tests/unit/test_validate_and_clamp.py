@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from src.strategies.registry import validate_and_clamp
 
 

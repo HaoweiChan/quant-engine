@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.simulator.adversarial import (
-    AdversarialResult,
     InjectionConfig,
     inject_adversarial_scenarios,
 )

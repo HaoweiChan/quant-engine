@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import time
 
-from src.runtime.ipc import QueueBackpressureGuard
-from src.runtime.ipc import ExecutionCommand
-from src.runtime.ipc import SequenceGuard
-from src.runtime.ipc import SignalIntent
-from src.runtime.ipc import QuoteEvent
-from src.runtime.orchestrator import RuntimeOrchestrator
-from src.runtime.orchestrator import RuntimeOrchestratorConfig
+from src.runtime.ipc import (
+    ExecutionCommand,
+    QueueBackpressureGuard,
+    QuoteEvent,
+    SequenceGuard,
+    SignalIntent,
+)
+from src.runtime.orchestrator import RuntimeOrchestrator, RuntimeOrchestratorConfig
 
 
 def _quote(seq: int, symbol: str = "TX") -> QuoteEvent:

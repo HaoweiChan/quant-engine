@@ -14,7 +14,6 @@ from src.core.types import (
     TradingHours,
 )
 from src.strategies.medium_term.trend_following.donchian_trend_strength import (
-    DonchianTrendStrengthEntry,
     DonchianTrendStrengthStop,
     _Indicators,
     create_donchian_trend_strength_engine,

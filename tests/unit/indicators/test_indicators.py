@@ -16,18 +16,17 @@ import pytest
 from src.indicators import (
     ADX,
     ATR,
+    EMA,
+    RSI,
+    SMA,
+    VWAP,
     ATRPercentile,
     BollingerBands,
     Donchian,
-    EMA,
     KeltnerChannel,
-    RSI,
-    SMA,
     SmoothedATR,
-    VWAP,
     ema_step,
 )
-
 
 # ---------------------------------------------------------------------------
 # EMA

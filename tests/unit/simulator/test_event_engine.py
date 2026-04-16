@@ -5,11 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-import pytest
-
 from src.core.adapter import BaseAdapter
 from src.core.types import (
-    AccountState,
     ContractSpecs,
     Event,
     EventEngineConfig,
@@ -17,12 +14,9 @@ from src.core.types import (
     MarketEvent,
     Order,
     OrderEvent,
-    FillEvent,
-    SignalEvent,
     TradingHours,
 )
-from src.simulator.event_engine import EventEngine, generate_synthetic_ticks, EVENT_PRIORITY
-from src.simulator.types import BacktestResult
+from src.simulator.event_engine import EventEngine, generate_synthetic_ticks
 
 
 class DummyAdapter(BaseAdapter):

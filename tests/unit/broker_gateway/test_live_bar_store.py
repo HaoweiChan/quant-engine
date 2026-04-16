@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from datetime import datetime
 
 from src.broker_gateway.live_bar_store import LiveMinuteBarStore
 

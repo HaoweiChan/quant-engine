@@ -6,8 +6,8 @@ import pytest
 
 from src.simulator.param_sensitivity import (
     SensitivityResult,
-    analyze_param_sensitivity,
     aggregate_sensitivity,
+    analyze_param_sensitivity,
     generate_perturbation_grid,
 )
 

@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -20,7 +19,6 @@ from src.strategies import (
     read_optimization_level,
     write_optimization_level,
 )
-
 
 # ---------------------------------------------------------------------------
 # StageThresholds data model
@@ -199,7 +197,7 @@ class TestParametrizedQualityGates:
         wr: float = 50.0,
         trades: int = 100,
         pf: float = 1.5,
-    ) -> "FoldResult":
+    ) -> FoldResult:
         from src.simulator.walk_forward import FoldResult
 
         return FoldResult(
@@ -268,8 +266,8 @@ class TestHardwareClassification:
 
     def _run_classify(self, cpu: int, ram_gb: float, env: dict | None = None) -> dict:
         """Helper: run _classify_hardware with mocked cpu/ram."""
-        import sys
         import importlib
+        import sys
 
         mock_mem = MagicMock()
         mock_mem.total = int(ram_gb * 1024**3)

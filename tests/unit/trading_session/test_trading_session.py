@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from src.broker_gateway.account_db import AccountDB
-from src.broker_gateway.mock import MockGateway
 from src.broker_gateway.registry import GatewayRegistry
 from src.broker_gateway.types import AccountConfig, LivePosition
 from src.trading_session.manager import SessionManager

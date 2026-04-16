@@ -16,28 +16,25 @@ import pytest
 from src.indicators import (
     CMF,
     MACD,
-    MACDResult,
     MFI,
     OBV,
     ROC,
     STC,
     TWAP,
-    FisherTransform,
     FisherResult,
+    FisherTransform,
     HurstExponent,
     ITrend,
-    LinRegResult,
     LinearRegression,
+    MACDResult,
     ParabolicSAR,
     PSARResult,
     Stochastic,
     StochasticResult,
     SuperTrend,
-    SuperTrendResult,
     TrueATR,
     WilliamsR,
 )
-
 
 # ---------------------------------------------------------------------------
 # MACD

@@ -1,7 +1,7 @@
 """Tests for R1-R2 spread monitor."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -43,7 +43,7 @@ class TestSpreadRecording:
 
 class TestSpreadStats:
     def test_stats_computed(self, monitor: SpreadMonitor) -> None:
-        ts = datetime(2024, 3, 15, 10, 0, tzinfo=timezone.utc)
+        ts = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
         for i in range(10):
             monitor.record("TX", r1_price=20000, r2_price=20000 + (i + 1) * 10, timestamp=ts)
         stats = monitor.get_stats("TX")
@@ -54,7 +54,7 @@ class TestSpreadStats:
         assert stats.current == 100
 
     def test_favorable_when_low_spread(self, monitor: SpreadMonitor) -> None:
-        ts = datetime(2024, 3, 15, 10, 0, tzinfo=timezone.utc)
+        ts = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
         # Record 10 high spreads, then one low
         for i in range(10):
             monitor.record("TX", r1_price=20000, r2_price=20100, timestamp=ts)
@@ -62,7 +62,7 @@ class TestSpreadStats:
         assert monitor.is_favorable("TX") is True
 
     def test_unfavorable_when_high_spread(self, monitor: SpreadMonitor) -> None:
-        ts = datetime(2024, 3, 15, 10, 0, tzinfo=timezone.utc)
+        ts = datetime(2024, 3, 15, 10, 0, tzinfo=UTC)
         for i in range(10):
             monitor.record("TX", r1_price=20000, r2_price=20010, timestamp=ts)
         monitor.record("TX", r1_price=20000, r2_price=20200, timestamp=ts)
@@ -86,7 +86,7 @@ class TestPersistence:
         db = tmp_path / "test.db"
         ensure_schema(db)
         snap = SpreadSnapshot(
-            timestamp=datetime(2024, 3, 15, 10, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2024, 3, 15, 10, 0, tzinfo=UTC),
             symbol="TX",
             r1_price=20000,
             r2_price=20050,
@@ -102,7 +102,7 @@ class TestPersistence:
         db = tmp_path / "test.db"
         snaps = [
             SpreadSnapshot(
-                timestamp=datetime(2024, 3, 15, 10, i, tzinfo=timezone.utc),
+                timestamp=datetime(2024, 3, 15, 10, i, tzinfo=UTC),
                 symbol="TX",
                 r1_price=20000,
                 r2_price=20000 + i * 10,

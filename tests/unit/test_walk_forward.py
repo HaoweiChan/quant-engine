@@ -8,7 +8,6 @@ import pytest
 
 from src.simulator.walk_forward import (
     FoldResult,
-    WalkForwardResult,
     build_walk_forward_result,
     classify_overfit,
     compute_expanding_folds,

@@ -1,10 +1,11 @@
 """Tests for the OHLCV API endpoint."""
 from __future__ import annotations
 
-import pytest
-from src.api.main import app
 from datetime import datetime
+
 from fastapi.testclient import TestClient
+
+from src.api.main import app
 
 client = TestClient(app)
 

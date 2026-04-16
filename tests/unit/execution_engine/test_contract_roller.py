@@ -1,7 +1,7 @@
 """Tests for automatic contract roller."""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -11,7 +11,6 @@ from src.execution.contract_roller import (
     PositionToRoll,
     RollRecord,
     RollStatus,
-    ensure_schema,
     load_roll_history,
     persist_roll,
 )
@@ -86,7 +85,7 @@ class TestFavorableSpread:
     def test_favorable_triggers_roll(
         self, roller: ContractRoller, monitor: SpreadMonitor,
     ) -> None:
-        ts = datetime(2024, 3, 14, 10, 0, tzinfo=timezone.utc)
+        ts = datetime(2024, 3, 14, 10, 0, tzinfo=UTC)
         # Build a window of high spreads
         for i in range(15):
             monitor.record("TX", r1_price=20000, r2_price=20100, timestamp=ts)
@@ -100,7 +99,7 @@ class TestFavorableSpread:
     def test_unfavorable_waits(
         self, roller: ContractRoller, monitor: SpreadMonitor,
     ) -> None:
-        ts = datetime(2024, 3, 14, 10, 0, tzinfo=timezone.utc)
+        ts = datetime(2024, 3, 14, 10, 0, tzinfo=UTC)
         # Build a window of low spreads, then a high one
         for i in range(15):
             monitor.record("TX", r1_price=20000, r2_price=20010, timestamp=ts)
@@ -113,7 +112,7 @@ class TestFavorableSpread:
 
 class TestShouldRoll:
     def test_favorable_yes(self, roller: ContractRoller, monitor: SpreadMonitor) -> None:
-        ts = datetime(2024, 3, 14, 10, 0, tzinfo=timezone.utc)
+        ts = datetime(2024, 3, 14, 10, 0, tzinfo=UTC)
         for i in range(15):
             monitor.record("TX", r1_price=20000, r2_price=20100, timestamp=ts)
         monitor.record("TX", r1_price=20000, r2_price=20010, timestamp=ts)
@@ -180,7 +179,7 @@ class TestPersistence:
     def test_persist_and_load(self, tmp_path) -> None:
         db = tmp_path / "test.db"
         record = RollRecord(
-            timestamp=datetime(2024, 3, 19, 10, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2024, 3, 19, 10, 0, tzinfo=UTC),
             symbol="TX",
             session_id="sess-001",
             strategy_slug="swing/trend_following/vol_managed_bnh",

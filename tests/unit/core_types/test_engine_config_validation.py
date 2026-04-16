@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.types import EngineConfig, PyramidConfig
 from src.core.position_engine import create_pyramid_engine
+from src.core.types import EngineConfig, PyramidConfig
 
 
 class TestEngineConfigValidation:

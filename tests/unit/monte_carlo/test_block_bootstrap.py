@@ -4,7 +4,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.monte_carlo.block_bootstrap import BlockBootstrapMC, MCSimulationResult, _optimal_block_length
+from src.monte_carlo.block_bootstrap import (
+    BlockBootstrapMC,
+    MCSimulationResult,
+    _optimal_block_length,
+)
 
 
 @pytest.fixture

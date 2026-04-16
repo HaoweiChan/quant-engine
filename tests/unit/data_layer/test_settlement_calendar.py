@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
-
 from src.data.settlement_calendar import (
     _third_wednesday,
     business_days_to_settlement,

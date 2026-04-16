@@ -21,14 +21,6 @@ class TestDiscovery:
         assert info.factory == "create_atr_mean_reversion_engine"
         assert info.module == "src.strategies.short_term.mean_reversion.atr_mean_reversion"
 
-    def test_discovers_pyramid_wrapper(self):
-        reg = _fresh_registry()
-        all_strats = reg.get_all()
-        slug = "swing/trend_following/pyramid_wrapper"
-        assert slug in all_strats
-        info = all_strats[slug]
-        assert info.factory == "create_pyramid_wrapper_engine"
-
     def test_skips_files_without_param_schema(self):
         reg = _fresh_registry()
         all_strats = reg.get_all()
@@ -161,6 +153,7 @@ class TestSchemaFactoryConsistency:
     def test_all_strategies_consistent(self):
         import dataclasses
         import inspect
+
         from src.strategies.registry import get_all
         skip_params = {"max_loss", "lots", "contract_type", "latest_entry_time", "pyramid_risk_level"}
         for slug, info in get_all().items():

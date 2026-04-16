@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import pytest
+from pathlib import Path
 
 import polars as pl
+import pytest
 
-from pathlib import Path
-from src.strategies.param_registry import ParamRegistry
 from src.simulator.types import BacktestResult, OptimizerResult
+from src.strategies.param_registry import ParamRegistry
 
 
 @pytest.fixture()

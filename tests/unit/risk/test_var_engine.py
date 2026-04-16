@@ -1,13 +1,12 @@
 """Tests for the parametric and historical VaR engine."""
 from __future__ import annotations
 
-import math
 from datetime import datetime
 
 import pytest
 
-from src.core.types import Order, Position, StressScenario, VaRResult
-from src.risk.var_engine import MIN_HISTORY, SQRT_10, Z_95, Z_99, VaREngine
+from src.core.types import Order, Position, StressScenario
+from src.risk.var_engine import SQRT_10, Z_99, VaREngine
 
 
 def _pos(

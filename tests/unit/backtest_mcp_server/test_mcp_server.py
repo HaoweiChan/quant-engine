@@ -1,17 +1,17 @@
 """Tests for the backtest MCP server modules."""
 from __future__ import annotations
 
-import pytest
 import textwrap
-
 from pathlib import Path
 
+import pytest
+
+from src.mcp_server.history import OptimizationHistory
 from src.mcp_server.validation import (
     backup_strategy_file,
     list_strategy_files,
     validate_strategy_content,
 )
-from src.mcp_server.history import OptimizationHistory
 
 # ---------------------------------------------------------------------------
 # 7.1 — validate_strategy_content
@@ -216,7 +216,7 @@ class TestFacade:
             run_backtest_for_mcp("nonexistent_scenario")
 
     def test_run_monte_carlo_clamps_n_paths(self):
-        from src.mcp_server.facade import run_monte_carlo_for_mcp, _HW
+        from src.mcp_server.facade import _HW, run_monte_carlo_for_mcp
         result = run_monte_carlo_for_mcp("strong_bull", n_paths=5000)
         assert result["n_paths"] == _HW["n_paths_cap"]
         assert "warning" in result

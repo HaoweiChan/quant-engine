@@ -1,7 +1,6 @@
 """Tests for SessionDB persistence and SessionManager lifecycle."""
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -93,6 +92,7 @@ class TestSessionDB:
 class TestSessionManagerLifecycle:
     def test_create_and_restore(self, tmp_path: Path) -> None:
         from unittest.mock import MagicMock
+
         from src.trading_session.manager import SessionManager
 
         registry = MagicMock()
@@ -112,6 +112,7 @@ class TestSessionManagerLifecycle:
 
     def test_set_status_valid(self, tmp_path: Path) -> None:
         from unittest.mock import MagicMock
+
         from src.trading_session.manager import SessionManager
 
         registry = MagicMock()
@@ -124,6 +125,7 @@ class TestSessionManagerLifecycle:
 
     def test_set_status_invalid(self, tmp_path: Path) -> None:
         from unittest.mock import MagicMock
+
         from src.trading_session.manager import SessionManager
 
         registry = MagicMock()
@@ -136,6 +138,7 @@ class TestSessionManagerLifecycle:
 
     def test_deploy(self, tmp_path: Path) -> None:
         from unittest.mock import MagicMock
+
         from src.trading_session.manager import SessionManager
 
         registry = MagicMock()

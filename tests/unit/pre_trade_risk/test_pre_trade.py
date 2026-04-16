@@ -3,17 +3,13 @@ from __future__ import annotations
 
 from datetime import datetime
 
-import pytest
-
-from src.core.position_engine import PositionEngine, create_pyramid_engine
+from src.core.position_engine import create_pyramid_engine
 from src.core.types import (
     AccountState,
     ContractSpecs,
-    EngineConfig,
     MarketSignal,
     MarketSnapshot,
     Order,
-    Position,
     PreTradeRiskConfig,
     PyramidConfig,
     TradingHours,

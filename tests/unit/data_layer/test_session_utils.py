@@ -3,18 +3,11 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-import pytest
-
 from src.data.session_utils import (
-    DAY_CLOSE,
-    DAY_OPEN,
-    NIGHT_CLOSE,
-    NIGHT_OPEN,
     is_new_session,
     session_id,
     trading_day,
 )
-
 
 # ── trading_day() ─────────────────────────────────────────────────────────────
 

@@ -1,5 +1,6 @@
 """Isolate account tests from the production trading.db."""
 import pytest
+
 import src.broker_gateway.account_db as _adb
 
 

@@ -5,7 +5,6 @@ import pytest
 
 from src.indicators.volume_profile import (
     VolumeProfile,
-    ProfileResult,
     _bin_index,
 )
 

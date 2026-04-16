@@ -4,9 +4,7 @@ from __future__ import annotations
 import random
 from datetime import datetime
 
-import pytest
-
-from src.core.types import AccountState, Position, RiskAction, VaRResult
+from src.core.types import AccountState, Position, RiskAction
 from src.pipeline.config import RiskConfig
 from src.risk.monitor import RiskMonitor
 from src.risk.portfolio import PortfolioRiskEngine

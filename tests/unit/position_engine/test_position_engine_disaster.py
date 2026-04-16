@@ -5,12 +5,16 @@ from __future__ import annotations
 from datetime import datetime
 from unittest.mock import MagicMock
 
-import pytest
-
-from src.core.position_engine import PositionEngine
 from src.core.policies import ChandelierStopPolicy, PyramidAddPolicy, PyramidEntryPolicy
-from src.core.types import EngineConfig, MarketSignal, MarketSnapshot, PyramidConfig, TradingHours
-from src.core.types import ContractSpecs
+from src.core.position_engine import PositionEngine
+from src.core.types import (
+    ContractSpecs,
+    EngineConfig,
+    MarketSignal,
+    MarketSnapshot,
+    PyramidConfig,
+    TradingHours,
+)
 
 
 def _make_specs() -> ContractSpecs:

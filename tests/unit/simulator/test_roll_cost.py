@@ -6,7 +6,6 @@ from datetime import date
 import pytest
 
 from src.simulator.roll_cost import (
-    RollCostEstimate,
     count_settlements_in_range,
     estimate_roll_costs,
     inject_roll_costs_into_metrics,

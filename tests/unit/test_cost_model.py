@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from src.core.types import (
-    InstrumentCostConfig,
     INSTRUMENT_COSTS,
     get_instrument_cost_config,
 )

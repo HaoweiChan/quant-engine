@@ -1,7 +1,7 @@
 """Unit tests for combined position limit in RiskMonitor."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from src.core.types import AccountState, Position, RiskAction
 from src.pipeline.config import RiskConfig
@@ -9,7 +9,7 @@ from src.risk.monitor import RiskMonitor
 
 
 def _make_account(n_positions: int) -> AccountState:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     positions = [
         Position(
             entry_price=20000.0,

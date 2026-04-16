@@ -16,7 +16,6 @@ from src.core.types import (
 )
 from src.risk.portfolio import PortfolioRiskEngine
 from src.risk.pre_trade import PreTradeRiskCheck
-from src.risk.var_engine import VaREngine
 
 
 def _pos(

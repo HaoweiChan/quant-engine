@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.api import editor as editor_mod
 from src.api.editor import (
     _validate_path,
     check_syntax,
@@ -12,7 +13,6 @@ from src.api.editor import (
     validate_engine,
     write_file,
 )
-from src.api import editor as editor_mod
 
 
 class TestPathValidation:

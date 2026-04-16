@@ -6,16 +6,14 @@ import os
 import tempfile
 from datetime import datetime
 
-import pytest
-
-from src.core.types import AccountState, AuditConfig, AuditRecord, Position
+from src.audit.store import AuditStore, SQLiteAuditStore
 from src.audit.trail import (
-    AuditTrail,
     GENESIS_HASH,
+    AuditTrail,
     compute_record_hash,
     get_git_commit,
 )
-from src.audit.store import AuditStore, SQLiteAuditStore
+from src.core.types import AccountState, AuditConfig, AuditRecord
 
 
 class InMemoryAuditStore(AuditStore):

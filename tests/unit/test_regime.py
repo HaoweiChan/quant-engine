@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.simulator.regime import (
-    RegimeModel,
-    RegimeModelError,
+    compute_regime_metrics,
     fit_regime_model,
     label_regimes,
-    compute_regime_metrics,
 )
 
 

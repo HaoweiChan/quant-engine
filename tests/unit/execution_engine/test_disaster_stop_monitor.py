@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from src.core.types import Order
-from src.execution.disaster_stop_monitor import DisasterStopMonitor, DisasterStopEntry
+from src.execution.disaster_stop_monitor import DisasterStopEntry, DisasterStopMonitor
 
 
 class TestDisasterStopMonitor:
