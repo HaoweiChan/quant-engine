@@ -1,7 +1,6 @@
 """Per-session live strategy runner: bar → snapshot → signal → orders → fills."""
 from __future__ import annotations
 
-import importlib
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -11,9 +10,16 @@ import structlog
 from src.adapters.taifex import TaifexAdapter
 from src.broker_gateway.live_bar_store import MinuteBar
 from src.core.position_engine import PositionEngine
-from src.core.sizing import PortfolioSizer, SizingConfig
-from src.core.types import AccountState, MarketSnapshot, Order
-from src.data.session_utils import is_new_session, session_id
+from src.core.sizing import PortfolioSizer, SizingConfig, _base_position_lots
+from src.core.types import (
+    METADATA_EXPOSURE_MULTIPLIER,
+    AccountState,
+    AddDecision,
+    MarketSnapshot,
+    Order,
+    Position,
+)
+from src.data.session_utils import is_new_session
 from src.execution.engine import ExecutionResult
 from src.execution.paper import PaperExecutor
 from src.execution.paper_execution_engine import PaperExecutionEngine
@@ -54,6 +60,7 @@ class LiveStrategyRunner:
         self._engine: PositionEngine = engine
         self._executor: PaperExecutor = executor
         self._paper_engine: PaperExecutionEngine = paper_engine
+        self._attach_add_sizer()
         logger.info(
             "live_runner_init",
             session_id=session_id,
@@ -67,8 +74,8 @@ class LiveStrategyRunner:
         self, params: dict[str, Any] | None
     ) -> tuple[PositionEngine, PaperExecutor, PaperExecutionEngine]:
         """Resolve strategy factory and build engine + executor."""
+        from src.core.types import get_instrument_cost_config
         from src.mcp_server.facade import get_active_params_for_mcp, resolve_factory
-        from src.core.types import EngineConfig, get_instrument_cost_config
 
         factory = resolve_factory(self.strategy_slug)
         merged = dict(params or {})
@@ -91,6 +98,47 @@ class LiveStrategyRunner:
             config=engine._config,
         )
         return engine, executor, paper_engine
+
+    def _attach_add_sizer(self) -> None:
+        """Attach PortfolioSizer.size_add hook to the engine.
+
+        Mirrors BacktestRunner._attach_sizer's add sizer. Strategies that emit
+        AddDecision with metadata[METADATA_EXPOSURE_MULTIPLIER]=True have their
+        lots resolved here from a ratio into absolute contracts using the base
+        position's lots, then capped by margin headroom.
+        """
+        sizer = self._sizer
+
+        def _size_add(
+            decision: AddDecision,
+            snapshot: MarketSnapshot,
+            positions: list[Position],
+        ) -> AddDecision | None:
+            is_multiplier = bool(decision.metadata.get(METADATA_EXPOSURE_MULTIPLIER, False))
+            base_lots = _base_position_lots(positions) if is_multiplier else 0.0
+            existing_margin = sum(p.lots * snapshot.margin_per_unit for p in positions)
+            result = sizer.size_add(
+                equity=self.equity,
+                existing_margin_used=existing_margin,
+                margin_per_unit=snapshot.margin_per_unit,
+                requested_lots=decision.lots,
+                base_lots=base_lots,
+                is_multiplier=is_multiplier,
+            )
+            if result.lots < 1:
+                return None
+            return AddDecision(
+                lots=result.lots,
+                contract_type=decision.contract_type,
+                move_existing_to_breakeven=decision.move_existing_to_breakeven,
+                metadata={
+                    **decision.metadata,
+                    "sizer": result.method,
+                    "sizer_caps": result.caps_applied,
+                },
+            )
+
+        self._engine.add_sizer = _size_add
 
     @property
     def equity(self) -> float:
@@ -148,7 +196,8 @@ class LiveStrategyRunner:
         """Override strategy-determined lots with portfolio-level sizing.
 
         Entry orders are resized using stop-distance risk sizing.
-        Add orders are resized based on margin headroom.
+        Add orders are resized in the engine via ``engine.add_sizer`` (attached in
+        __init__); their Orders flow through here unchanged.
         Exit orders pass through unchanged.
         """
         sized: list[Order] = []
@@ -180,22 +229,6 @@ class LiveStrategyRunner:
                 logger.info(
                     "sizer_resized_entry", session=self.session_id,
                     lots=result.lots, method=result.method,
-                )
-            elif order.reason == "add":
-                result = self._sizer.size_add(
-                    equity=account.equity,
-                    existing_margin_used=account.margin_used,
-                    margin_per_unit=snapshot.margin_per_unit,
-                    requested_lots=order.lots,
-                )
-                if result.lots <= 0:
-                    continue
-                order = Order(
-                    order_type=order.order_type, side=order.side, symbol=order.symbol,
-                    contract_type=order.contract_type, lots=result.lots, price=order.price,
-                    stop_price=order.stop_price, reason=order.reason,
-                    metadata={**(order.metadata or {}), "sizer": result.method},
-                    parent_position_id=order.parent_position_id, order_class=order.order_class,
                 )
             sized.append(order)
         return sized
