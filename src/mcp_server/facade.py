@@ -747,9 +747,10 @@ def run_backtest_realdata_for_mcp(
     if strategy_hash:
         _, strategy_code = _compute_code_hash(resolved_slug)
 
-    cached = lookup_backtest_cache(symbol, start, end, strategy, strategy_params, intraday)
-    if cached is not None:
-        return cached
+    if initial_equity == 2_000_000.0:
+        cached = lookup_backtest_cache(symbol, start, end, strategy, strategy_params, intraday)
+        if cached is not None:
+            return cached
 
     # Spread strategies: construct synthetic bars from two legs
     spread_meta = _get_spread_meta(resolved_slug)

@@ -30,9 +30,9 @@ _TAIPEI_TZ = timezone(timedelta(hours=8))
 # trade MTX as the user correctly asserted.
 # equity_share represents the fraction of total account equity allocated to each strategy.
 _SEED_STRATEGIES: list[tuple[str, bool, str, float]] = [
-    ("medium_term/trend_following/donchian_trend_strength", True, "MTX", 0.40),
-    ("short_term/trend_following/night_session_long", True, "MTX", 0.30),
-    ("swing/trend_following/vol_managed_bnh", False, "MTX", 0.30),
+    ("medium_term/trend_following/donchian_trend_strength", False, "MTX", 0.49),
+    ("short_term/trend_following/night_session_long", True, "MTX", 0.10),
+    ("swing/trend_following/vol_managed_bnh", False, "MTX", 0.41),
 ]
 
 _MOCK_ACCOUNT_DEFAULT = "mock-dev"
@@ -591,13 +591,13 @@ def seed_mock_warroom(
     now = datetime.now(_TAIPEI_TZ)
     end_iso = now.strftime("%Y-%m-%d")
     start_iso = (now - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-    per_strategy_initial = _INITIAL_EQUITY_TOTAL / len(_SEED_STRATEGIES)
 
     conn = sqlite3.connect(str(mock_warroom_db_path()))
     try:
         ensure_mock_warroom_schema(conn)
         all_cached = True
-        for slug, intraday, symbol, _equity_share in _SEED_STRATEGIES:
+        for slug, intraday, symbol, equity_share in _SEED_STRATEGIES:
+            per_strategy_initial = _INITIAL_EQUITY_TOTAL * equity_share
             session_id = _strategy_session_id(account_id, slug)
             per_start = time.perf_counter()
             if not force and _is_cached(conn, session_id, lookback_days):

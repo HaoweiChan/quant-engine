@@ -85,6 +85,9 @@ class DataDaemon:
     def start(self, api_key: str, secret_key: str, simulation: bool = False) -> None:
         """Start the daemon: login, subscribe, and run the main loop."""
         self._running = True
+        self._api_key = api_key
+        self._api_secret = secret_key
+        self._simulation = simulation
         self._install_signal_handlers()
 
         logger.info("daemon_starting", symbols=[c.db_symbol for c in CONTRACTS])
@@ -113,6 +116,16 @@ class DataDaemon:
         self._api = sj.Shioaji(simulation=simulation)
         self._api.login(api_key=api_key, secret_key=secret_key)
         logger.info("daemon_shioaji_login_ok", simulation=simulation)
+
+    def _relogin_and_subscribe(self) -> None:
+        """Logout the old session, re-login, and subscribe fresh."""
+        if self._api:
+            try:
+                self._api.logout()
+            except Exception:
+                pass
+        self._login(self._api_key, self._api_secret, self._simulation)
+        self._subscribe()
 
     def _subscribe(self) -> None:
         """Subscribe to tick feeds for all configured contracts."""
@@ -183,6 +196,7 @@ class DataDaemon:
 
     def _main_loop(self) -> None:
         subscribed = False
+        stale_check_interval = 300  # 5 minutes
 
         while self._running and not self._shutdown_event.is_set():
             if self._scheduler.is_weekend():
@@ -193,9 +207,17 @@ class DataDaemon:
 
             if self._scheduler.is_trading_now():
                 if not subscribed:
-                    self._subscribe()
+                    self._relogin_and_subscribe()
                     subscribed = True
                     logger.info("daemon_session_active")
+                # Detect stale connection: no ticks for 5min during trading
+                elif self._last_tick_ts:
+                    now = datetime.now(TAIPEI_TZ)
+                    stale_secs = (now - self._last_tick_ts).total_seconds()
+                    if stale_secs > stale_check_interval:
+                        logger.warning("daemon_tick_stale", stale_secs=stale_secs)
+                        subscribed = False  # force re-login on next iteration
+                        continue
                 self._shutdown_event.wait(timeout=30)
             else:
                 if subscribed:

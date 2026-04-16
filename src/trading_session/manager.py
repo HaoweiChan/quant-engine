@@ -385,10 +385,14 @@ class SessionManager:
         return session
 
     def resume(self) -> None:
-        """Lift the global halt flag."""
+        """Lift the global halt flag and restore halted sessions to active."""
         self.halt_active = False
         for session in self._sessions.values():
-            if session.status in ("halted", "flattening"):
+            if session.status == "halted":
+                session.status = "active"
+                if self._session_db:
+                    self._session_db.update_status(session.session_id, "active")
+            elif session.status == "flattening":
                 session.status = "stopped"
                 if self._session_db:
                     self._session_db.update_status(session.session_id, "stopped")
