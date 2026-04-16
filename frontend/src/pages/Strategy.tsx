@@ -4,7 +4,6 @@ import { StrategyParamSidebar } from "@/components/StrategyParamSidebar";
 import { useUiStore } from "@/stores/uiStore";
 import { CodeEditor } from "@/pages/strategy/CodeEditor";
 import { TearSheet } from "@/pages/strategy/TearSheet";
-import { ParamSweep } from "@/pages/strategy/ParamSweep";
 import { Portfolio } from "@/pages/strategy/Portfolio";
 import { RiskEvaluation } from "@/pages/strategy/RiskEvaluation";
 import { colors } from "@/lib/theme";
@@ -13,7 +12,6 @@ import { colors } from "@/lib/theme";
 const subTabs = [
   { value: "editor", label: "Code Editor" },
   { value: "tearsheet", label: "Tear Sheet" },
-  { value: "paramsweep", label: "Param Sweep" },
   { value: "risk", label: "Risk Evaluation" },
   { value: "portfolio", label: "Portfolio" },
 ] as const;
@@ -21,7 +19,6 @@ const subTabs = [
 const subTabComponents: Record<string, React.FC> = {
   editor: CodeEditor,
   tearsheet: TearSheet,
-  paramsweep: ParamSweep,
   risk: RiskEvaluation,
   portfolio: Portfolio,
 };

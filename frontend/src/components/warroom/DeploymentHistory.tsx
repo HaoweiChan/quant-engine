@@ -15,7 +15,7 @@ export function DeploymentHistory({ history, onRedeploy }: DeploymentHistoryProp
     <div className="rounded-[5px]" style={{ border: `1px solid ${colors.cardBorder}`, background: colors.card }}>
       <button
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between px-3 py-2 text-[10px] font-semibold cursor-pointer border-none"
+        className="w-full flex items-center justify-between px-3 py-2 text-[11px] font-semibold cursor-pointer border-none"
         style={{ background: "transparent", color: colors.muted, fontFamily: "var(--font-mono)" }}
       >
         <span>DEPLOYMENT HISTORY {history.length > 0 && `(${history.length})`}</span>
@@ -24,9 +24,9 @@ export function DeploymentHistory({ history, onRedeploy }: DeploymentHistoryProp
       {open && (
         <div className="px-3 pb-3" style={{ overflowX: "auto" }}>
           {history.length === 0 ? (
-            <div className="text-[10px] py-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No deployments yet.</div>
+            <div className="text-[11px] py-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No deployments yet.</div>
           ) : (
-            <table className="w-full text-[9px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }}>
+            <table className="w-full text-[11px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
                   {["Time", "Account", "Strategy", "Symbol", "Candidate"].map((h) => (
@@ -51,7 +51,7 @@ export function DeploymentHistory({ history, onRedeploy }: DeploymentHistoryProp
                             onRedeploy();
                           } catch { /* silently fail */ }
                         }}
-                        className="px-1.5 py-0.5 rounded text-[8px] cursor-pointer border-none"
+                        className="px-1.5 py-0.5 rounded text-[11px] cursor-pointer border-none"
                         style={{ background: "rgba(90,138,242,0.2)", color: colors.blue, fontFamily: "var(--font-mono)" }}
                       >
                         Revert

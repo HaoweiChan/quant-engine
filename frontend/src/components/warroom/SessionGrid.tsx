@@ -1,20 +1,19 @@
 import { AllocationSlider } from "./AllocationSlider";
 import { SessionCard } from "./SessionCard";
 import { colors } from "@/lib/theme";
-import type { WarRoomSession, SettlementInfo } from "@/lib/api";
+import type { WarRoomSession } from "@/lib/api";
 
 interface SessionGridProps {
   sessions: WarRoomSession[];
   bindings?: { slug: string; symbol: string }[];
   accountId?: string;
-  settlement?: SettlementInfo;
   onAction: () => void;
 }
 
-export function SessionGrid({ sessions, bindings, accountId, settlement, onAction }: SessionGridProps) {
+export function SessionGrid({ sessions, bindings, accountId, onAction }: SessionGridProps) {
   if (sessions.length === 0) {
     return (
-      <div className="p-3 text-[9px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+      <div className="p-3 text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
         No strategies bound to this account. Add one below.
       </div>
     );
@@ -31,7 +30,6 @@ export function SessionGrid({ sessions, bindings, accountId, settlement, onActio
           session={s}
           allBindings={bindings}
           accountId={accountId}
-          rollInfo={settlement?.per_session?.[s.session_id]}
           onAction={onAction}
         />
       ))}

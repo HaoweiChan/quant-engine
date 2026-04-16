@@ -3,14 +3,12 @@ import { useUiStore } from "@/stores/uiStore";
 import { useLiveFeed } from "@/hooks/useLiveFeed";
 import { colors } from "@/lib/theme";
 import { AccountsTab } from "@/components/warroom/AccountsTab";
-import { BlotterTab } from "@/components/warroom/BlotterTab";
 import { RiskTab } from "@/components/warroom/RiskTab";
 import { WarRoomLayout } from "@/components/warroom/WarRoomLayout";
 
 const tradingSubTabs = [
   { value: "accounts", label: "Accounts" },
   { value: "warroom", label: "War Room" },
-  { value: "blotter", label: "Blotter" },
   { value: "risk", label: "Risk" },
 ] as const;
 
@@ -46,7 +44,6 @@ export function Trading() {
       <div className="flex-1 min-h-0">
         {subTab === "accounts" && <AccountsTab />}
         {subTab === "warroom" && <WarRoomLayout />}
-        {subTab === "blotter" && <BlotterTab />}
         {subTab === "risk" && <RiskTab />}
       </div>
     </div>

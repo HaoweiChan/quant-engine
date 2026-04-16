@@ -68,7 +68,7 @@ const ZOOM_BTN: React.CSSProperties = {
   border: "1px solid #8899aa",
   borderRadius: 3,
   padding: "1px 8px",
-  fontSize: 9,
+  fontSize: 11,
   cursor: "pointer",
   fontFamily: "var(--font-mono)",
   lineHeight: "18px",
@@ -471,13 +471,13 @@ export function TearSheet() {
         <button
           onClick={handleRun}
           disabled={loading || !strategy}
-          className="py-1.5 px-5 rounded text-[10px] font-semibold cursor-pointer border-none text-white"
+          className="py-1.5 px-5 rounded text-[11px] font-semibold cursor-pointer border-none text-white"
           style={{ background: "#2A5A9A", fontFamily: "var(--font-mono)", opacity: loading ? 0.5 : 1 }}
         >
           {loading ? "Running…" : "Run Backtest"}
         </button>
         <label
-          className="flex items-center gap-1 text-[10px] cursor-pointer select-none"
+          className="flex items-center gap-1 text-[11px] cursor-pointer select-none"
           style={{ color: intraday ? colors.cyan : colors.dim, fontFamily: "var(--font-mono)" }}
         >
           <input
@@ -489,11 +489,11 @@ export function TearSheet() {
           Intraday
         </label>
         {slippageBps > 0 || commissionBps > 0 || commissionFixed > 0 ? (
-          <span className="text-[9px]" style={{ color: colors.cyan, fontFamily: "var(--font-mono)" }}>
+          <span className="text-[11px]" style={{ color: colors.cyan, fontFamily: "var(--font-mono)" }}>
             slip={slippageBps}bps comm=NT${commissionFixed}/rt
           </span>
         ) : (
-          <span className="text-[9px]" style={{ color: colors.orange, fontFamily: "var(--font-mono)" }}>
+          <span className="text-[11px]" style={{ color: colors.orange, fontFamily: "var(--font-mono)" }}>
             ⚠ zero cost model (defaults applied by backend)
           </span>
         )}
@@ -518,7 +518,7 @@ export function TearSheet() {
       )}
       {result && m && (
         <>
-          <div className="text-[9px] mb-2.5" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
+          <div className="text-[11px] mb-2.5" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
             {currentStrat?.name} on {symbol} ({startDate} → {endDate}) • {result.bars_count.toLocaleString()} bars • {result.timeframe_label ?? fmtTf(result.timeframe_minutes ?? params.bar_agg ?? 1)}{result.intraday ? " • INTRADAY" : ""}
           </div>
           <StatRow>
@@ -550,7 +550,7 @@ export function TearSheet() {
                     <span>
                       {symbol} OHLC · TRADE SIGNALS
                       {stableSignals.length > 0 && (
-                        <span style={{ color: colors.muted, fontSize: 10 }}>
+                        <span style={{ color: colors.muted, fontSize: 11 }}>
                           {" "}({stableSignals.filter(s => s.side === "buy").length} buys, {stableSignals.filter(s => s.side === "sell").length} sells)
                         </span>
                       )}
@@ -595,10 +595,10 @@ export function TearSheet() {
             >
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  <span style={{ color: colors.cyan, fontSize: 10, fontFamily: "var(--font-mono)", fontWeight: 600 }}>
+                  <span style={{ color: colors.cyan, fontSize: 11, fontFamily: "var(--font-mono)", fontWeight: 600 }}>
                     {fmtTf(baseTfMin)} DETAIL
                   </span>
-                  <span style={{ color: colors.dim, fontSize: 9, fontFamily: "var(--font-mono)", margin: "0 4px" }}>|</span>
+                  <span style={{ color: colors.dim, fontSize: 11, fontFamily: "var(--font-mono)", margin: "0 4px" }}>|</span>
                   {result?.indicator_meta && Object.entries(result.indicator_meta).map(([key, meta]) => {
                     const active = enabledIndicators.has(key);
                     return (
@@ -606,7 +606,7 @@ export function TearSheet() {
                         key={key}
                         onClick={() => toggleIndicator(key)}
                         style={{
-                          fontSize: 9,
+                          fontSize: 11,
                           fontFamily: "var(--font-mono)",
                           padding: "1px 8px",
                           borderRadius: 9999,
@@ -680,7 +680,7 @@ export function TearSheet() {
       <div className="mt-3 rounded-[5px]" style={{ border: "1px solid var(--color-qe-card-border)", background: "var(--color-qe-card)" }}>
         <button
           onClick={() => setHistoryOpen(!historyOpen)}
-          className="w-full flex items-center justify-between px-3 py-2 text-[10px] font-semibold cursor-pointer border-none"
+          className="w-full flex items-center justify-between px-3 py-2 text-[11px] font-semibold cursor-pointer border-none"
           style={{ background: "transparent", color: colors.muted, fontFamily: "var(--font-mono)" }}
         >
           <span>RUN HISTORY {paramRuns.length > 0 && `(${paramRuns.length})`}</span>
@@ -689,9 +689,9 @@ export function TearSheet() {
         {historyOpen && (
           <div className="px-3 pb-3" style={{ overflowX: "auto" }}>
             {paramRuns.length === 0 ? (
-              <div className="text-[10px] py-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No run history for this strategy.</div>
+              <div className="text-[11px] py-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No run history for this strategy.</div>
             ) : (
-              <table className="w-full text-[10px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse", minWidth: 1080 }}>
+              <table className="w-full text-[11px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse", minWidth: 1080 }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid var(--color-qe-card-border)" }}>
                     <th className="text-left py-1 pr-2" style={{ color: colors.dim, width: 40 }}>Run#</th>
@@ -746,8 +746,8 @@ export function TearSheet() {
                       >
                         <td className="py-1 pr-2" style={{ color: colors.dim, width: 40, whiteSpace: "nowrap" }}>
                           <span style={{ color: colors.muted }}>{run.run_id}</span>
-                          {isSelected && <span title="Loaded" style={{ color: "#4ade80", fontSize: 8, marginLeft: 3 }}>●</span>}
-                          {isActive && <span title="Active params" style={{ color: colors.green, fontSize: 8, marginLeft: isSelected ? 1 : 3 }}>★</span>}
+                          {isSelected && <span title="Loaded" style={{ color: "#4ade80", fontSize: 11, marginLeft: 3 }}>●</span>}
+                          {isActive && <span title="Active params" style={{ color: colors.green, fontSize: 11, marginLeft: isSelected ? 1 : 3 }}>★</span>}
                         </td>
                         <td className="py-1 pr-2" style={{ color: colors.text }}>{run.run_at ? run.run_at.slice(5, 16).replace("T", " ") : "—"}</td>
                         <td className="py-1 pr-2" style={{ color: colors.muted }}>{run.symbol ?? "—"}</td>
@@ -757,7 +757,7 @@ export function TearSheet() {
                         <td className="py-1 pr-2" style={{ color: colors.muted }}>
                           {run.search_type ?? "grid"}
                           {run.metrics_source === "full_period" && (
-                            <span style={{ color: "#4ade80", marginLeft: 4, fontSize: 8 }} title="Full-period validated">●</span>
+                            <span style={{ color: "#4ade80", marginLeft: 4, fontSize: 11 }} title="Full-period validated">●</span>
                           )}
                         </td>
                         <td className="text-right py-1 pr-2" style={{ color: colors.dim }}>
@@ -790,11 +790,11 @@ export function TearSheet() {
                         <td className="py-1 pr-2" style={{ color: colors.dim }}>
                           {run.strategy_hash != null ? (
                             <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                              <code style={{ fontSize: 10 }}>{run.strategy_hash.slice(0, 8)}</code>
+                              <code style={{ fontSize: 11 }}>{run.strategy_hash.slice(0, 8)}</code>
                               <button
                                 onClick={(e) => handleViewCode(e, run.run_id)}
                                 className="cursor-pointer border-none opacity-40 hover:opacity-100"
-                                style={{ background: "transparent", color: colors.cyan, fontSize: 9, padding: 0, lineHeight: 1 }}
+                                style={{ background: "transparent", color: colors.cyan, fontSize: 11, padding: 0, lineHeight: 1 }}
                                 title="View strategy code"
                                 disabled={codeLoading}
                               >{"</>"}</button>
@@ -805,7 +805,7 @@ export function TearSheet() {
                           <button
                             type="button"
                             onClick={(e) => handleDelete(e, run.run_id)}
-                            className="px-1 py-0.5 rounded text-[9px] cursor-pointer border-none opacity-40 hover:opacity-100"
+                            className="px-1 py-0.5 rounded text-[11px] cursor-pointer border-none opacity-40 hover:opacity-100"
                             style={{ background: "transparent", color: colors.red, fontFamily: "var(--font-mono)" }}
                             title="Delete run"
                           >🗑</button>

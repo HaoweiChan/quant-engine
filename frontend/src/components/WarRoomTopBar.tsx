@@ -23,7 +23,7 @@ export function WarRoomTopBar({ totalEquity, marginRatio }: WarRoomTopBarProps) 
       <div className="flex items-center gap-4">
         {totalEquity !== undefined && (
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>EQUITY</span>
+            <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>EQUITY</span>
             <span className="text-[14px] font-semibold" style={{ color: colors.text, fontFamily: "var(--font-mono)" }}>
               {fmtDollar(totalEquity)}
             </span>
@@ -31,7 +31,7 @@ export function WarRoomTopBar({ totalEquity, marginRatio }: WarRoomTopBarProps) 
         )}
         {marginRatio !== undefined && (
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>MARGIN</span>
+            <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>MARGIN</span>
             <span className="text-[13px] font-semibold" style={{ color: marginColor, fontFamily: "var(--font-mono)" }}>
               {(marginRatio * 100).toFixed(1)}%
             </span>

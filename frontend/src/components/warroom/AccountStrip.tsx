@@ -54,7 +54,7 @@ export function AccountStrip({ accounts }: AccountStripProps) {
   if (entries.length === 0) {
     return (
       <div className="flex items-center px-4 py-1.5" style={{ borderBottom: `1px solid ${colors.cardBorder}`, background: colors.bg }}>
-        <span className="text-[9px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No accounts configured</span>
+        <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>No accounts configured</span>
       </div>
     );
   }
@@ -74,7 +74,6 @@ export function AccountStrip({ accounts }: AccountStripProps) {
             style={{
               background: isSelected ? `${colors.green}15` : colors.card,
               border: `1px solid ${isSelected ? colors.green : colors.cardBorder}`,
-              borderLeft: info.sandbox_mode ? `4px solid ${colors.orange}` : undefined,
               fontFamily: "var(--font-mono)",
             }}
           >
@@ -85,17 +84,28 @@ export function AccountStrip({ accounts }: AccountStripProps) {
             <span className="text-[11px]" style={{ color: isSelected ? colors.text : colors.muted }}>
               {info.display_name || id}
             </span>
+            <span
+              className="font-bold px-1 rounded"
+              style={{
+                fontSize: 9,
+                lineHeight: "14px",
+                background: info.sandbox_mode ? "#8B6914" : "#166534",
+                color: "#fff",
+              }}
+            >
+              {info.sandbox_mode ? "PAPER" : "LIVE"}
+            </span>
             <span className="text-[11px] font-semibold" style={{ color: colors.green }}>
               ${info.equity.toLocaleString(undefined, { maximumFractionDigits: 0 })}
             </span>
-            <span className="text-[10px]" style={{ color: latencyColor(latMs) }}>
+            <span className="text-[11px]" style={{ color: latencyColor(latMs) }}>
               {latMs !== null ? `${latMs}ms` : "—"}
             </span>
           </button>
         );
       })}
       {hb?.halt_active && (
-        <span className="text-[9px] font-bold px-2 py-0.5 rounded" style={{ color: colors.red, background: "rgba(255,30,30,0.1)", fontFamily: "var(--font-mono)" }}>
+        <span className="text-[11px] font-bold px-2 py-0.5 rounded" style={{ color: colors.red, background: "rgba(255,30,30,0.1)", fontFamily: "var(--font-mono)" }}>
           HALTED
         </span>
       )}

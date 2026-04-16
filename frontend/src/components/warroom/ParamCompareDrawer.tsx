@@ -127,7 +127,7 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
             <div className="text-[12px] font-semibold" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
               Parameter Manager
             </div>
-            <div className="text-[9px]" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>
+            <div className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>
               {strategy?.split("/").pop()} {session ? `· ${session.symbol}` : ""}
             </div>
           </div>
@@ -137,7 +137,7 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
         </div>
 
         {error && (
-          <div className="px-4 py-1.5 text-[9px]" style={{ color: colors.red, fontFamily: "var(--font-mono)", background: "rgba(255,82,82,0.08)" }}>
+          <div className="px-4 py-1.5 text-[11px]" style={{ color: colors.red, fontFamily: "var(--font-mono)", background: "rgba(255,82,82,0.08)" }}>
             {error}
           </div>
         )}
@@ -146,19 +146,19 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
         {selectedRuns.length >= 2 && (
           <div className="px-4 py-3 border-b" style={{ borderColor: colors.cardBorder, background: colors.card }}>
             <div className="flex items-center justify-between mb-2">
-              <span className="text-[9px] font-semibold tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+              <span className="text-[11px] font-semibold tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
                 COMPARISON ({selectedRuns.length})
               </span>
               <button
                 onClick={() => setSelectedIds([])}
-                className="text-[8px] cursor-pointer border-none bg-transparent"
+                className="text-[11px] cursor-pointer border-none bg-transparent"
                 style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}
               >
                 clear
               </button>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full text-[8px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }}>
+              <table className="w-full text-[11px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }}>
                 <thead>
                   <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
                     <th className="text-left py-1 pr-3" style={{ color: colors.dim }}>Metric</th>
@@ -206,20 +206,20 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
         {/* Run history */}
         <div className="flex-1 overflow-y-auto px-4 py-3">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-[9px] font-semibold tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+            <span className="text-[11px] font-semibold tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
               OPTIMIZATION RUNS
             </span>
             {selectedIds.length > 0 && (
-              <span className="text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+              <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
                 {selectedIds.length} selected
               </span>
             )}
           </div>
 
           {loading ? (
-            <div className="text-[9px] py-4 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>Loading...</div>
+            <div className="text-[11px] py-4 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>Loading...</div>
           ) : runs.length === 0 ? (
-            <div className="text-[9px] py-4 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+            <div className="text-[11px] py-4 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
               No optimization runs found. Run a parameter sweep first.
             </div>
           ) : (
@@ -240,15 +240,15 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
                   >
                     <div className="flex items-center justify-between mb-1">
                       <div className="flex items-center gap-2">
-                        <span className="text-[9px] font-semibold" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
+                        <span className="text-[11px] font-semibold" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
                           #{r.run_id}
                         </span>
                         {isDeployed && (
-                          <span className="text-[7px] px-1 py-0.5 rounded font-semibold" style={{ background: `${colors.green}20`, color: colors.green }}>
+                          <span className="text-[11px] px-1 py-0.5 rounded font-semibold" style={{ background: `${colors.green}20`, color: colors.green }}>
                             DEPLOYED
                           </span>
                         )}
-                        <span className="text-[8px]" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
+                        <span className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
                           {r.run_at?.slice(0, 10)}
                         </span>
                       </div>
@@ -257,7 +257,7 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
                           <button
                             onClick={() => handleDeploy(r.best_candidate_id!)}
                             disabled={actionLoading !== null}
-                            className="px-1.5 py-0.5 rounded text-[7px] cursor-pointer border-none text-white font-semibold"
+                            className="px-1.5 py-0.5 rounded text-[11px] cursor-pointer border-none text-white font-semibold"
                             style={{ background: colors.green, fontFamily: "var(--font-mono)" }}
                           >
                             {actionLoading === `deploy-${r.best_candidate_id}` ? "..." : "DEPLOY"}
@@ -267,7 +267,7 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
                           <button
                             onClick={() => handleActivate(r.best_candidate_id!)}
                             disabled={actionLoading !== null}
-                            className="px-1.5 py-0.5 rounded text-[7px] cursor-pointer border-none font-semibold"
+                            className="px-1.5 py-0.5 rounded text-[11px] cursor-pointer border-none font-semibold"
                             style={{ background: "rgba(90,138,242,0.15)", color: colors.blue, fontFamily: "var(--font-mono)" }}
                           >
                             {actionLoading === `activate-${r.best_candidate_id}` ? "..." : "ACTIVATE"}
@@ -276,7 +276,7 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
                         <button
                           onClick={() => handleDelete(r.run_id)}
                           disabled={actionLoading !== null}
-                          className="px-1.5 py-0.5 rounded text-[7px] cursor-pointer border-none"
+                          className="px-1.5 py-0.5 rounded text-[11px] cursor-pointer border-none"
                           style={{ background: "rgba(255,82,82,0.1)", color: colors.red, fontFamily: "var(--font-mono)" }}
                         >
                           {actionLoading === `delete-${r.run_id}` ? "..." : "DEL"}
@@ -286,7 +286,7 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
 
                     {/* Metrics row */}
                     {m && (
-                      <div className="flex gap-3 text-[8px] mt-1" style={{ fontFamily: "var(--font-mono)" }}>
+                      <div className="flex gap-3 text-[11px] mt-1" style={{ fontFamily: "var(--font-mono)" }}>
                         <span style={{ color: (m.sharpe ?? 0) > 1 ? colors.green : colors.gold }}>
                           Sharpe {fmtMetric(m.sharpe)}
                         </span>
@@ -307,7 +307,7 @@ export function ParamCompareDrawer({ accountId, sessions, onAction }: ParamCompa
 
                     {/* Params */}
                     {r.best_params && (
-                      <div className="text-[7px] mt-1 truncate" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
+                      <div className="text-[11px] mt-1 truncate" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
                         {Object.entries(r.best_params).map(([k, v]) => `${k}=${v}`).join("  ")}
                       </div>
                     )}

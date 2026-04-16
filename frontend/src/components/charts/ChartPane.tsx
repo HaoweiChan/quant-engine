@@ -161,7 +161,7 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
         background: { color: colors.card },
         textColor: colors.dim,
         fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 9,
+        fontSize: 11,
         attributionLogo: false,
       },
       grid: {
@@ -334,7 +334,7 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
             padding: "0 3px",
             background: m.color,
             color: "#fff",
-            fontSize: 9,
+            fontSize: 11,
             fontWeight: 700,
             fontFamily: "var(--font-mono)",
             display: "flex",

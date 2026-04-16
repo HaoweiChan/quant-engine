@@ -67,7 +67,7 @@ export const DrawdownChart = React.memo(function DrawdownChart({ equity, bnhEqui
         <XAxis dataKey="idx" hide />
         <YAxis
           domain={[yMin, 0]}
-          tick={{ fontSize: 8, fill: colors.dim, fontFamily: "'JetBrains Mono'" }}
+          tick={{ fontSize: 11, fill: colors.dim, fontFamily: "'JetBrains Mono'" }}
           tickFormatter={(v: number) => `${v.toFixed(0)}%`}
           axisLine={{ stroke: colors.cardBorder }}
           width={40}
@@ -78,7 +78,7 @@ export const DrawdownChart = React.memo(function DrawdownChart({ equity, bnhEqui
             background: colors.sidebar,
             border: `1px solid ${colors.cardBorder}`,
             fontFamily: "'JetBrains Mono'",
-            fontSize: 10,
+            fontSize: 11,
             color: colors.text,
           }}
           itemStyle={{ color: "#e2e8f0" }}

@@ -37,7 +37,7 @@ export function LivePriceTicker() {
       {arrow && <span style={{ color: arrowColor }}>{arrow}</span>}
       <span
         style={{
-          fontSize: 8,
+          fontSize: 11,
           fontWeight: 600,
           padding: "2px 6px",
           borderRadius: 3,

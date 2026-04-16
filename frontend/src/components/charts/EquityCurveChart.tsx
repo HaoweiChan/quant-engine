@@ -93,7 +93,7 @@ export const EquityCurveChart = React.memo(forwardRef<EquityCurveChartHandle, Eq
         background: { color: colors.card },
         textColor: colors.dim,
         fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 9,
+        fontSize: 11,
         attributionLogo: false,
       },
       grid: {

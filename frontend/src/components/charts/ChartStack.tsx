@@ -473,7 +473,7 @@ export function ChartStack({
                     if (next.has(leg.slug)) next.delete(leg.slug); else next.add(leg.slug);
                     return next;
                   })}
-                  className="flex items-center gap-1 text-[9px] cursor-pointer border-none bg-transparent p-0"
+                  className="flex items-center gap-1 text-[11px] cursor-pointer border-none bg-transparent p-0"
                   style={{ fontFamily: "var(--font-mono)", opacity: isHidden ? 0.35 : 1 }}
                 >
                   <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: isHidden ? colors.dim : leg.color }} />
@@ -502,7 +502,7 @@ export function ChartStack({
             </button>
             <button
               onClick={() => setSecondaryVisible(!secondaryVisible)}
-              className="px-2 py-0.5 rounded text-[9px] cursor-pointer border-none"
+              className="px-2 py-0.5 rounded text-[11px] cursor-pointer border-none"
               style={{ fontFamily: "var(--font-mono)", background: secondaryVisible ? "rgba(90,138,242,0.25)" : "rgba(90,138,242,0.08)", color: secondaryVisible ? colors.blue : colors.dim }}
             >
               {secondaryVisible ? "Hide Sub" : "Sub Chart"}
@@ -528,7 +528,7 @@ export function ChartStack({
                 value=""
                 onChange={(e) => { if (e.target.value) addIndicator(e.target.value); }}
                 onBlur={() => setAddingIndicator(false)}
-                className="rounded px-1.5 py-0.5 text-[9px]"
+                className="rounded px-1.5 py-0.5 text-[11px]"
                 style={inputStyle}
               >
                 <option value="">Select overlay...</option>
@@ -539,14 +539,14 @@ export function ChartStack({
             ) : (
               <button
                 onClick={() => setAddingIndicator(true)}
-                className="px-2 py-0.5 rounded text-[8px] cursor-pointer border-none text-white"
+                className="px-2 py-0.5 rounded text-[11px] cursor-pointer border-none text-white"
                 style={{ background: "#353849", fontFamily: "var(--font-mono)" }}
               >
                 + Add Overlay
               </button>
             )}
             {localIndicators.length === 0 && (
-              <span className="text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+              <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
                 No overlays selected
               </span>
             )}
@@ -561,7 +561,7 @@ export function ChartStack({
                 : "";
             return (
               <div key={ai.instanceId} className="mb-1">
-                <div className="flex items-center gap-1.5 text-[8px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+                <div className="flex items-center gap-1.5 text-[11px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
                   <span className="inline-block w-2 h-2 rounded-full" style={{ background: ai.color }} />
                   <span className="flex-1 truncate" style={{ color: colors.text }}>
                     {def.label}{paramStr}
@@ -569,7 +569,7 @@ export function ChartStack({
                   {def.params.length > 0 && (
                     <button
                       onClick={() => setEditingId(isEditing ? null : ai.instanceId)}
-                      className="cursor-pointer border-none bg-transparent text-[8px]"
+                      className="cursor-pointer border-none bg-transparent text-[11px]"
                       style={{ color: isEditing ? colors.cyan : colors.dim }}
                     >
                       settings
@@ -577,7 +577,7 @@ export function ChartStack({
                   )}
                   <button
                     onClick={() => removeIndicator(ai.instanceId)}
-                    className="cursor-pointer border-none bg-transparent text-[10px]"
+                    className="cursor-pointer border-none bg-transparent text-[11px]"
                     style={{ color: colors.red }}
                   >
                     x
@@ -586,7 +586,7 @@ export function ChartStack({
                 {isEditing && (
                   <div className="ml-3 mt-0.5 flex flex-wrap gap-1.5">
                     {def.params.map((p) => (
-                      <label key={p.name} className="flex items-center gap-1 text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+                      <label key={p.name} className="flex items-center gap-1 text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
                         <span>{p.label}</span>
                         <input
                           key={`${ai.instanceId}-${p.name}-${ai.params[p.name]}`}
@@ -597,7 +597,7 @@ export function ChartStack({
                           step={p.step ?? 1}
                           onBlur={(e) => updateParam(ai.instanceId, p.name, Number(e.target.value))}
                           onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-                          className="w-14 rounded px-1 py-0.5 text-[8px]"
+                          className="w-14 rounded px-1 py-0.5 text-[11px]"
                           style={inputStyle}
                         />
                       </label>
@@ -616,7 +616,7 @@ export function ChartStack({
             display: "flex", alignItems: "center", justifyContent: "center",
             background: colors.card,
           }}>
-            <span className="text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+            <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
               Loading bars...
             </span>
           </div>
@@ -632,7 +632,7 @@ export function ChartStack({
               borderRadius: 3,
               padding: "3px 8px",
               fontFamily: "var(--font-mono)",
-              fontSize: 9,
+              fontSize: 11,
               display: "flex",
               gap: 8,
               pointerEvents: "none",
@@ -670,7 +670,7 @@ export function ChartStack({
         <select
           value={secondaryId}
           onChange={(e) => setSecondaryId(e.target.value)}
-          className="rounded px-1.5 py-0.5 text-[9px]"
+          className="rounded px-1.5 py-0.5 text-[11px]"
           style={inputStyle}
         >
           {PANE_INDICATORS.map((d) => (
@@ -679,7 +679,7 @@ export function ChartStack({
         </select>
         {secondaryDef && secondaryDef.params.length > 0 && secondaryDef.params.map((p) => (
           <div key={p.name} className="flex items-center gap-1">
-            <span className="text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+            <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
               {p.label}
             </span>
             <input
@@ -694,7 +694,7 @@ export function ChartStack({
                 if (Number.isFinite(v) && v > 0) setSecondaryParams((prev) => ({ ...prev, [p.name]: v }));
               }}
               onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-              className="w-12 rounded px-1 py-0.5 text-[9px]"
+              className="w-12 rounded px-1 py-0.5 text-[11px]"
               style={inputStyle}
             />
           </div>

@@ -26,12 +26,12 @@ export function KillSwitchBar() {
     }
   };
 
-  const btnBase = "px-3 py-1 rounded text-[10px] font-bold cursor-pointer border-none";
+  const btnBase = "px-3 py-1 rounded text-[11px] font-bold cursor-pointer border-none";
 
   return (
     <div className="flex items-center gap-2">
       {status && (
-        <span className="text-[9px] font-semibold px-2 py-0.5 rounded" style={{
+        <span className="text-[11px] font-semibold px-2 py-0.5 rounded" style={{
           fontFamily: "var(--font-mono)",
           color: status === "halted" ? colors.red : status === "resumed" ? colors.green : colors.gold,
           background: "rgba(255,255,255,0.05)",
@@ -84,17 +84,17 @@ export function KillSwitchBar() {
               autoFocus
               onKeyDown={(e) => e.key === "Enter" && execute()}
             />
-            {error && <p className="text-[10px] mb-2" style={{ color: colors.red }}>{error}</p>}
+            {error && <p className="text-[11px] mb-2" style={{ color: colors.red }}>{error}</p>}
             <div className="flex gap-2 justify-end">
               <button
-                className="px-3 py-1 rounded text-[10px] cursor-pointer border-none"
+                className="px-3 py-1 rounded text-[11px] cursor-pointer border-none"
                 style={{ background: "var(--color-qe-input)", color: colors.muted }}
                 onClick={() => { setPending(null); setConfirmText(""); setError(null); }}
               >
                 Cancel
               </button>
               <button
-                className="px-3 py-1 rounded text-[10px] font-bold cursor-pointer border-none"
+                className="px-3 py-1 rounded text-[11px] font-bold cursor-pointer border-none"
                 style={{
                   background: pending === "flatten" ? "#991B1B" : pending === "halt" ? "#8B6914" : "#166534",
                   color: "#fff",

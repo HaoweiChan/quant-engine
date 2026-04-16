@@ -159,18 +159,18 @@ export function StressTest() {
           <option value="circular">Block Bootstrap (Circular)</option>
           <option value="garch">GARCH-Filtered Residuals</option>
         </select>
-        <label className="flex items-center gap-1 text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+        <label className="flex items-center gap-1 text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
           Paths
-          <input type="number" value={nPaths} min={50} max={5000} step={50} onChange={(e) => setNPaths(Number(e.target.value))} className="w-16 rounded px-1 py-0.5 text-[10px]" style={inputStyle} />
+          <input type="number" value={nPaths} min={50} max={5000} step={50} onChange={(e) => setNPaths(Number(e.target.value))} className="w-16 rounded px-1 py-0.5 text-[11px]" style={inputStyle} />
         </label>
-        <label className="flex items-center gap-1 text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+        <label className="flex items-center gap-1 text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
           Days
-          <input type="number" value={simDays} min={20} max={756} step={1} onChange={(e) => setSimDays(Number(e.target.value))} className="w-16 rounded px-1 py-0.5 text-[10px]" style={inputStyle} />
+          <input type="number" value={simDays} min={20} max={756} step={1} onChange={(e) => setSimDays(Number(e.target.value))} className="w-16 rounded px-1 py-0.5 text-[11px]" style={inputStyle} />
         </label>
         <button
           onClick={handleRun}
           disabled={running || !strategy}
-          className="py-1.5 px-5 rounded text-[10px] font-semibold cursor-pointer border-none text-white"
+          className="py-1.5 px-5 rounded text-[11px] font-semibold cursor-pointer border-none text-white"
           style={{ background: "#2A5A9A", fontFamily: "var(--font-mono)", opacity: running ? 0.5 : 1 }}
         >
           {running ? "Simulating…" : "Run Stress Test"}

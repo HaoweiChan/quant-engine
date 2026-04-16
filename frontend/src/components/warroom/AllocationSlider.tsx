@@ -153,7 +153,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
         }}
       >
         <div
-          className="text-[10px] font-semibold tracking-wider"
+          className="text-[11px] font-semibold tracking-wider"
           style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}
         >
           ALLOCATION ({sessions.length} strategies)
@@ -202,7 +202,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
         </div>
         <div className="flex items-center justify-between">
           <span
-            className="text-[10px]"
+            className="text-[11px]"
             style={{
               color: canApply ? colors.green : colors.red,
               fontFamily: "var(--font-mono)",
@@ -215,7 +215,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
             type="button"
             onClick={handleCommit}
             disabled={!hasChanges || !canApply || anyBelowMin || busy}
-            className="text-[10px] font-semibold py-1 px-3 rounded cursor-pointer border-none"
+            className="text-[11px] font-semibold py-1 px-3 rounded cursor-pointer border-none"
             style={{
               background: hasChanges && canApply && !anyBelowMin ? colors.green : "rgba(255,255,255,0.08)",
               color: hasChanges && canApply && !anyBelowMin ? "#fff" : colors.dim,
@@ -228,7 +228,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
         </div>
         {error && (
           <div
-            className="text-[9px] px-1.5 py-0.5 rounded"
+            className="text-[11px] px-1.5 py-0.5 rounded"
             style={{
               background: "rgba(255,82,82,0.12)",
               color: colors.red,
@@ -295,7 +295,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
       </div>
       {error && (
         <div
-          className="text-[9px] px-1.5 py-0.5 rounded"
+          className="text-[11px] px-1.5 py-0.5 rounded"
           style={{
             background: "rgba(255,82,82,0.12)",
             color: colors.red,
@@ -310,7 +310,7 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
           type="button"
           onClick={handleCommit}
           disabled={!hasChanges || busy}
-          className="text-[10px] font-semibold py-1 px-3 rounded cursor-pointer border-none"
+          className="text-[11px] font-semibold py-1 px-3 rounded cursor-pointer border-none"
           style={{
             background: hasChanges ? colors.green : "rgba(255,255,255,0.08)",
             color: hasChanges ? "#fff" : colors.dim,

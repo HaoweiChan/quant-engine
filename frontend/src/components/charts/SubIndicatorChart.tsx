@@ -43,7 +43,7 @@ export function SubIndicatorChart({
         background: { color: colors.card },
         textColor: colors.dim,
         fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 9,
+        fontSize: 11,
         attributionLogo: false,
       },
       grid: {
@@ -140,7 +140,7 @@ export function SubIndicatorChart({
   return (
     <div className="w-full" style={{ height }}>
       {/* Legend */}
-      <div className="flex gap-3 px-2 py-1" style={{ fontSize: 10, color: colors.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+      <div className="flex gap-3 px-2 py-1" style={{ fontSize: 11, color: colors.muted, fontFamily: "'JetBrains Mono', monospace" }}>
         {series.map((s) => (
           <span key={s.label} className="flex items-center gap-1">
             <span

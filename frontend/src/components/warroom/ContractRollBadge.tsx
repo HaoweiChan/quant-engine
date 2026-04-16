@@ -23,7 +23,7 @@ export function ContractRollBadge({ urgency, daysToSettlement, holdingPeriod, co
   if (compact) {
     return (
       <span
-        className="text-[7px] px-1 py-0.5 rounded"
+        className="text-[11px] px-1 py-0.5 rounded"
         style={{ background: cfg.bg, color: cfg.color, fontFamily: "var(--font-mono)" }}
         title={`${daysToSettlement}d to settlement (${holdingPeriod})`}
       >
@@ -33,7 +33,7 @@ export function ContractRollBadge({ urgency, daysToSettlement, holdingPeriod, co
   }
   return (
     <div
-      className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[7px]"
+      className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px]"
       style={{ background: cfg.bg, fontFamily: "var(--font-mono)" }}
     >
       <span style={{ color: cfg.color, fontWeight: 600 }}>{cfg.label}</span>

@@ -71,7 +71,7 @@ export function MockLiveFeedPanel({ enabled }: MockLiveFeedPanelProps) {
             {priceDirection && <span style={{ color: directionColor }}>{priceDirection}</span>}
             <span
               style={{
-                fontSize: 8,
+                fontSize: 11,
                 padding: "2px 6px",
                 borderRadius: 3,
                 background: colors.green,
@@ -87,7 +87,7 @@ export function MockLiveFeedPanel({ enabled }: MockLiveFeedPanelProps) {
             <OHLCVChartMock data={bars} height={180} />
           )}
         </div>
-        <div style={{ marginTop: 8, fontSize: 9, color: colors.dim, fontFamily: "var(--font-mono)" }}>
+        <div style={{ marginTop: 8, fontSize: 11, color: colors.dim, fontFamily: "var(--font-mono)" }}>
           Simulating 1-minute bars with random ticks every 300ms. Click "MOCK OFF" to disable.
         </div>
       </div>

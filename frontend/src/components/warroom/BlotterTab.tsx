@@ -23,11 +23,11 @@ export function BlotterTab() {
             Select an account in the War Room to view its activity feed.
           </div>
         ) : history.length === 0 ? (
-          <div className="text-[10px] py-5" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+          <div className="text-[11px] py-5" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
             No activity recorded for this account yet.
           </div>
         ) : (
-          <table className="w-full text-[9px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }}>
+          <table className="w-full text-[11px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
                 {["Time", "Event", "Strategy", "Symbol", "Candidate"].map((h) => (

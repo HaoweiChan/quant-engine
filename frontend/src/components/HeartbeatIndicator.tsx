@@ -29,7 +29,7 @@ export function HeartbeatIndicator() {
 
   if (!hb) {
     return (
-      <span className="text-[9px] px-2 py-0.5 rounded" style={{ color: colors.dim, fontFamily: "var(--font-mono)", background: "rgba(255,255,255,0.03)" }}>
+      <span className="text-[11px] px-2 py-0.5 rounded" style={{ color: colors.dim, fontFamily: "var(--font-mono)", background: "rgba(255,255,255,0.03)" }}>
         HB: —
       </span>
     );
@@ -40,7 +40,7 @@ export function HeartbeatIndicator() {
       {hb.brokers.map((b) => (
         <span
           key={b.account_id}
-          className="text-[9px] px-2 py-0.5 rounded flex items-center gap-1"
+          className="text-[11px] px-2 py-0.5 rounded flex items-center gap-1"
           style={{ fontFamily: "var(--font-mono)", background: "rgba(255,255,255,0.03)" }}
         >
           <span
@@ -54,7 +54,7 @@ export function HeartbeatIndicator() {
         </span>
       ))}
       {hb.halt_active && (
-        <span className="text-[9px] font-bold px-2 py-0.5 rounded" style={{ color: colors.red, background: "rgba(255,30,30,0.1)", fontFamily: "var(--font-mono)" }}>
+        <span className="text-[11px] font-bold px-2 py-0.5 rounded" style={{ color: colors.red, background: "rgba(255,30,30,0.1)", fontFamily: "var(--font-mono)" }}>
           HALTED
         </span>
       )}

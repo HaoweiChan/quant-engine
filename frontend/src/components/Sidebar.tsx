@@ -19,7 +19,7 @@ export function Sidebar({ children }: SidebarProps) {
 export function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div
-      className="text-[10px] uppercase tracking-[1px] font-bold mb-2"
+      className="text-[11px] uppercase tracking-[1px] font-bold mb-2"
       style={{ color: "var(--color-qe-muted)", fontFamily: "var(--font-mono)" }}
     >
       {children}

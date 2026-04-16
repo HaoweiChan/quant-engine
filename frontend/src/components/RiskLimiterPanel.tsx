@@ -17,7 +17,7 @@ function utilizationColor(pct: number): string {
 export function RiskLimiterPanel({ guards }: { guards: RiskGuard[] }) {
   if (guards.length === 0) {
     return (
-      <div className="text-[10px] py-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+      <div className="text-[11px] py-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
         No risk guards configured.
       </div>
     );
@@ -33,13 +33,13 @@ export function RiskLimiterPanel({ guards }: { guards: RiskGuard[] }) {
         return (
           <div key={g.label}>
             <div className="flex items-center justify-between mb-0.5">
-              <span className="text-[9px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+              <span className="text-[11px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
                 {g.label}
               </span>
-              <span className="text-[9px]" style={{ color: col, fontFamily: "var(--font-mono)" }}>
+              <span className="text-[11px]" style={{ color: col, fontFamily: "var(--font-mono)" }}>
                 {g.current.toLocaleString()}{g.unit ? ` ${g.unit}` : ""} / {g.limit.toLocaleString()}{g.unit ? ` ${g.unit}` : ""}
                 {breached && (
-                  <span className="ml-1 px-1 py-0.5 rounded text-[8px] font-bold" style={{ background: "rgba(255,30,30,0.15)", color: colors.red }}>
+                  <span className="ml-1 px-1 py-0.5 rounded text-[11px] font-bold" style={{ background: "rgba(255,30,30,0.15)", color: colors.red }}>
                     BREACHED
                   </span>
                 )}

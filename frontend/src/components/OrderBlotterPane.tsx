@@ -70,7 +70,7 @@ export function OrderBlotterPane({ playbackFills }: OrderBlotterPaneProps = {}) 
         <span className="text-[11px] font-semibold" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
           ORDER BLOTTER
         </span>
-          <span className="flex items-center gap-1 text-[10px]" style={{ fontFamily: "var(--font-mono)" }}>
+          <span className="flex items-center gap-1 text-[11px]" style={{ fontFamily: "var(--font-mono)" }}>
           <span
             className="inline-block w-1.5 h-1.5 rounded-full"
             style={{ background: isPlayback ? colors.cyan : connected ? colors.green : colors.red }}

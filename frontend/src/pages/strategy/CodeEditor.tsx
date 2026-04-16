@@ -65,7 +65,7 @@ export function CodeEditor() {
         <div className="overflow-y-auto" style={{ maxHeight: "calc(100vh - 200px)" }}>
           {Object.entries(grouped).map(([dir, items]) => (
             <div key={dir}>
-              <div className="text-[8px] uppercase tracking-[1.5px] px-2 pt-2 pb-0.5" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+              <div className="text-[11px] uppercase tracking-[1.5px] px-2 pt-2 pb-0.5" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
                 {dir}/
               </div>
               {items.map((f) => (
@@ -93,7 +93,7 @@ export function CodeEditor() {
             {selected || "No file selected"}
           </span>
           {dirty && (
-            <span className="text-[9px]" style={{ fontFamily: "var(--font-mono)", color: colors.gold }}>
+            <span className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.gold }}>
               (modified)
             </span>
           )}
@@ -139,10 +139,10 @@ export function CodeEditor() {
         {/* Validation panel */}
         {validation.length > 0 && (
           <details open className="mt-2">
-            <summary className="text-[10px] cursor-pointer" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>Validation</summary>
+            <summary className="text-[11px] cursor-pointer" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>Validation</summary>
             <div className="p-2 mt-1 rounded max-h-[200px] overflow-y-auto" style={{ background: colors.sidebar, border: `1px solid ${colors.cardBorder}` }}>
               {validation.map((msg, i) => (
-                <div key={i} className="text-[10px] leading-relaxed" style={{ fontFamily: "var(--font-mono)", color: msg.includes("OK") ? colors.green : colors.red }}>
+                <div key={i} className="text-[11px] leading-relaxed" style={{ fontFamily: "var(--font-mono)", color: msg.includes("OK") ? colors.green : colors.red }}>
                   {msg}
                 </div>
               ))}

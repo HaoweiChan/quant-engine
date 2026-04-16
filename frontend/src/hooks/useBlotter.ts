@@ -17,7 +17,8 @@ export interface BlotterEvent {
   triggered?: boolean;
 }
 
-const WS_URL = `ws://${window.location.hostname}:8000/ws/blotter`;
+const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+const WS_URL = `${protocol}//${window.location.host}/ws/blotter`;
 const MAX_EVENTS = 500;
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30000;

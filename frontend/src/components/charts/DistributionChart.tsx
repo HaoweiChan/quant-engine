@@ -36,12 +36,12 @@ export const DistributionChart = React.memo(function DistributionChart({ values,
       <BarChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: 8 }}>
         <XAxis
           dataKey="mid"
-          tick={{ fontSize: 8, fill: colors.dim, fontFamily: "'JetBrains Mono'" }}
+          tick={{ fontSize: 11, fill: colors.dim, fontFamily: "'JetBrains Mono'" }}
           tickFormatter={(v: number) => Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : v.toFixed(0)}
           axisLine={{ stroke: colors.cardBorder }}
         />
         <YAxis
-          tick={{ fontSize: 8, fill: colors.dim, fontFamily: "'JetBrains Mono'" }}
+          tick={{ fontSize: 11, fill: colors.dim, fontFamily: "'JetBrains Mono'" }}
           axisLine={{ stroke: colors.cardBorder }}
         />
         <Tooltip
@@ -49,7 +49,7 @@ export const DistributionChart = React.memo(function DistributionChart({ values,
             background: colors.sidebar,
             border: `1px solid ${colors.cardBorder}`,
             fontFamily: "'JetBrains Mono'",
-            fontSize: 10,
+            fontSize: 11,
             color: colors.text,
           }}
           itemStyle={{ color: "#e2e8f0" }}

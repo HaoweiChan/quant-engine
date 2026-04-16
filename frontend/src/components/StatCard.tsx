@@ -15,7 +15,7 @@ export function StatCard({ label, value, color, sub }: StatCardProps) {
       }}
     >
       <div
-        className="text-[10px] uppercase tracking-wide mb-1"
+        className="text-[11px] uppercase tracking-wide mb-1"
         style={{ color: "var(--color-qe-muted)", fontFamily: "var(--font-mono)" }}
       >
         {label}
@@ -27,7 +27,7 @@ export function StatCard({ label, value, color, sub }: StatCardProps) {
         {value}
       </div>
       {sub && (
-        <div className="text-[10px] mt-0.5" style={{ color: "var(--color-qe-dim)" }}>
+        <div className="text-[11px] mt-0.5" style={{ color: "var(--color-qe-dim)" }}>
           {sub}
         </div>
       )}

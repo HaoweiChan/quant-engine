@@ -149,11 +149,11 @@ const GateCard = React.memo(function GateCard({
         <span className="font-semibold text-[11px]" style={{ color: colors.text, fontFamily: "var(--font-mono)" }}>
           {title}
         </span>
-        <span className="text-[10px] font-bold" style={{ color: statusColor, fontFamily: "var(--font-mono)" }}>
+        <span className="text-[11px] font-bold" style={{ color: statusColor, fontFamily: "var(--font-mono)" }}>
           {statusText}
         </span>
       </div>
-      <div className="text-[10px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+      <div className="text-[11px]" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
         {details}
       </div>
     </div>
@@ -279,18 +279,18 @@ export function RiskEvaluation() {
             <option value="circular">Block Bootstrap (Circular)</option>
             <option value="garch">GARCH-Filtered Residuals</option>
           </select>
-          <label className="flex items-center gap-1 text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+          <label className="flex items-center gap-1 text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
             Paths
-            <input type="number" value={nPaths} min={50} max={5000} step={50} onChange={(e) => setNPaths(Number(e.target.value))} className="w-16 rounded px-1 py-0.5 text-[10px]" style={inputStyle} />
+            <input type="number" value={nPaths} min={50} max={5000} step={50} onChange={(e) => setNPaths(Number(e.target.value))} className="w-16 rounded px-1 py-0.5 text-[11px]" style={inputStyle} />
           </label>
-          <label className="flex items-center gap-1 text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+          <label className="flex items-center gap-1 text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
             Days
-            <input type="number" value={simDays} min={20} max={756} step={1} onChange={(e) => setSimDays(Number(e.target.value))} className="w-16 rounded px-1 py-0.5 text-[10px]" style={inputStyle} />
+            <input type="number" value={simDays} min={20} max={756} step={1} onChange={(e) => setSimDays(Number(e.target.value))} className="w-16 rounded px-1 py-0.5 text-[11px]" style={inputStyle} />
           </label>
           <button
             onClick={handleRunStress}
             disabled={stressRunning || !strategy}
-            className="py-1.5 px-5 rounded text-[10px] font-semibold cursor-pointer border-none text-white"
+            className="py-1.5 px-5 rounded text-[11px] font-semibold cursor-pointer border-none text-white"
             style={{ background: "#2A5A9A", fontFamily: "var(--font-mono)", opacity: stressRunning ? 0.5 : 1 }}
           >
             {stressRunning ? "Simulating…" : "Run Stress Test"}
@@ -363,7 +363,7 @@ export function RiskEvaluation() {
           <button
             onClick={handleGenerateReport}
             disabled={riskRunning || !strategy}
-            className="py-1.5 px-5 rounded text-[10px] font-semibold cursor-pointer border-none text-white"
+            className="py-1.5 px-5 rounded text-[11px] font-semibold cursor-pointer border-none text-white"
             style={{ background: "#2A5A9A", fontFamily: "var(--font-mono)", opacity: riskRunning ? 0.5 : 1 }}
           >
             {riskRunning ? "Generating…" : "Generate Risk Report"}
@@ -402,7 +402,7 @@ export function RiskEvaluation() {
                 RECOMMENDATION: {riskResult.recommendation.toUpperCase()}
               </div>
               {riskResult.failure_reasons.length > 0 && (
-                <div className="text-[10px] mt-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+                <div className="text-[11px] mt-2" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
                   {riskResult.failure_reasons.join(" • ")}
                 </div>
               )}
@@ -472,7 +472,7 @@ export function RiskEvaluation() {
             {riskResult.regime_gate.regime_metrics && riskResult.regime_gate.regime_metrics.length > 0 && (
               <ChartCard title="REGIME METRICS">
                 <div className="p-4 overflow-x-auto">
-                  <table className="w-full text-[10px]" style={{ fontFamily: "var(--font-mono)" }}>
+                  <table className="w-full text-[11px]" style={{ fontFamily: "var(--font-mono)" }}>
                     <thead>
                       <tr style={{ borderBottomColor: colors.cardBorder }}>
                         <th className="text-left p-1" style={{ color: colors.dim }}>Regime</th>
@@ -498,7 +498,7 @@ export function RiskEvaluation() {
               </ChartCard>
             )}
 
-            <div className="text-[9px] p-3 mt-3" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+            <div className="text-[11px] p-3 mt-3" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
               Generated: {new Date(riskResult.generated_at).toLocaleString()} | Instrument: {riskResult.instrument}
             </div>
           </>

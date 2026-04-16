@@ -10,7 +10,7 @@ const inputStyle: React.CSSProperties = {
   border: `1px solid ${colors.inputBorder}`,
   borderRadius: 4,
   padding: "2px 6px",
-  fontSize: 10,
+  fontSize: 11,
   fontFamily: "var(--font-mono)",
   width: 150,
 };
@@ -108,7 +108,7 @@ export function PlaybackBar({ isMockAccount }: PlaybackBarProps) {
             background: enabled ? colors.blue : colors.dim,
           }}
         />
-        <span className="text-[10px] font-semibold tracking-wider" style={{ color: enabled ? colors.blue : colors.dim }}>
+        <span className="text-[11px] font-semibold tracking-wider" style={{ color: enabled ? colors.blue : colors.dim }}>
           PLAYBACK
         </span>
       </button>
@@ -145,7 +145,7 @@ export function PlaybackBar({ isMockAccount }: PlaybackBarProps) {
 
           {/* Speed slider */}
           <div className="flex items-center gap-1.5 shrink-0" style={{ lineHeight: 1 }}>
-            <span className="text-[9px]" style={{ color: colors.dim }}>{SPEED_MIN}×</span>
+            <span className="text-[11px]" style={{ color: colors.dim }}>{SPEED_MIN}×</span>
             <input
               type="range"
               data-testid="playback-speed"
@@ -158,7 +158,7 @@ export function PlaybackBar({ isMockAccount }: PlaybackBarProps) {
             />
             <span
               data-testid="playback-speed-indicator"
-              className="text-[10px] font-semibold"
+              className="text-[11px] font-semibold"
               style={{ color: colors.cyan, minWidth: 38, textAlign: "center", lineHeight: "24px" }}
             >
               {speedX >= 1000 ? `${(speedX / 1000).toFixed(speedX % 1000 === 0 ? 0 : 1)}k×` : `${speedX}×`}
@@ -175,7 +175,7 @@ export function PlaybackBar({ isMockAccount }: PlaybackBarProps) {
               style={inputStyle}
               title="Playback start (must be within mock data range)"
             />
-            <span className="text-[7px]" style={{ color: colors.dim }}>→</span>
+            <span className="text-[11px]" style={{ color: colors.dim }}>→</span>
             <input
               type="datetime-local"
               lang="zh-TW"
@@ -234,7 +234,7 @@ export function PlaybackBar({ isMockAccount }: PlaybackBarProps) {
           <button
             data-testid="playback-reset"
             onClick={() => jumpTo(rangeStartMs ?? 0)}
-            className="px-2 py-0.5 rounded cursor-pointer border-none text-[9px] tracking-wider"
+            className="px-2 py-0.5 rounded cursor-pointer border-none text-[11px] tracking-wider"
             style={{
               background: colors.card,
               color: colors.dim,

@@ -93,7 +93,7 @@ function CellDetailPanel({ cell, xParam, yParam, onClose }: { cell: CellResult; 
         <div className="flex gap-6">
           {/* Mini equity chart */}
           <div className="shrink-0">
-            <div className="text-[10px] mb-1" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+            <div className="text-[11px] mb-1" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
               <span style={{ color: colors.cyan }}>━</span> Strategy
               <span className="ml-3" style={{ color: colors.dim }}>┄</span> B&H
             </div>
@@ -113,7 +113,7 @@ function CellDetailPanel({ cell, xParam, yParam, onClose }: { cell: CellResult; 
             </table>
           </div>
         </div>
-        <button onClick={onClose} className="mt-3 text-[10px] cursor-pointer border-none bg-transparent" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+        <button onClick={onClose} className="mt-3 text-[11px] cursor-pointer border-none bg-transparent" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
           ✕ Close
         </button>
       </div>

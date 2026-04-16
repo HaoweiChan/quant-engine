@@ -161,7 +161,7 @@ export const OHLCVChart = React.memo(forwardRef<OHLCVChartHandle, OHLCVChartProp
         background: { color: colors.card },
         textColor: colors.dim,
         fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 9,
+        fontSize: 11,
         attributionLogo: false,
       },
       grid: {
@@ -379,7 +379,7 @@ export const OHLCVChart = React.memo(forwardRef<OHLCVChartHandle, OHLCVChartProp
             borderRadius: 3,
             padding: "3px 8px",
             fontFamily: "var(--font-mono)",
-            fontSize: 9,
+            fontSize: 11,
             display: "flex",
             gap: 8,
             pointerEvents: "none",
