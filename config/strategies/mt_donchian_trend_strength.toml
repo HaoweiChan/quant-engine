@@ -1,0 +1,13 @@
+[optimization]
+level = 1
+level_name = "L1_OPTIMIZED"
+achieved_at = "2026-04-16T16:18:56+08:00"
+holding_period = "medium_term"
+
+[optimization.gate_results]
+sharpe = 1.72
+trades_per_fold = 16
+mdd_pct = 0.253
+win_rate = 0.474
+profit_factor = 1.24
+note = "L2 attempted but REJECTED — MDD 25.3% exceeds 15% threshold, trades/fold 16 < 30"
