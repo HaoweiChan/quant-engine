@@ -8,9 +8,11 @@ All indicators follow the same interface pattern:
 - ``reset()``: clear all state for session boundary resets
 """
 from src.indicators.adx import ADX
+from src.indicators.daily_close_stream import DailyCloseStream
 from src.indicators.atr import ATR, ATRPercentile, SmoothedATR
 from src.indicators.bollinger import BollingerBands
 from src.indicators.cmf import CMF
+from src.indicators.dd_circuit_breaker import DDCircuitBreaker
 from src.indicators.donchian import Donchian
 from src.indicators.ema import EMA, ema_step
 from src.indicators.fisher_transform import FisherTransform, FisherResult
@@ -22,6 +24,7 @@ from src.indicators.macd import MACD, MACDResult
 from src.indicators.mfi import MFI
 from src.indicators.obv import OBV
 from src.indicators.parabolic_sar import ParabolicSAR, PSARResult
+from src.indicators.realized_vol import RealizedVol
 from src.indicators.roc import ROC
 from src.indicators.rsi import RSI
 from src.indicators.sma import SMA
@@ -78,6 +81,8 @@ __all__ = [
     "ATRPercentile",
     "BollingerBands",
     "CMF",
+    "DDCircuitBreaker",
+    "DailyCloseStream",
     "Donchian",
     "EMA",
     "FisherResult",
@@ -95,6 +100,7 @@ __all__ = [
     "ParabolicSAR",
     "ProfileBin",
     "ProfileResult",
+    "RealizedVol",
     "ROC",
     "RSI",
     "SMA",
