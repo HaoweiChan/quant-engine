@@ -196,7 +196,11 @@ class PositionEngine:
                         price=None,
                         stop_price=None,
                         reason=reason,
-                        metadata={"pyramid_level": pos.pyramid_level, "urgency": "immediate"},
+                        metadata={
+                            "pyramid_level": pos.pyramid_level,
+                            "urgency": "immediate",
+                            "entry_price": pos.entry_price,
+                        },
                         parent_position_id=pos.position_id,
                         order_class="algo_exit",
                     )
