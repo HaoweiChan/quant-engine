@@ -1,17 +1,28 @@
 """Contract-agnostic position sizing utilities.
 
-Two sizing modes:
+Three layers:
   - compute_risk_lots(): For strategies with meaningful stops (intraday, swing).
     Sizes by stop-distance risk, capped by max_loss and margin.
   - compute_margin_lots(): For buy-and-hold / permanent positions where stops
     are nominal. Sizes by margin deployment fraction of equity.
+  - PortfolioSizer: Live-pipeline sizing layer that sits between strategy signals
+    and order execution. Overrides strategy-level lots using the runner's current
+    equity budget, stop distance from the strategy's EntryDecision, and
+    per-session risk parameters. Strategies decide WHEN and WHERE (direction, stop);
+    PortfolioSizer decides HOW MUCH.
 
-Both are contract-agnostic: MTX naturally gets ~4x more lots than TX for
-the same equity because margin_per_unit is ~4x smaller.
+Both compute_* functions are contract-agnostic: MTX naturally gets ~4x more lots
+than TX for the same equity because margin_per_unit is ~4x smaller.
 """
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass, field
+from typing import Any
+
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 def compute_risk_lots(
@@ -79,3 +90,148 @@ def compute_margin_lots(
 
     lots = math.floor(equity * margin_fraction / margin_per_unit)
     return float(lots) if lots >= min_lot else 0.0
+
+
+@dataclass
+class SizingConfig:
+    """Per-session sizing parameters set at the portfolio/account level.
+
+    Strategies decide WHEN and WHERE; SizingConfig decides HOW MUCH.
+    """
+    risk_per_trade: float = 0.02
+    margin_cap: float = 0.50
+    max_lots: int = 10
+    min_lots: int = 1
+    use_kelly: bool = False
+    kelly_fraction: float = 0.25
+
+
+@dataclass
+class SizingResult:
+    """Output from PortfolioSizer.size()."""
+    lots: float
+    method: str
+    caps_applied: list[str] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+class PortfolioSizer:
+    """Centralised sizing layer for the live pipeline.
+
+    Sits between strategy signal and order execution in LiveStrategyRunner.
+    Intercepts Orders from the PositionEngine and adjusts lots based on the
+    runner's real-time equity, margin, and per-session SizingConfig.
+
+    Usage in LiveStrategyRunner.on_bar_complete():
+        orders = self._engine.on_snapshot(snapshot, account=account)
+        for order in orders:
+            if order.reason == "entry":
+                result = self._sizer.size_entry(...)
+                order.lots = result.lots
+    """
+
+    def __init__(self, config: SizingConfig | None = None) -> None:
+        self._config = config or SizingConfig()
+
+    @property
+    def config(self) -> SizingConfig:
+        return self._config
+
+    def size_entry(
+        self,
+        equity: float,
+        stop_distance: float,
+        point_value: float,
+        margin_per_unit: float,
+    ) -> SizingResult:
+        """Compute lots for an entry order.
+
+        Uses stop-distance risk sizing when stop_distance > 0,
+        falls back to margin-based sizing otherwise.
+        """
+        cfg = self._config
+        caps: list[str] = []
+        raw_lots: list[float] = []
+
+        # Risk-based sizing (primary method when stop exists)
+        if stop_distance > 0 and point_value > 0:
+            risk_per_contract = stop_distance * point_value
+            risk_lots = (equity * cfg.risk_per_trade) / risk_per_contract
+            raw_lots.append(risk_lots)
+            caps.append("risk")
+        else:
+            # Margin-fraction fallback for strategies without meaningful stops
+            if margin_per_unit > 0:
+                margin_lots = (equity * cfg.margin_cap * 0.25) / margin_per_unit
+                raw_lots.append(margin_lots)
+                caps.append("margin_fraction")
+
+        # Margin cap (always applied)
+        if margin_per_unit > 0:
+            max_by_margin = (equity * cfg.margin_cap) / margin_per_unit
+            raw_lots.append(max_by_margin)
+            if len(caps) == 0 or max_by_margin < min(raw_lots[:-1], default=float("inf")):
+                caps.append("margin_cap")
+
+        if not raw_lots:
+            return SizingResult(lots=0, method="none", caps_applied=["no_data"])
+
+        lots = math.floor(min(raw_lots))
+        lots = min(lots, cfg.max_lots)
+        if lots > cfg.max_lots:
+            caps.append("max_lots")
+        lots = max(lots, 0)
+        if lots < cfg.min_lots:
+            lots = 0
+            caps.append("below_min")
+
+        method = "risk" if stop_distance > 0 else "margin_fraction"
+        details = {
+            "equity": equity,
+            "stop_distance": stop_distance,
+            "point_value": point_value,
+            "margin_per_unit": margin_per_unit,
+            "risk_per_trade": cfg.risk_per_trade,
+            "raw_lots": [round(x, 2) for x in raw_lots],
+            "final_lots": lots,
+        }
+        logger.debug(
+            "portfolio_sizer",
+            method=method,
+            lots=lots,
+            equity=equity,
+            stop_dist=round(stop_distance, 1),
+        )
+        return SizingResult(lots=float(lots), method=method, caps_applied=caps, details=details)
+
+    def size_add(
+        self,
+        equity: float,
+        existing_margin_used: float,
+        margin_per_unit: float,
+        requested_lots: float,
+    ) -> SizingResult:
+        """Compute lots for a pyramid add order.
+
+        Caps at available margin headroom while respecting max_lots.
+        """
+        cfg = self._config
+        available = equity * cfg.margin_cap - existing_margin_used
+        caps: list[str] = []
+        if margin_per_unit <= 0 or available <= 0:
+            return SizingResult(lots=0, method="add", caps_applied=["no_margin"])
+        max_add = math.floor(available / margin_per_unit)
+        lots = min(requested_lots, max_add)
+        if lots > requested_lots:
+            caps.append("margin_headroom")
+        lots = min(lots, cfg.max_lots)
+        lots = max(lots, 0)
+        if lots < cfg.min_lots:
+            lots = 0
+            caps.append("below_min")
+        return SizingResult(
+            lots=float(math.floor(lots)),
+            method="add",
+            caps_applied=caps,
+            details={"available_margin": available, "max_add": max_add},
+        )
