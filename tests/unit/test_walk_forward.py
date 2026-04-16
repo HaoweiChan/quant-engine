@@ -116,8 +116,8 @@ class TestQualityGates:
             "is_best_params": {},
             "is_sharpe": 1.2,
             "oos_sharpe": 0.9,
-            "oos_mdd_pct": 15.0,
-            "oos_win_rate": 50.0,
+            "oos_mdd_pct": 0.15,
+            "oos_win_rate": 0.50,
             "oos_n_trades": 50,
             "oos_profit_factor": 1.5,
             "overfit_ratio": 0.75,
@@ -127,7 +127,7 @@ class TestQualityGates:
 
     def test_all_pass(self) -> None:
         folds = [self._make_fold(fold_index=i) for i in range(3)]
-        passed, reasons = evaluate_quality_gates(folds, 0.9, "none")
+        passed, reasons = evaluate_quality_gates(folds, 1.1, "none")
         assert passed is True
         assert reasons == []
 
@@ -174,15 +174,15 @@ class TestBuildWalkForwardResult:
             is_best_params={},
             is_sharpe=is_sharpe,
             oos_sharpe=oos_sharpe,
-            oos_mdd_pct=10.0,
-            oos_win_rate=50.0,
+            oos_mdd_pct=0.10,
+            oos_win_rate=0.50,
             oos_n_trades=50,
             oos_profit_factor=1.5,
             overfit_ratio=ratio,
         )
 
     def test_passing_result(self) -> None:
-        folds = [self._make_fold(i, 1.2, 0.9) for i in range(3)]
+        folds = [self._make_fold(i, 1.5, 1.1) for i in range(3)]
         result = build_walk_forward_result(folds)
         assert result.passed is True
         assert result.overfit_flag == "none"

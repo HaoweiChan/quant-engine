@@ -221,7 +221,7 @@ class TestParametrizedQualityGates:
     def test_swing_strategy_passes_with_relaxed_thresholds(self) -> None:
         from src.simulator.walk_forward import evaluate_quality_gates
 
-        fold = self._make_fold(sharpe=0.8, mdd=18.0, wr=40.0, trades=25, pf=1.3)
+        fold = self._make_fold(sharpe=0.8, mdd=0.18, wr=0.40, trades=25, pf=1.3)
         swing_l2 = get_stage_thresholds(HoldingPeriod.SWING, OptimizationLevel.L2_VALIDATED)
         passed, reasons = evaluate_quality_gates(
             [fold], 0.8, "none", thresholds=swing_l2.to_dict()
@@ -231,7 +231,7 @@ class TestParametrizedQualityGates:
     def test_same_fold_fails_short_term_gates(self) -> None:
         from src.simulator.walk_forward import evaluate_quality_gates
 
-        fold = self._make_fold(sharpe=0.8, mdd=18.0, wr=40.0, trades=25, pf=1.3)
+        fold = self._make_fold(sharpe=0.8, mdd=0.18, wr=0.40, trades=25, pf=1.3)
         short_l2 = get_stage_thresholds(HoldingPeriod.SHORT_TERM, OptimizationLevel.L2_VALIDATED)
         passed, reasons = evaluate_quality_gates(
             [fold], 0.8, "none", thresholds=short_l2.to_dict()
@@ -243,14 +243,14 @@ class TestParametrizedQualityGates:
     def test_none_thresholds_uses_legacy_defaults(self) -> None:
         from src.simulator.walk_forward import evaluate_quality_gates
 
-        fold = self._make_fold(sharpe=1.1, mdd=5.0, wr=50.0, trades=100, pf=1.5)
+        fold = self._make_fold(sharpe=1.1, mdd=0.05, wr=0.50, trades=100, pf=1.5)
         passed, reasons = evaluate_quality_gates([fold], 1.1, "none", thresholds=None)
         assert passed
 
     def test_l1_has_no_mdd_gate(self) -> None:
         from src.simulator.walk_forward import evaluate_quality_gates
 
-        fold = self._make_fold(sharpe=0.5, mdd=50.0, wr=40.0, trades=15, pf=1.1)
+        fold = self._make_fold(sharpe=0.5, mdd=0.50, wr=0.40, trades=15, pf=1.1)
         medium_l1 = get_stage_thresholds(HoldingPeriod.MEDIUM_TERM, OptimizationLevel.L1_EXPLORATORY)
         passed, reasons = evaluate_quality_gates(
             [fold], 0.5, "none", thresholds=medium_l1.to_dict()

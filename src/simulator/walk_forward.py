@@ -226,9 +226,14 @@ def evaluate_quality_gates(
     if overfit_flag == "severe":
         reasons.append("Severe overfit detected (OOS/IS ratio < 0.3)")
 
+    # mdd_max is a percentage (e.g. 20.0 = 20%); oos_mdd_pct from the
+    # backtester is a fraction (e.g. 0.253 = 25.3%).  Normalise to the
+    # same unit before comparing.
+    mdd_max_frac = mdd_max / 100.0 if mdd_max is not None else None
+
     for f in folds:
-        if mdd_max is not None and f.oos_mdd_pct > mdd_max:
-            reasons.append(f"Fold {f.fold_index}: MDD {f.oos_mdd_pct:.1f}% > {mdd_max}%")
+        if mdd_max_frac is not None and f.oos_mdd_pct > mdd_max_frac:
+            reasons.append(f"Fold {f.fold_index}: MDD {f.oos_mdd_pct * 100:.1f}% > {mdd_max}%")
         oos_wr_pct = f.oos_win_rate * 100
         if not (wr_min <= oos_wr_pct <= wr_max):
             reasons.append(f"Fold {f.fold_index}: Win rate {oos_wr_pct:.1f}% outside {wr_min:.0f}-{wr_max:.0f}%")
