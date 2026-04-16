@@ -29,7 +29,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 7,
         "max": 21,
         "description": "Smoothing period for ADX-like regime strength.",
-        "grid": [10, 14, 18],
     },
     "adx_threshold": {
         "type": "float",
@@ -37,7 +36,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 20.0,
         "max": 35.0,
         "description": "Minimum ADX-like score required to permit breakout entries.",
-        "grid": [22.0, 25.0, 30.0],
     },
     "keltner_period": {
         "type": "int",
@@ -45,7 +43,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 10,
         "max": 30,
         "description": "EMA/ATR smoothing period for Keltner envelope.",
-        "grid": [14, 20, 26],
     },
     "keltner_mult": {
         "type": "float",
@@ -53,7 +50,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 1.0,
         "max": 3.0,
         "description": "ATR multiple used to compute Keltner bands.",
-        "grid": [1.2, 1.5, 2.0],
     },
     "vwap_filter": {
         "type": "int",
@@ -82,7 +78,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 0.8,
         "max": 3.0,
         "description": "Initial stop distance in ATR units.",
-        "grid": [1.0, 1.2, 1.6],
     },
     "trail_atr_mult": {
         "type": "float",
@@ -90,7 +85,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 1.0,
         "max": 5.0,
         "description": "Trailing stop distance in ATR units.",
-        "grid": [1.5, 2.0, 3.0],
     },
 }
 

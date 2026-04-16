@@ -108,13 +108,16 @@ class TestGetParamGrid:
     def test_grid_from_schema(self):
         reg = _fresh_registry()
         grid = reg.get_param_grid("atr_mean_reversion")
-        assert grid["kc_len"]["default"] == [60, 90, 120]
-        assert grid["rsi_oversold"]["default"] == [25, 30, 35, 40]
+        assert grid["kc_len"]["default"] == [90]
+        assert grid["kc_len"]["min"] == 10
+        assert grid["kc_len"]["max"] == 300
 
     def test_fallback_to_single_default(self):
         reg = _fresh_registry()
         grid = reg.get_param_grid("atr_mean_reversion")
-        assert grid["rsi_len"]["default"] == [3, 5]
+        assert grid["rsi_len"]["default"] == [3]
+        assert grid["rsi_len"]["min"] == 2
+        assert grid["rsi_len"]["max"] == 14
 
     def test_grid_has_label_and_type(self):
         reg = _fresh_registry()
@@ -159,7 +162,7 @@ class TestSchemaFactoryConsistency:
         import dataclasses
         import inspect
         from src.strategies.registry import get_all
-        skip_params = {"max_loss", "lots", "contract_type", "latest_entry_time"}
+        skip_params = {"max_loss", "lots", "contract_type", "latest_entry_time", "pyramid_risk_level"}
         for slug, info in get_all().items():
             import importlib
             mod = importlib.import_module(info.module)

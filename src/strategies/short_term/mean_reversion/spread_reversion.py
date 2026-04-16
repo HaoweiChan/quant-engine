@@ -41,37 +41,30 @@ PARAM_SCHEMA: dict[str, dict] = {
     "lookback": {
         "type": "int", "default": 60, "min": 20, "max": 200,
         "description": "Rolling window for spread mean/std (1-min bars).",
-        "grid": [30, 60, 100, 150],
     },
     "entry_z": {
         "type": "float", "default": 2.0, "min": 1.0, "max": 4.0,
         "description": "Z-score threshold to enter mean-reversion trade.",
-        "grid": [1.5, 2.0, 2.5],
     },
     "exit_z": {
         "type": "float", "default": 0.3, "min": 0.0, "max": 1.5,
         "description": "Z-score threshold to take profit (near mean).",
-        "grid": [0.0, 0.3, 0.5],
     },
     "stop_extra": {
         "type": "float", "default": 1.5, "min": 0.5, "max": 3.0,
         "description": "Additional z beyond entry_z for stop-loss (stop_z = entry_z + stop_extra).",
-        "grid": [1.0, 1.5, 2.0],
     },
     "max_hold_bars": {
         "type": "int", "default": 180, "min": 30, "max": 600,
         "description": "Max bars to hold before time-exit (3h default).",
-        "grid": [90, 120, 180],
     },
     "min_std": {
         "type": "float", "default": 1.0, "min": 0.1, "max": 5.0,
         "description": "Minimum spread std to consider the spread active.",
-        "grid": [0.5, 1.0, 2.0],
     },
     "lots": {
         "type": "int", "default": 5, "min": 1, "max": 20,
         "description": "Spread pairs per trade (1 lot = 1 R1 + 1 R2 contract).",
-        "grid": [1, 3, 5, 10],
     },
 }
 

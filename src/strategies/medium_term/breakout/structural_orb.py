@@ -33,6 +33,7 @@ from src.core.types import (
     MarketSnapshot,
     Position,
 )
+from src.indicators import ADX, EMA, VWAP, compose_param_schema
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
 from src.strategies._session_utils import in_day_session, in_night_session, in_or_window
 
@@ -44,26 +45,26 @@ def _mean(vals: list[float]) -> float:
     return sum(vals) / len(vals)
 
 
+_INDICATOR_PARAMS = compose_param_schema({
+    "adx_period": (ADX, "period"),
+})
+_INDICATOR_PARAMS["adx_period"]["min"] = 7
+_INDICATOR_PARAMS["adx_period"]["max"] = 21
+_INDICATOR_PARAMS["adx_period"]["description"] = "Smoothing period for ADX-like regime strength."
+
 PARAM_SCHEMA: dict[str, dict] = {
-    "adx_period": {
-        "type": "int", "default": 14, "min": 7, "max": 21,
-        "description": "Smoothing period for ADX-like regime strength.",
-        "grid": [10, 14, 18],
-    },
+    **_INDICATOR_PARAMS,
     "adx_threshold": {
         "type": "float", "default": 25.0, "min": 20.0, "max": 35.0,
         "description": "Minimum ADX score required to permit breakout entries.",
-        "grid": [22.0, 25.0, 30.0],
     },
     "keltner_period": {
         "type": "int", "default": 20, "min": 10, "max": 30,
         "description": "EMA smoothing period for Keltner midline.",
-        "grid": [14, 20, 26],
     },
     "keltner_mult": {
         "type": "float", "default": 1.5, "min": 1.0, "max": 3.0,
         "description": "ATR multiple for Keltner bands.",
-        "grid": [1.2, 1.5, 2.0],
     },
     "vwap_filter": {
         "type": "int", "default": 1, "min": 0, "max": 1,
@@ -80,12 +81,10 @@ PARAM_SCHEMA: dict[str, dict] = {
     "ema_fast": {
         "type": "int", "default": 5, "min": 3, "max": 30,
         "description": "Fast EMA period on 15m bars.",
-        "grid": [3, 5, 8, 13],
     },
     "ema_slow": {
         "type": "int", "default": 13, "min": 5, "max": 50,
         "description": "Slow EMA period on 15m bars (trail stop reference).",
-        "grid": [8, 13, 21, 34],
     },
     "atr_len": {
         "type": "int", "default": 10, "min": 5, "max": 30,
@@ -94,46 +93,26 @@ PARAM_SCHEMA: dict[str, dict] = {
     "atr_sl_mult": {
         "type": "float", "default": 1.2, "min": 0.5, "max": 3.0,
         "description": "ATR multiplier for initial stop loss.",
-        "grid": [0.8, 1.0, 1.2, 1.6, 2.0],
     },
     "atr_t1_mult": {
         "type": "float", "default": 6.0, "min": 1.5, "max": 10.0,
         "description": "ATR multiplier for T1 target (breakeven trigger).",
-        "grid": [4.0, 5.0, 6.0, 7.0, 8.0],
     },
     "trail_atr_mult": {
         "type": "float", "default": 2.0, "min": 1.0, "max": 5.0,
         "description": "Chandelier trailing stop distance in ATR units.",
-        "grid": [1.5, 2.0, 3.0],
     },
     "ema_trail_buffer_pts": {
         "type": "float", "default": 12.0, "min": 0.0, "max": 30.0,
         "description": "Points buffer for EMA trail stop after breakeven.",
-        "grid": [5.0, 8.0, 10.0, 12.0, 15.0],
     },
     "max_hold_bars": {
         "type": "int", "default": 200, "min": 4, "max": 300,
         "description": "Max 15m bars to hold before time-exit (200 bars = ~50h).",
-        "grid": [96, 144, 200, 240, 300],
     },
     "allow_night": {
         "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Allow entries during night session (0=day only, 1=day+night).",
-    },
-    "max_pyramid_levels": {
-        "type": "int", "default": 4, "min": 1, "max": 4,
-        "description": "Max pyramid levels (1=no adds, 4=entry + 3 adds with gamma decay).",
-        "grid": [1, 2, 3, 4],
-    },
-    "pyramid_gamma": {
-        "type": "float", "default": 0.7, "min": 0.3, "max": 1.0,
-        "description": "Anti-martingale decay: Size_k = base_lots * gamma^k.",
-        "grid": [0.5, 0.7, 0.85],
-    },
-    "pyramid_trigger_atr": {
-        "type": "float", "default": 1.5, "min": 0.5, "max": 5.0,
-        "description": "ATR multiple for first add trigger. Level N triggers at N * this value.",
-        "grid": [1.0, 1.5, 2.0, 3.0],
     },
 }
 
@@ -165,7 +144,7 @@ _ATR_SCALE = 1.6
 # ---------------------------------------------------------------------------
 
 class _Indicators:
-    """Rolling indicators: Keltner (EMA + ATR), ADX, EMA fast/slow, VWAP."""
+    """Thin wrapper: centralized EMA/VWAP + custom KC-ADX coupled bands & ATR."""
 
     def __init__(
         self,
@@ -176,79 +155,61 @@ class _Indicators:
         ema_slow: int,
         atr_len: int,
     ) -> None:
-        self._kc_period = keltner_period
         self._kc_mult = keltner_mult
-        self._adx_period = adx_period
-        self._n_fast = ema_fast
-        self._n_slow = ema_slow
         self._atr_len = atr_len
-
+        self._ema_fast_ind = EMA(period=ema_fast)
+        self._ema_slow_ind = EMA(period=ema_slow)
+        self._vwap_ind = VWAP()
+        self._closes: deque[float] = deque(maxlen=atr_len + 2)
+        self._last_ts: datetime | None = None
+        self.ema_fast: float | None = None
+        self.ema_slow: float | None = None
+        self.atr: float | None = None
+        self.atr_avg: float | None = None
+        self._atr_history: deque[float] = deque(maxlen=50)
+        self.vwap: float | None = None
+        # Custom KC + ADX (coupled via shared alpha/true-range)
         self._kc_alpha = 2.0 / (keltner_period + 1)
         self._dm_alpha = 1.0 / max(adx_period, 1)
-
-        max_buf = max(keltner_period, ema_fast + 2, ema_slow + 2, atr_len + 2)
-        self._closes: deque[float] = deque(maxlen=max_buf + 1)
-        self._last_ts: datetime | None = None
-
-        # Keltner
         self._kc_ema: float | None = None
         self._kc_atr: float | None = None
         self.kc_mid: float | None = None
         self.kc_upper: float | None = None
         self.kc_lower: float | None = None
-
-        # ADX
         self._last_price: float | None = None
         self._plus_dm: float = 0.0
         self._minus_dm: float = 0.0
         self.adx: float = 0.0
-
-        # EMA fast/slow
-        self._ema_fast_v: float | None = None
-        self._ema_slow_v: float | None = None
-        self.ema_fast: float | None = None
-        self.ema_slow: float | None = None
-
-        # ATR (SMA-based for stop sizing)
-        self.atr: float | None = None
-        self.atr_avg: float | None = None
-        self._atr_history: deque[float] = deque(maxlen=50)
-
-        # VWAP
-        self.vwap: float | None = None
-        self._vwap_date = None
-        self._cum_pv = 0.0
-        self._cum_vol = 0.0
 
     def update(self, price: float, ts: datetime, volume: float = 0.0) -> None:
         if ts == self._last_ts:
             return
         self._last_ts = ts
         self._closes.append(price)
-        self._update_vwap(ts, price, volume)
+        self._vwap_ind.update(price, max(volume, 0.0), ts)
+        self.vwap = self._vwap_ind.value
         self._update_keltner_adx(price)
-        self._compute_ema_atr(price)
-
-    def _update_vwap(self, ts: datetime, price: float, volume: float) -> None:
-        d = ts.date()
-        if d != self._vwap_date:
-            self._vwap_date = d
-            self._cum_pv = 0.0
-            self._cum_vol = 0.0
-        self._cum_pv += price * max(volume, 0.0)
-        self._cum_vol += max(volume, 0.0)
-        self.vwap = self._cum_pv / self._cum_vol if self._cum_vol > 0 else None
+        self._ema_fast_ind.update(price)
+        self.ema_fast = self._ema_fast_ind.value
+        self._ema_slow_ind.update(price)
+        self.ema_slow = self._ema_slow_ind.value
+        # Custom ATR (SMA of |delta-close| × scale)
+        closes = list(self._closes)
+        n = len(closes)
+        if n >= self._atr_len + 1:
+            diffs = [abs(closes[i] - closes[i - 1]) for i in range(n - self._atr_len, n)]
+            self.atr = _mean(diffs) * _ATR_SCALE
+            self._atr_history.append(self.atr)
+            if len(self._atr_history) >= 10:
+                self.atr_avg = _mean(list(self._atr_history))
 
     def _update_keltner_adx(self, price: float) -> None:
-        # Keltner EMA midline
         if self._kc_ema is None:
             self._kc_ema = price
             self._kc_atr = 0.0
         else:
             self._kc_ema = self._kc_ema + self._kc_alpha * (price - self._kc_ema)
         self.kc_mid = self._kc_ema
-
-        # ADX + KC ATR (shared true range)
         if self._last_price is None:
             self._last_price = price
             return
@@ -256,60 +217,25 @@ class _Indicators:
         tr = abs(delta)
         up_move = max(delta, 0.0)
         down_move = max(-delta, 0.0)
-
         self._kc_atr = (self._kc_atr or tr) + self._dm_alpha * (tr - (self._kc_atr or tr))
-        self._plus_dm = self._plus_dm + self._dm_alpha * (up_move - self._plus_dm)
-        self._minus_dm = self._minus_dm + self._dm_alpha * (down_move - self._minus_dm)
-
+        self._plus_dm += self._dm_alpha * (up_move - self._plus_dm)
+        self._minus_dm += self._dm_alpha * (down_move - self._minus_dm)
         atr_val = max(self._kc_atr or 0.0, 1e-6)
         if self.kc_mid is not None:
             width = self._kc_mult * atr_val
             self.kc_upper = self.kc_mid + width
             self.kc_lower = self.kc_mid - width
-
         plus_di = 100.0 * (self._plus_dm / atr_val)
         minus_di = 100.0 * (self._minus_dm / atr_val)
         dx = 100.0 * abs(plus_di - minus_di) / max(plus_di + minus_di, 1e-6)
         self.adx = self.adx + self._dm_alpha * (dx - self.adx)
         self._last_price = price
 
-    @staticmethod
-    def _ema_step(prev: float | None, price: float, n: int,
-                  seed_closes: list[float]) -> float:
-        if prev is None:
-            if len(seed_closes) >= n:
-                return _mean(seed_closes[-n:])
-            return price
-        k = 2.0 / (n + 1)
-        return price * k + prev * (1.0 - k)
-
-    def _compute_ema_atr(self, price: float) -> None:
-        closes = list(self._closes)
-        n = len(closes)
-
-        self._ema_fast_v = self._ema_step(self._ema_fast_v, price, self._n_fast, closes)
-        self._ema_slow_v = self._ema_step(self._ema_slow_v, price, self._n_slow, closes)
-        if n >= self._n_fast:
-            self.ema_fast = self._ema_fast_v
-        if n >= self._n_slow:
-            self.ema_slow = self._ema_slow_v
-
-        if n >= self._atr_len + 1:
-            diffs = [abs(closes[i] - closes[i - 1])
-                     for i in range(n - self._atr_len, n)]
-            self.atr = _mean(diffs) * _ATR_SCALE
-            self._atr_history.append(self.atr)
-            if len(self._atr_history) >= 10:
-                self.atr_avg = _mean(list(self._atr_history))
-
     def snapshot(self) -> dict[str, float | None]:
         return {
-            "kc_upper": self.kc_upper,
-            "kc_mid": self.kc_mid,
-            "kc_lower": self.kc_lower,
-            "ema_fast": self.ema_fast,
-            "ema_slow": self.ema_slow,
-            "vwap": self.vwap,
+            "kc_upper": self.kc_upper, "kc_mid": self.kc_mid,
+            "kc_lower": self.kc_lower, "ema_fast": self.ema_fast,
+            "ema_slow": self.ema_slow, "vwap": self.vwap,
             "adx": self.adx if self.adx else None,
         }
 
@@ -635,12 +561,12 @@ def create_structural_orb_engine(
     ema_trail_buffer_pts: float = 12.0,
     max_hold_bars: int = 200,
     allow_night: int = 0,
-    max_pyramid_levels: int = 4,
-    pyramid_gamma: float = 0.7,
-    pyramid_trigger_atr: float = 1.5,
+    pyramid_risk_level: int = 0,
 ) -> "PositionEngine":
     """Build a PositionEngine wired with the medium-term Structural ORB strategy."""
+    from src.core.policies import PyramidAddPolicy
     from src.core.position_engine import PositionEngine
+    from src.core.types import pyramid_config_from_risk_level
 
     entry = StructuralORBEntryPolicy(
         lots=lots,
@@ -667,28 +593,13 @@ def create_structural_orb_engine(
         ema_trail_buffer_pts=ema_trail_buffer_pts,
         max_hold_bars=max_hold_bars,
     )
-    if max_pyramid_levels > 1:
-        from src.core.policies import PyramidAddPolicy
-        from src.core.types import PyramidConfig
-
-        triggers = [pyramid_trigger_atr * (i + 1) for i in range(max_pyramid_levels - 1)]
-        pyramid_config = PyramidConfig(
-            max_loss=max_loss,
-            max_levels=max_pyramid_levels,
-            add_trigger_atr=triggers,
-            atr_key="entry_tf",
-            gamma=pyramid_gamma,
-            base_lots=lots,
-            internal_atr_len=10,
-        )
-        add_policy = PyramidAddPolicy(pyramid_config)
-    else:
-        add_policy = NoAddPolicy()
+    pcfg = pyramid_config_from_risk_level(pyramid_risk_level, max_loss, lots)
+    add_policy = PyramidAddPolicy(pcfg) if pcfg is not None else NoAddPolicy()
     engine = PositionEngine(
         entry_policy=entry,
         add_policy=add_policy,
         stop_policy=stop,
-        config=EngineConfig(max_loss=max_loss),
+        config=EngineConfig(max_loss=max_loss, pyramid_risk_level=pyramid_risk_level),
     )
     engine.indicator_provider = entry.ind  # type: ignore[attr-defined]
     return engine

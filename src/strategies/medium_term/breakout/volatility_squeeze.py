@@ -34,7 +34,7 @@ VWAP alignment filters out squeeze releases that fight institutional order flow.
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, time
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from src.core.policies import EntryPolicy, NoAddPolicy, StopPolicy
@@ -47,6 +47,7 @@ from src.core.types import (
     MarketSnapshot,
     Position,
 )
+from src.indicators import ADX, compose_param_schema
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
 from src.strategies._session_utils import in_day_session, in_night_session
 
@@ -64,66 +65,58 @@ def _stdev(vals: list[float], avg: float) -> float:
     return (sum((v - avg) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5
 
 
+_INDICATOR_PARAMS = compose_param_schema({
+    "adx_len": (ADX, "period"),
+})
+_INDICATOR_PARAMS["adx_len"]["min"] = 5
+_INDICATOR_PARAMS["adx_len"]["max"] = 30
+_INDICATOR_PARAMS["adx_len"]["description"] = "ADX period on signal TF for regime filter."
+
 PARAM_SCHEMA: dict[str, dict] = {
-    "adx_len": {
-        "type": "int", "default": 14, "min": 5, "max": 30,
-        "description": "ADX period on signal TF for regime filter.",
-        "grid": [10, 14, 20],
-    },
+    **_INDICATOR_PARAMS,
     "adx_min": {
         "type": "float", "default": 20.0, "min": 0.0, "max": 50.0,
         "description": "Minimum ADX to allow entries (0=disabled). Filters choppy regimes.",
-        "grid": [0, 15, 20, 25],
     },
     "atr_pct_len": {
         "type": "int", "default": 100, "min": 20, "max": 200,
         "description": "Lookback (signal TF bars) for ATR percentile regime filter.",
-        "grid": [50, 100],
     },
     "atr_pct_min": {
         "type": "float", "default": 25.0, "min": 0.0, "max": 100.0,
         "description": "Min ATR percentile for entry (0=disabled). Filters dead-vol regimes.",
-        "grid": [0, 20, 30, 40],
     },
     "atr_pct_max": {
         "type": "float", "default": 85.0, "min": 0.0, "max": 100.0,
         "description": "Max ATR percentile for entry (100=disabled). Filters chaotic regimes.",
-        "grid": [70, 80, 90, 100],
     },
     "bar_agg_trend": {
         "type": "int", "default": 4, "min": 1, "max": 16,
         "description": "Aggregate N incoming 15m bars for squeeze detection (4 = 1h).",
-        "grid": [2, 4, 8],
     },
     "bb_len": {
         "type": "int", "default": 20, "min": 10, "max": 40,
         "description": "Bollinger Band period on signal TF (1h) bars.",
-        "grid": [14, 20, 26],
     },
     "bb_std": {
         "type": "float", "default": 1.8, "min": 1.0, "max": 3.0,
         "description": "Bollinger Band standard deviation multiplier.",
-        "grid": [1.5, 1.8, 2.0, 2.5],
     },
     "kc_len": {
         "type": "int", "default": 20, "min": 10, "max": 40,
         "description": "Keltner Channel EMA period on signal TF (1h) bars.",
-        "grid": [14, 20, 26],
     },
     "kc_mult": {
         "type": "float", "default": 1.5, "min": 0.5, "max": 3.0,
         "description": "Keltner Channel ATR multiplier.",
-        "grid": [1.0, 1.5, 2.0],
     },
     "vol_len": {
         "type": "int", "default": 20, "min": 5, "max": 60,
         "description": "Rolling window for volume average (on signal TF).",
-        "grid": [10, 20],
     },
     "vol_mult": {
         "type": "float", "default": 1.2, "min": 0.5, "max": 3.0,
         "description": "Min volume spike vs rolling average for entry confirmation.",
-        "grid": [1.0, 1.2, 1.5, 2.0],
     },
     "atr_len": {
         "type": "int", "default": 14, "min": 5, "max": 30,
@@ -132,27 +125,22 @@ PARAM_SCHEMA: dict[str, dict] = {
     "atr_sl_mult": {
         "type": "float", "default": 2.0, "min": 0.5, "max": 4.0,
         "description": "ATR multiplier for initial stop loss.",
-        "grid": [1.5, 2.0, 2.5, 3.0],
     },
     "chandelier_atr_mult": {
         "type": "float", "default": 2.5, "min": 1.0, "max": 5.0,
         "description": "Chandelier trailing stop: peak - N * ATR. No fixed TP.",
-        "grid": [2.0, 2.5, 3.0, 3.5],
     },
     "min_squeeze_bars": {
         "type": "int", "default": 2, "min": 1, "max": 10,
         "description": "Minimum consecutive 1h bars in squeeze before entry allowed.",
-        "grid": [1, 2, 3, 5],
     },
     "release_window": {
         "type": "int", "default": 1, "min": 1, "max": 16,
         "description": "Entry TF bars after squeeze release during which entries are allowed.",
-        "grid": [1, 2, 4, 8],
     },
     "max_hold_bars": {
         "type": "int", "default": 200, "min": 20, "max": 400,
         "description": "Max 15m bars to hold before time-exit (200 bars = ~50h).",
-        "grid": [96, 144, 200, 300],
     },
     "allow_night": {
         "type": "int", "default": 1, "min": 0, "max": 1,
@@ -161,37 +149,18 @@ PARAM_SCHEMA: dict[str, dict] = {
     "vwap_filter": {
         "type": "int", "default": 1, "min": 0, "max": 1,
         "description": "Require VWAP alignment: long only above VWAP, short only below (0=off, 1=on).",
-        "grid": [0, 1],
     },
     "momentum_len": {
         "type": "int", "default": 12, "min": 5, "max": 30,
         "description": "Lookback for momentum histogram (close - SMA) on signal TF.",
-        "grid": [8, 12, 20],
     },
     "momentum_filter": {
         "type": "int", "default": 1, "min": 0, "max": 1,
         "description": "Require momentum confirmation: long if mom>0, short if mom<0 (0=off, 1=on).",
-        "grid": [0, 1],
     },
     "trend_ema_len": {
         "type": "int", "default": 50, "min": 0, "max": 200,
         "description": "Trend-context EMA on signal TF. Long only above EMA, short only below. 0=disabled.",
-        "grid": [0, 20, 50, 100],
-    },
-    "max_pyramid_levels": {
-        "type": "int", "default": 4, "min": 1, "max": 4,
-        "description": "Max pyramid levels (1=no adds).",
-        "grid": [1, 2, 3, 4],
-    },
-    "pyramid_gamma": {
-        "type": "float", "default": 0.7, "min": 0.3, "max": 1.0,
-        "description": "Anti-martingale decay: Size_k = base_lots * gamma^k.",
-        "grid": [0.5, 0.7, 0.85],
-    },
-    "pyramid_trigger_atr": {
-        "type": "float", "default": 1.5, "min": 0.5, "max": 5.0,
-        "description": "ATR multiple for first add trigger.",
-        "grid": [1.0, 1.5, 2.0, 3.0],
     },
 }
 
@@ -286,14 +255,8 @@ class _Indicators:
         self._trend_ema_raw: float | None = None
         self.trend_ema: float | None = None
 
-        # ADX on signal TF — EMA-smoothed (same as atr_mean_reversion)
-        self._adx_len = adx_len
-        self._adx_alpha = 2.0 / (adx_len + 1)
-        self._adx_prev_price: float | None = None
-        self._atr_dm_ema: float | None = None
-        self._plus_dm_ema: float | None = None
-        self._minus_dm_ema: float | None = None
-        self._adx_ema: float | None = None
+        # ADX on signal TF (centralized)
+        self._adx_ind = ADX(period=adx_len)
         self.adx: float | None = None
 
         # ATR percentile regime filter on signal TF
@@ -367,35 +330,9 @@ class _Indicators:
                 self.atr_avg = _mean(list(self._atr_history))
 
     def _update_adx(self, price: float) -> None:
-        """EMA-smoothed ADX on signal TF — filters choppy regimes."""
-        if self._adx_prev_price is None:
-            self._adx_prev_price = price
-            return
-        tr = abs(price - self._adx_prev_price)
-        delta = price - self._adx_prev_price
-        pdm = max(delta, 0.0)
-        mdm = max(-delta, 0.0)
-        a = self._adx_alpha
-        if self._atr_dm_ema is None:
-            self._atr_dm_ema = tr
-            self._plus_dm_ema = pdm
-            self._minus_dm_ema = mdm
-        else:
-            self._atr_dm_ema = a * tr + (1 - a) * self._atr_dm_ema
-            self._plus_dm_ema = a * pdm + (1 - a) * self._plus_dm_ema
-            self._minus_dm_ema = a * mdm + (1 - a) * self._minus_dm_ema
-        if self._atr_dm_ema and self._atr_dm_ema > 1e-9:
-            pdi = 100.0 * (self._plus_dm_ema / self._atr_dm_ema)
-            mdi = 100.0 * (self._minus_dm_ema / self._atr_dm_ema)
-            denom = pdi + mdi
-            if denom > 1e-9:
-                dx = 100.0 * abs(pdi - mdi) / denom
-                if self._adx_ema is None:
-                    self._adx_ema = dx
-                else:
-                    self._adx_ema = a * dx + (1 - a) * self._adx_ema
-                self.adx = self._adx_ema
-        self._adx_prev_price = price
+        """ADX on signal TF via centralized indicator."""
+        self._adx_ind.update(price)
+        self.adx = self._adx_ind.value
 
     def _update_atr_percentile(self) -> None:
         """ATR percentile on signal TF — filters dead-vol and chaotic regimes."""
@@ -745,9 +682,6 @@ def create_volatility_squeeze_engine(
     release_window: int = 1,
     max_hold_bars: int = 200,
     allow_night: int = 1,
-    max_pyramid_levels: int = 4,
-    pyramid_gamma: float = 0.7,
-    pyramid_trigger_atr: float = 1.5,
     adx_len: int = 14,
     adx_min: float = 20.0,
     atr_pct_len: int = 100,
@@ -757,9 +691,12 @@ def create_volatility_squeeze_engine(
     momentum_len: int = 12,
     momentum_filter: int = 1,
     trend_ema_len: int = 0,
+    pyramid_risk_level: int = 0,
 ) -> "PositionEngine":
     """Build a PositionEngine wired with the Volatility Squeeze strategy."""
+    from src.core.policies import PyramidAddPolicy
     from src.core.position_engine import PositionEngine
+    from src.core.types import pyramid_config_from_risk_level
 
     entry = VolatilitySqueezeEntry(
         lots=lots,
@@ -785,28 +722,13 @@ def create_volatility_squeeze_engine(
         chandelier_atr_mult=chandelier_atr_mult,
         max_hold_bars=max_hold_bars,
     )
-    if max_pyramid_levels > 1:
-        from src.core.policies import PyramidAddPolicy
-        from src.core.types import PyramidConfig
-
-        triggers = [pyramid_trigger_atr * (i + 1) for i in range(max_pyramid_levels - 1)]
-        pyramid_config = PyramidConfig(
-            max_loss=max_loss,
-            max_levels=max_pyramid_levels,
-            add_trigger_atr=triggers,
-            atr_key="entry_tf",
-            gamma=pyramid_gamma,
-            base_lots=lots,
-            internal_atr_len=14,
-        )
-        add_policy = PyramidAddPolicy(pyramid_config)
-    else:
-        add_policy = NoAddPolicy()
+    pcfg = pyramid_config_from_risk_level(pyramid_risk_level, max_loss, lots)
+    add_policy = PyramidAddPolicy(pcfg) if pcfg is not None else NoAddPolicy()
     engine = PositionEngine(
         entry_policy=entry,
         add_policy=add_policy,
         stop_policy=stop,
-        config=EngineConfig(max_loss=max_loss),
+        config=EngineConfig(max_loss=max_loss, pyramid_risk_level=pyramid_risk_level),
     )
     engine.indicator_provider = entry.ind  # type: ignore[attr-defined]
     return engine

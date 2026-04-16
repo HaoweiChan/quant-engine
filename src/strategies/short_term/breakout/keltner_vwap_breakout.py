@@ -12,10 +12,10 @@ Based on Seed Strategy Architecture for ML Agents:
 from __future__ import annotations
 
 from collections import deque
-from statistics import mean
-from typing import TYPE_CHECKING
 from datetime import datetime, time
+from typing import TYPE_CHECKING
 
+from src.core.policies import EntryPolicy, NoAddPolicy, StopPolicy
 from src.core.types import (
     AccountState,
     EngineConfig,
@@ -25,13 +25,26 @@ from src.core.types import (
     MarketSnapshot,
     Position,
 )
-from src.core.policies import EntryPolicy, NoAddPolicy, StopPolicy
+from src.indicators import ADX, EMA, RSI, VWAP, compose_param_schema
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
 from src.strategies._session_utils import in_day_session, in_force_close, in_night_session
 
 if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
 
+
+_INDICATOR_PARAMS = compose_param_schema({
+    "adx_period": (ADX, "period"),
+    "rsi_len": (RSI, "period"),
+})
+_INDICATOR_PARAMS["adx_period"]["default"] = 14
+_INDICATOR_PARAMS["adx_period"]["min"] = 7
+_INDICATOR_PARAMS["adx_period"]["max"] = 30
+_INDICATOR_PARAMS["adx_period"]["description"] = "ADX smoothing period."
+_INDICATOR_PARAMS["rsi_len"]["default"] = 3
+_INDICATOR_PARAMS["rsi_len"]["min"] = 2
+_INDICATOR_PARAMS["rsi_len"]["max"] = 30
+_INDICATOR_PARAMS["rsi_len"]["description"] = "RSI lookback period."
 
 PARAM_SCHEMA: dict[str, dict] = {
     "kc_len": {
@@ -40,7 +53,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 20,
         "max": 300,
         "description": "EMA lookback for Keltner midline (1-min bars).",
-        "grid": [60, 90, 120],
     },
     "kc_mult": {
         "type": "float",
@@ -48,31 +60,14 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 0.02,
         "max": 0.5,
         "description": "KC width as fraction of daily ATR.",
-        "grid": [0.15, 0.20, 0.25, 0.30, 0.35],
     },
-    "adx_period": {
-        "type": "int",
-        "default": 14,
-        "min": 7,
-        "max": 30,
-        "description": "ADX smoothing period.",
-        "grid": [10, 14, 20],
-    },
+    **_INDICATOR_PARAMS,
     "adx_threshold": {
         "type": "float",
         "default": 45.0,
         "min": 10.0,
         "max": 50.0,
         "description": "ADX above this = trending (breakout), below = choppy (reversion).",
-        "grid": [25, 30, 35, 40, 45],
-    },
-    "rsi_len": {
-        "type": "int",
-        "default": 3,
-        "min": 2,
-        "max": 30,
-        "description": "RSI lookback period.",
-        "grid": [3, 5, 8],
     },
     "rsi_oversold": {
         "type": "float",
@@ -80,7 +75,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 10.0,
         "max": 45.0,
         "description": "RSI threshold for oversold (mean-reversion long).",
-        "grid": [20, 25, 30],
     },
     "rsi_overbought": {
         "type": "float",
@@ -88,7 +82,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 55.0,
         "max": 90.0,
         "description": "RSI threshold for overbought (mean-reversion short).",
-        "grid": [70, 75, 80],
     },
     "vwap_filter": {
         "type": "int",
@@ -103,7 +96,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 0.1,
         "max": 2.0,
         "description": "Stop loss as fraction of daily ATR.",
-        "grid": [0.4, 0.5, 0.6, 0.8, 1.0],
     },
     "atr_tp_multi": {
         "type": "float",
@@ -111,7 +103,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 0.1,
         "max": 3.0,
         "description": "Take profit as fraction of daily ATR.",
-        "grid": [1.0, 1.2, 1.5, 2.0, 2.5],
     },
     "trend_ma_len": {
         "type": "int",
@@ -119,7 +110,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 50,
         "max": 500,
         "description": "Trend EMA lookback for extreme-trend filter.",
-        "grid": [100, 200, 300],
     },
     "trend_filter_atr": {
         "type": "float",
@@ -127,7 +117,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 0.5,
         "max": 5.0,
         "description": "Block entries when |price - trend_ema| > N * daily_atr.",
-        "grid": [2.0, 2.5, 3.0, 3.5],
     },
     "vol_len": {
         "type": "int",
@@ -135,7 +124,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 5,
         "max": 100,
         "description": "Rolling window for average volume.",
-        "grid": [10, 20, 50],
     },
     "vol_mult": {
         "type": "float",
@@ -143,7 +131,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 0.5,
         "max": 5.0,
         "description": "Min volume spike vs rolling average for entry.",
-        "grid": [0.8, 1.0, 1.2, 1.5],
     },
     "time_gate": {
         "type": "int",
@@ -158,7 +145,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 10,
         "max": 480,
         "description": "Max bars to hold before time-exit.",
-        "grid": [120, 180, 240, 300, 360],
     },
 }
 
@@ -186,8 +172,12 @@ def _in_low_edge_window(t: time) -> bool:
     return False
 
 
+def _mean(vals: list[float]) -> float:
+    return sum(vals) / len(vals)
+
+
 class _Indicators:
-    """Shared rolling indicators: Keltner, RSI, ADX, VWAP, volume."""
+    """Thin wrapper: centralized ADX/RSI/EMA/VWAP + custom KC bands & volume ratio."""
 
     def __init__(
         self,
@@ -198,32 +188,15 @@ class _Indicators:
         trend_ma_len: int,
         vol_len: int = 20,
     ) -> None:
-        self._kc_len = kc_len
         self._kc_mult = kc_mult
-        self._rsi_len = rsi_len
-        self._adx_period = adx_period
-        self._trend_ma_len = trend_ma_len
-        self._vol_len = vol_len
-        self._ema_alpha = 2.0 / (kc_len + 1)
-        self._trend_alpha = 2.0 / (trend_ma_len + 1)
-        self._adx_alpha = 2.0 / (adx_period + 1)
-        max_buf = max(rsi_len + 1, kc_len, trend_ma_len)
-        self._closes: deque[float] = deque(maxlen=max_buf + 1)
+        self._kc_ema_ind = EMA(period=kc_len)
+        self._trend_ema_ind = EMA(period=trend_ma_len)
+        self._adx_ind = ADX(period=adx_period)
+        self._rsi_ind = RSI(period=rsi_len)
+        self._vwap_ind = VWAP()
         self._volumes: deque[float] = deque(maxlen=max(vol_len, 1) + 1)
+        self._vol_len = vol_len
         self._last_ts: datetime | None = None
-        self._ema: float | None = None
-        self._trend_ema: float | None = None
-        self._bar_count: int = 0
-        self._prev_price: float | None = None
-        self._plus_dm_ema: float | None = None
-        self._minus_dm_ema: float | None = None
-        self._atr_ema: float | None = None
-        self._adx_ema: float | None = None
-        # VWAP per calendar day
-        self._vwap_date = None
-        self._cum_pv = 0.0
-        self._cum_vol = 0.0
-        # Public values
         self.kc_mid: float | None = None
         self.kc_upper: float | None = None
         self.kc_lower: float | None = None
@@ -240,90 +213,27 @@ class _Indicators:
         if timestamp == self._last_ts:
             return
         self._last_ts = timestamp
-        self._closes.append(price)
-        self._volumes.append(volume)
         self.daily_atr = daily_atr
-        self._bar_count += 1
-        self._update_vwap(timestamp, price, volume)
-        self._update_adx(price)
-        self._compute(price)
-
-    def _update_vwap(self, ts: datetime, price: float, volume: float) -> None:
-        d = ts.date()
-        if d != self._vwap_date:
-            self._vwap_date = d
-            self._cum_pv = 0.0
-            self._cum_vol = 0.0
-        self._cum_pv += price * max(volume, 0.0)
-        self._cum_vol += max(volume, 0.0)
-        self.vwap = self._cum_pv / self._cum_vol if self._cum_vol > 0 else None
-
-    def _update_adx(self, price: float) -> None:
-        if self._prev_price is None:
-            self._prev_price = price
-            return
-        tr = abs(price - self._prev_price)
-        delta = price - self._prev_price
-        pdm = max(delta, 0.0)
-        mdm = max(-delta, 0.0)
-        a = self._adx_alpha
-        if self._atr_ema is None:
-            self._atr_ema = tr
-            self._plus_dm_ema = pdm
-            self._minus_dm_ema = mdm
-        else:
-            self._atr_ema = a * tr + (1 - a) * self._atr_ema
-            self._plus_dm_ema = a * pdm + (1 - a) * self._plus_dm_ema
-            self._minus_dm_ema = a * mdm + (1 - a) * self._minus_dm_ema
-        if self._atr_ema and self._atr_ema > 1e-9:
-            pdi = 100.0 * (self._plus_dm_ema / self._atr_ema)
-            mdi = 100.0 * (self._minus_dm_ema / self._atr_ema)
-            denom = pdi + mdi
-            if denom > 1e-9:
-                dx = 100.0 * abs(pdi - mdi) / denom
-                if self._adx_ema is None:
-                    self._adx_ema = dx
-                else:
-                    self._adx_ema = a * dx + (1 - a) * self._adx_ema
-                self.adx = self._adx_ema
-        self._prev_price = price
-
-    def _compute(self, price: float) -> None:
-        closes = list(self._closes)
-        n = len(closes)
-        if self._ema is None:
-            if n >= self._kc_len:
-                self._ema = mean(closes[-self._kc_len:])
-            else:
-                return
-        else:
-            self._ema = self._ema_alpha * price + (1 - self._ema_alpha) * self._ema
-        self.kc_mid = self._ema
-        if self.daily_atr > 0:
-            width = self._kc_mult * self.daily_atr
-            self.kc_upper = self._ema + width
-            self.kc_lower = self._ema - width
-        if self._trend_ema is None:
-            if n >= self._trend_ma_len:
-                self._trend_ema = mean(closes[-self._trend_ma_len:])
-        else:
-            self._trend_ema = self._trend_alpha * price + (1 - self._trend_alpha) * self._trend_ema
-        self.trend_ema = self._trend_ema
-        if n >= self._rsi_len + 1:
-            changes = [closes[i] - closes[i - 1] for i in range(n - self._rsi_len, n)]
-            gains = [c for c in changes if c > 0]
-            losses = [-c for c in changes if c < 0]
-            avg_gain = mean(gains) if gains else 0.0
-            avg_loss = mean(losses) if losses else 0.0
-            if avg_loss == 0:
-                self.rsi = 100.0
-            else:
-                rs = avg_gain / avg_loss
-                self.rsi = 100.0 - (100.0 / (1.0 + rs))
+        self._vwap_ind.update(price, max(volume, 0.0), timestamp)
+        self.vwap = self._vwap_ind.value
+        self._adx_ind.update(price)
+        self.adx = self._adx_ind.value or 0.0
+        self._rsi_ind.update(price)
+        self.rsi = self._rsi_ind.value
+        self._kc_ema_ind.update(price)
+        self.kc_mid = self._kc_ema_ind.value
+        if self.kc_mid is not None and daily_atr > 0:
+            width = self._kc_mult * daily_atr
+            self.kc_upper = self.kc_mid + width
+            self.kc_lower = self.kc_mid - width
+        self._trend_ema_ind.update(price)
+        self.trend_ema = self._trend_ema_ind.value
+        # Volume ratio
+        self._volumes.append(volume)
         vols = list(self._volumes)
         nv = len(vols)
         if nv >= self._vol_len and self._vol_len > 0:
-            avg_vol = mean(vols[-self._vol_len:])
+            avg_vol = _mean(vols[-self._vol_len:])
             self.vol_ratio = vols[-1] / avg_vol if avg_vol > 0 else 0.0
         elif nv > 0 and vols[-1] > 0:
             self.vol_ratio = 1.0
@@ -331,19 +241,14 @@ class _Indicators:
             self.vol_ratio = None
 
     def snapshot(self) -> dict[str, float | None]:
-        """Return current indicator values for chart visualization (IndicatorProvider)."""
         return {
-            "kc_upper": self.kc_upper,
-            "kc_mid": self.kc_mid,
-            "kc_lower": self.kc_lower,
-            "vwap": self.vwap,
-            "trend_ema": self.trend_ema,
-            "rsi": self.rsi,
+            "kc_upper": self.kc_upper, "kc_mid": self.kc_mid,
+            "kc_lower": self.kc_lower, "vwap": self.vwap,
+            "trend_ema": self.trend_ema, "rsi": self.rsi,
             "adx": self.adx if self.adx else None,
         }
 
     def indicator_meta(self) -> dict[str, dict]:
-        """Return rendering metadata for each indicator (IndicatorProvider)."""
         return {
             "kc_upper":  {"panel": "price", "color": "#FF6B6B", "label": "KC Upper"},
             "kc_mid":    {"panel": "price", "color": "#4ECDC4", "label": "KC Mid"},

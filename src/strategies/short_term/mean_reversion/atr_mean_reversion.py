@@ -40,6 +40,7 @@ from src.core.types import (
     MarketSnapshot,
     Position,
 )
+from src.indicators import ADX, EMA, RSI, VWAP, compose_param_schema
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
 from src.strategies._session_utils import in_day_session, in_force_close, in_night_session
 
@@ -47,91 +48,77 @@ if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
 
 
+_INDICATOR_PARAMS = compose_param_schema({
+    "rsi_len": (RSI, "period"),
+    "adx_len": (ADX, "period"),
+})
+_INDICATOR_PARAMS["rsi_len"]["default"] = 3
+_INDICATOR_PARAMS["rsi_len"]["max"] = 14
+_INDICATOR_PARAMS["adx_len"]["min"] = 7
+_INDICATOR_PARAMS["adx_len"]["max"] = 21
+
 PARAM_SCHEMA: dict[str, dict] = {
     "kc_len": {
         "type": "int", "default": 90, "min": 10, "max": 300,
         "description": "Keltner Channel EMA lookback (1-min bars).",
-        "grid": [60, 90, 120],
     },
     "kc_mult": {
         "type": "float", "default": 0.35, "min": 0.05, "max": 0.5,
         "description": "KC width as fraction of daily ATR.",
-        "grid": [0.20, 0.25, 0.30, 0.35, 0.40],
     },
-    "rsi_len": {
-        "type": "int", "default": 3, "min": 2, "max": 14,
-        "description": "RSI lookback period (short = structural stress).",
-        "grid": [3, 5],
-    },
+    **{k: v for k, v in _INDICATOR_PARAMS.items() if k == "rsi_len"},
     "atr_sl_multi": {
         "type": "float", "default": 1.5, "min": 0.3, "max": 3.0,
         "description": "Stop loss as fraction of daily ATR.",
-        "grid": [0.6, 0.8, 1.0, 1.5],
     },
     "atr_tp_multi": {
         "type": "float", "default": 3.0, "min": 0.5, "max": 5.0,
         "description": "Take profit as fraction of daily ATR.",
-        "grid": [1.5, 2.0, 2.5, 3.0],
     },
     "trend_ma_len": {
         "type": "int", "default": 200, "min": 20, "max": 500,
         "description": "Trend EMA lookback for extreme-trend filter.",
-        "grid": [100, 200, 300],
     },
     "trend_filter_atr": {
         "type": "float", "default": 3.0, "min": 0.5, "max": 5.0,
         "description": "Block entries when |price - trend_ema| > N * daily_atr.",
-        "grid": [2.0, 2.5, 3.0],
     },
     "rsi_oversold": {
         "type": "float", "default": 40.0, "min": 10.0, "max": 50.0,
         "description": "RSI threshold for oversold (long entry).",
-        "grid": [25, 30, 35, 40],
     },
     "rsi_overbought": {
         "type": "float", "default": 60.0, "min": 55.0, "max": 90.0,
         "description": "RSI threshold for overbought (short entry).",
-        "grid": [60, 65, 70, 75],
     },
     "midline_exit": {
         "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Exit when price returns to KC midline (1=enabled, 0=disabled).",
-        "grid": [0, 1],
     },
     "vol_len": {
         "type": "int", "default": 20, "min": 5, "max": 100,
         "description": "Rolling window for average volume calculation.",
-        "grid": [10, 20, 50],
     },
     "vol_mult": {
         "type": "float", "default": 0.8, "min": 0.5, "max": 5.0,
         "description": "Min volume spike multiplier vs rolling average.",
-        "grid": [0.8, 1.0, 1.2],
     },
     "vwap_filter": {
         "type": "int", "default": 1, "min": 0, "max": 1,
         "description": "Require VWAP alignment for entries (1=on, 0=off).",
-        "grid": [0, 1],
     },
     "time_gate": {
         "type": "int", "default": 1, "min": 0, "max": 1,
         "description": "Block entries during low-edge windows (1=enabled, 0=disabled).",
-        "grid": [0, 1],
     },
-    "adx_len": {
-        "type": "int", "default": 14, "min": 7, "max": 21,
-        "description": "ADX calculation period for regime filter.",
-        "grid": [10, 14],
-    },
+    **{k: v for k, v in _INDICATOR_PARAMS.items() if k == "adx_len"},
     "adx_threshold": {
         "type": "float", "default": 25.0, "min": 15.0, "max": 50.0,
         "description": "ADX below this = choppy (mean-revert OK). Above = trending (block).",
-        "grid": [20, 25, 30, 35, 40],
     },
     "max_hold_bars": {
         "type": "int", "default": 120, "min": 10, "max": 300,
         "description": "Max bars to hold before time-exit.",
-        "grid": [60, 90, 120, 180],
     },
 }
 
@@ -166,7 +153,7 @@ def _in_low_edge_window(t: time) -> bool:
 
 
 class _Indicators:
-    """Rolling 1-min indicator state: KC, RSI, EMA-smoothed ADX, VWAP, volume."""
+    """Thin wrapper: centralized EMA/RSI/ADX/VWAP + custom KC bands & volume ratio."""
 
     def __init__(
         self,
@@ -177,34 +164,15 @@ class _Indicators:
         vol_len: int = 20,
         adx_len: int = 14,
     ) -> None:
-        self._kc_len = kc_len
         self._kc_mult = kc_mult
-        self._rsi_len = rsi_len
-        self._trend_ma_len = trend_ma_len
         self._vol_len = vol_len
-        self._adx_len = adx_len
-        self._ema_alpha = 2.0 / (kc_len + 1)
-        self._trend_alpha = 2.0 / (trend_ma_len + 1)
-        self._adx_alpha = 2.0 / (adx_len + 1)
-        max_buf = max(rsi_len + 1, kc_len, trend_ma_len)
-        self._closes: deque[float] = deque(maxlen=max_buf + 1)
+        self._kc_ema = EMA(period=kc_len)
+        self._trend_ema_ind = EMA(period=trend_ma_len)
+        self._rsi_ind = RSI(period=rsi_len)
+        self._adx_ind = ADX(period=adx_len)
+        self._vwap_ind = VWAP()
         self._volumes: deque[float] = deque(maxlen=max(vol_len, 1) + 1)
         self._last_ts: datetime | None = None
-        # EMA state
-        self._ema: float | None = None
-        self._trend_ema: float | None = None
-        self._bar_count: int = 0
-        # EMA-smoothed ADX (responsive)
-        self._prev_price: float | None = None
-        self._plus_dm_ema: float | None = None
-        self._minus_dm_ema: float | None = None
-        self._atr_dm_ema: float | None = None
-        self._adx_ema: float | None = None
-        # VWAP (daily reset)
-        self._vwap_date = None
-        self._cum_pv = 0.0
-        self._cum_vol = 0.0
-        # Public indicator values
         self.kc_mid: float | None = None
         self.kc_upper: float | None = None
         self.kc_lower: float | None = None
@@ -221,91 +189,23 @@ class _Indicators:
         if timestamp == self._last_ts:
             return
         self._last_ts = timestamp
-        self._closes.append(price)
         self._volumes.append(volume)
         self.daily_atr = daily_atr
-        self._bar_count += 1
-        self._update_vwap(timestamp, price, volume)
-        self._update_adx(price)
-        self._compute(price)
-
-    def _update_vwap(self, ts: datetime, price: float, volume: float) -> None:
-        d = ts.date()
-        if d != self._vwap_date:
-            self._vwap_date = d
-            self._cum_pv = 0.0
-            self._cum_vol = 0.0
-        self._cum_pv += price * max(volume, 0.0)
-        self._cum_vol += max(volume, 0.0)
-        self.vwap = self._cum_pv / self._cum_vol if self._cum_vol > 0 else None
-
-    def _update_adx(self, price: float) -> None:
-        """EMA-smoothed ADX — same responsive method as keltner_vwap_breakout."""
-        if self._prev_price is None:
-            self._prev_price = price
-            return
-        tr = abs(price - self._prev_price)
-        delta = price - self._prev_price
-        pdm = max(delta, 0.0)
-        mdm = max(-delta, 0.0)
-        a = self._adx_alpha
-        if self._atr_dm_ema is None:
-            self._atr_dm_ema = tr
-            self._plus_dm_ema = pdm
-            self._minus_dm_ema = mdm
-        else:
-            self._atr_dm_ema = a * tr + (1 - a) * self._atr_dm_ema
-            self._plus_dm_ema = a * pdm + (1 - a) * self._plus_dm_ema
-            self._minus_dm_ema = a * mdm + (1 - a) * self._minus_dm_ema
-        if self._atr_dm_ema and self._atr_dm_ema > 1e-9:
-            pdi = 100.0 * (self._plus_dm_ema / self._atr_dm_ema)
-            mdi = 100.0 * (self._minus_dm_ema / self._atr_dm_ema)
-            denom = pdi + mdi
-            if denom > 1e-9:
-                dx = 100.0 * abs(pdi - mdi) / denom
-                if self._adx_ema is None:
-                    self._adx_ema = dx
-                else:
-                    self._adx_ema = a * dx + (1 - a) * self._adx_ema
-                self.adx = self._adx_ema
-        self._prev_price = price
-
-    def _compute(self, price: float) -> None:
-        closes = list(self._closes)
-        n = len(closes)
-        # EMA for Keltner midline
-        if self._ema is None:
-            if n >= self._kc_len:
-                self._ema = mean(closes[-self._kc_len:])
-            else:
-                return
-        else:
-            self._ema = self._ema_alpha * price + (1 - self._ema_alpha) * self._ema
-        # Keltner Channel = EMA +/- kc_mult * daily_atr
-        self.kc_mid = self._ema
-        if self.daily_atr > 0:
+        self._vwap_ind.update(price, max(volume, 0.0), timestamp)
+        self.vwap = self._vwap_ind.value
+        self._adx_ind.update(price)
+        self.adx = self._adx_ind.value or 0.0
+        self._rsi_ind.update(price)
+        self.rsi = self._rsi_ind.value
+        self._trend_ema_ind.update(price)
+        self.trend_ema = self._trend_ema_ind.value
+        # KC = EMA +/- kc_mult * daily_atr (uses external daily ATR, not internal)
+        mid = self._kc_ema.update(price)
+        self.kc_mid = mid
+        if mid is not None and self.daily_atr > 0:
             width = self._kc_mult * self.daily_atr
-            self.kc_upper = self._ema + width
-            self.kc_lower = self._ema - width
-        # Trend EMA (long-term)
-        if self._trend_ema is None:
-            if n >= self._trend_ma_len:
-                self._trend_ema = mean(closes[-self._trend_ma_len:])
-        else:
-            self._trend_ema = self._trend_alpha * price + (1 - self._trend_alpha) * self._trend_ema
-        self.trend_ema = self._trend_ema
-        # RSI (simple, non-smoothed Wilder variant)
-        if n >= self._rsi_len + 1:
-            changes = [closes[i] - closes[i - 1] for i in range(n - self._rsi_len, n)]
-            gains = [c for c in changes if c > 0]
-            losses = [-c for c in changes if c < 0]
-            avg_gain = mean(gains) if gains else 0.0
-            avg_loss = mean(losses) if losses else 0.0
-            if avg_loss == 0:
-                self.rsi = 100.0
-            else:
-                rs = avg_gain / avg_loss
-                self.rsi = 100.0 - (100.0 / (1.0 + rs))
+            self.kc_upper = mid + width
+            self.kc_lower = mid - width
         # Volume ratio
         vols = list(self._volumes)
         nv = len(vols)

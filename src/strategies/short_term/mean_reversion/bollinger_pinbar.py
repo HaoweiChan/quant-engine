@@ -20,9 +20,7 @@ Exit:
 
 from __future__ import annotations
 
-from collections import deque
 from datetime import datetime, time
-from statistics import mean, stdev
 from typing import TYPE_CHECKING
 
 from src.core.policies import EntryPolicy, NoAddPolicy, StopPolicy
@@ -35,6 +33,7 @@ from src.core.types import (
     MarketSnapshot,
     Position,
 )
+from src.indicators import ADX, BollingerBands, compose_param_schema
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
 from src.strategies._session_utils import in_day_session, in_force_close, in_night_session
 
@@ -42,30 +41,23 @@ if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
 
 
+_INDICATOR_PARAMS = compose_param_schema({
+    "bb_len": (BollingerBands, "period"),
+    "adx_len": (ADX, "period"),
+})
+_INDICATOR_PARAMS["bb_len"]["default"] = 20
+_INDICATOR_PARAMS["bb_len"]["min"] = 10
+_INDICATOR_PARAMS["bb_len"]["max"] = 50
+_INDICATOR_PARAMS["adx_len"]["min"] = 7
+
 PARAM_SCHEMA: dict[str, dict] = {
-    "bb_len": {
-        "type": "int",
-        "default": 20,
-        "min": 10,
-        "max": 50,
-        "description": "Bollinger Bands lookback period.",
-        "grid": [10, 15, 20, 30],
-    },
+    **_INDICATOR_PARAMS,
     "bb_std_dev": {
         "type": "float",
         "default": 2.0,
         "min": 1.5,
         "max": 3.0,
         "description": "Bollinger Bands standard deviation multiplier.",
-        "grid": [1.5, 2.0, 2.5, 3.0],
-    },
-    "adx_len": {
-        "type": "int",
-        "default": 14,
-        "min": 7,
-        "max": 30,
-        "description": "ADX smoothing period.",
-        "grid": [10, 14, 20],
     },
     "adx_threshold": {
         "type": "float",
@@ -73,7 +65,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 20.0,
         "max": 35.0,
         "description": "ADX below this = range-bound (allow MR entries).",
-        "grid": [20, 25, 30, 35],
     },
     "atr_sl_multi": {
         "type": "float",
@@ -81,7 +72,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 0.5,
         "max": 4.0,
         "description": "Stop loss as fraction of daily ATR.",
-        "grid": [1.5, 2.0, 2.5, 3.0],
     },
     "atr_tp_multi": {
         "type": "float",
@@ -89,7 +79,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 1.0,
         "max": 6.0,
         "description": "Take profit as fraction of daily ATR.",
-        "grid": [2.0, 3.0, 4.0, 5.0],
     },
     "time_gate": {
         "type": "int",
@@ -104,7 +93,6 @@ PARAM_SCHEMA: dict[str, dict] = {
         "min": 30,
         "max": 300,
         "description": "Max bars to hold before time-exit.",
-        "grid": [60, 90, 120, 180],
     },
 }
 
@@ -138,7 +126,7 @@ def _in_low_edge_window(t: time) -> bool:
 
 
 class _Indicators:
-    """Rolling indicators: Bollinger Bands, ADX."""
+    """Thin wrapper composing centralized indicators (BollingerBands, ADX)."""
 
     def __init__(
         self,
@@ -146,26 +134,14 @@ class _Indicators:
         bb_std_dev: float,
         adx_len: int = 14,
     ) -> None:
-        self._bb_len = bb_len
-        self._bb_std_dev = bb_std_dev
-        self._adx_len = adx_len
-        self._adx_alpha = 2.0 / (adx_len + 1)
-        max_buf = max(bb_len, adx_len)
-        self._closes: deque[float] = deque(maxlen=max_buf + 1)
+        self._bb = BollingerBands(period=bb_len, upper_mult=bb_std_dev, lower_mult=bb_std_dev)
+        self._adx = ADX(period=adx_len)
         self._last_ts: datetime | None = None
-        self._bar_count: int = 0
-        self._prev_price: float | None = None
-        self._plus_dm_ema: float | None = None
-        self._minus_dm_ema: float | None = None
-        self._atr_ema: float | None = None
-        self._adx_ema: float | None = None
         self.daily_atr: float = 0.0
         self.bb_upper: float | None = None
         self.bb_mid: float | None = None
         self.bb_lower: float | None = None
         self.adx: float = 0.0
-        self._prev_close: float | None = None
-        self._outside_band: bool = False
 
     def update(
         self,
@@ -176,54 +152,13 @@ class _Indicators:
         if timestamp == self._last_ts:
             return
         self._last_ts = timestamp
-        prev = self._prev_close
-        self._closes.append(price)
-        self._prev_close = price
         self.daily_atr = daily_atr
-        self._bar_count += 1
-        self._update_adx(price)
-        self._compute()
-
-    def _update_adx(self, price: float) -> None:
-        if self._prev_price is None:
-            self._prev_price = price
-            return
-        tr = abs(price - self._prev_price)
-        delta = price - self._prev_price
-        pdm = max(delta, 0.0)
-        mdm = max(-delta, 0.0)
-        a = self._adx_alpha
-        if self._atr_ema is None:
-            self._atr_ema = tr
-            self._plus_dm_ema = pdm
-            self._minus_dm_ema = mdm
-        else:
-            self._atr_ema = a * tr + (1 - a) * self._atr_ema
-            self._plus_dm_ema = a * pdm + (1 - a) * self._plus_dm_ema
-            self._minus_dm_ema = a * mdm + (1 - a) * self._minus_dm_ema
-        if self._atr_ema and self._atr_ema > 1e-9:
-            pdi = 100.0 * (self._plus_dm_ema / self._atr_ema)
-            mdi = 100.0 * (self._minus_dm_ema / self._atr_ema)
-            denom = pdi + mdi
-            if denom > 1e-9:
-                dx = 100.0 * abs(pdi - mdi) / denom
-                if self._adx_ema is None:
-                    self._adx_ema = dx
-                else:
-                    self._adx_ema = a * dx + (1 - a) * self._adx_ema
-                self.adx = self._adx_ema
-        self._prev_price = price
-
-    def _compute(self) -> None:
-        closes = list(self._closes)
-        n = len(closes)
-        if n < self._bb_len:
-            return
-        window = closes[-self._bb_len :]
-        self.bb_mid = mean(window)
-        sd = stdev(window) if len(window) > 1 else 0.0
-        self.bb_upper = self.bb_mid + self._bb_std_dev * sd
-        self.bb_lower = self.bb_mid - self._bb_std_dev * sd
+        self._adx.update(price)
+        self.adx = self._adx.value or 0.0
+        self._bb.update(price)
+        self.bb_upper = self._bb.upper
+        self.bb_mid = self._bb.mid
+        self.bb_lower = self._bb.lower
 
 
 class BollingerPinbarEntry(EntryPolicy):

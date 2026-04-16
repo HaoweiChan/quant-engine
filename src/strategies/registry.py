@@ -274,20 +274,22 @@ def get_active_params(slug: str) -> dict[str, Any]:
 
 
 def get_param_grid(slug: str) -> dict[str, dict]:
-    """Return optimizer grid definitions from PARAM_SCHEMA 'grid' keys.
+    """Return parameter definitions from PARAM_SCHEMA for the frontend/API.
 
     Returns dict matching the shape expected by helpers.get_param_grid_for_strategy:
-        {param_name: {"label": str, "type": str, "default": list}}
+        {param_name: {"label": str, "type": str, "default": [default_value], "value": default}}
     """
     info = get_info(slug)
     result: dict[str, dict] = {}
     for key, spec in info.param_schema.items():
-        grid_values = spec.get("grid", [spec["default"]])
         result[key] = {
             "label": key.replace("_", " ").title(),
             "type": spec["type"],
-            "default": grid_values,
+            "default": [spec["default"]],
             "value": spec["default"],
+            "min": spec.get("min"),
+            "max": spec.get("max"),
+            "step": spec.get("step"),
         }
     return result
 
@@ -382,7 +384,7 @@ def validate_schemas() -> list[str]:
     Returns a list of error strings (empty means all consistent).
     """
     errors: list[str] = []
-    skip_params = {"max_loss", "lots", "contract_type", "latest_entry_time"}
+    skip_params = {"max_loss", "lots", "contract_type", "latest_entry_time", "pyramid_risk_level"}
     for slug, info in _ensure_loaded().items():
         try:
             mod = importlib.import_module(info.module)

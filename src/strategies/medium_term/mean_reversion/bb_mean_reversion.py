@@ -44,6 +44,7 @@ from src.core.types import (
     MarketSnapshot,
     Position,
 )
+from src.indicators import RSI, SMA, BollingerBands, compose_param_schema
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
 from src.strategies._session_utils import in_day_session, in_night_session
 
@@ -61,46 +62,42 @@ def _stdev(vals: list[float], avg: float) -> float:
     return (sum((v - avg) ** 2 for v in vals) / (len(vals) - 1)) ** 0.5
 
 
+_INDICATOR_PARAMS = compose_param_schema({
+    "bb_len": (BollingerBands, "period"),
+    "rsi_len": (RSI, "period"),
+})
+_INDICATOR_PARAMS["bb_len"]["min"] = 10
+_INDICATOR_PARAMS["bb_len"]["max"] = 60
+_INDICATOR_PARAMS["bb_len"]["description"] = "Bollinger Band period on signal TF bars."
+_INDICATOR_PARAMS["rsi_len"]["default"] = 7
+_INDICATOR_PARAMS["rsi_len"]["min"] = 3
+_INDICATOR_PARAMS["rsi_len"]["max"] = 21
+
 PARAM_SCHEMA: dict[str, dict] = {
     "bar_agg_trend": {
         "type": "int", "default": 2, "min": 1, "max": 16,
         "description": "Aggregate N incoming 15m bars for signal TF (2 = 30m).",
-        "grid": [2, 4, 8],
     },
-    "bb_len": {
-        "type": "int", "default": 20, "min": 10, "max": 60,
-        "description": "Bollinger Band period on signal TF bars. 20 bars at 30m = 10h.",
-        "grid": [10, 15, 20, 25, 30, 40],
-    },
+    **_INDICATOR_PARAMS,
     "bb_std": {
         "type": "float", "default": 2.0, "min": 1.0, "max": 4.0,
         "description": "Bollinger Band standard deviation multiplier (wider = fewer signals).",
-        "grid": [1.5, 2.0, 2.5, 3.0],
-    },
-    "rsi_len": {
-        "type": "int", "default": 7, "min": 3, "max": 21,
-        "description": "RSI period on signal TF bars. Shorter = more reactive.",
-        "grid": [5, 7, 10, 14],
     },
     "rsi_oversold": {
         "type": "float", "default": 40.0, "min": 10.0, "max": 45.0,
         "description": "RSI threshold for oversold (long entry).",
-        "grid": [30.0, 35.0, 40.0],
     },
     "rsi_overbought": {
         "type": "float", "default": 60.0, "min": 55.0, "max": 90.0,
         "description": "RSI threshold for overbought (short entry).",
-        "grid": [60.0, 65.0, 70.0],
     },
     "macro_ma_len": {
         "type": "int", "default": 60, "min": 30, "max": 120,
         "description": "MA period for macro trend filter on signal TF (60 bars at 30m = 30h).",
-        "grid": [40, 60, 80],
     },
     "macro_filter_atr": {
         "type": "float", "default": 5.0, "min": 1.5, "max": 8.0,
         "description": "Block entry if |price - MA| > N * ATR (prevents catching knives).",
-        "grid": [3.0, 4.0, 5.0, 6.0],
     },
     "atr_len": {
         "type": "int", "default": 14, "min": 5, "max": 30,
@@ -109,36 +106,18 @@ PARAM_SCHEMA: dict[str, dict] = {
     "atr_sl_mult": {
         "type": "float", "default": 2.0, "min": 0.5, "max": 3.0,
         "description": "Hard stop: ATR multiplier for initial stop loss.",
-        "grid": [1.5, 2.0, 2.5, 3.0],
     },
     "time_stop_bars": {
         "type": "int", "default": 5, "min": 2, "max": 20,
         "description": "Time stop: close if not reverted within N signal-TF bars (5 = 2.5h at 30m).",
-        "grid": [3, 4, 5, 6, 8],
     },
     "max_hold_bars": {
         "type": "int", "default": 60, "min": 10, "max": 300,
         "description": "Max 15m bars to hold (hard cap). 60 = ~15h.",
-        "grid": [30, 45, 60, 90],
     },
     "allow_night": {
         "type": "int", "default": 1, "min": 0, "max": 1,
         "description": "Allow entries during night session (0=day only, 1=day+night).",
-    },
-    "max_pyramid_levels": {
-        "type": "int", "default": 1, "min": 1, "max": 4,
-        "description": "Max pyramid levels (default 1=no adds for MR strategy).",
-        "grid": [1, 2],
-    },
-    "pyramid_gamma": {
-        "type": "float", "default": 0.7, "min": 0.3, "max": 1.0,
-        "description": "Anti-martingale decay.",
-        "grid": [0.5, 0.7],
-    },
-    "pyramid_trigger_atr": {
-        "type": "float", "default": 1.5, "min": 0.5, "max": 5.0,
-        "description": "ATR multiple for first add trigger.",
-        "grid": [1.0, 1.5],
     },
 }
 
@@ -171,7 +150,7 @@ _ATR_SCALE = 1.6
 # ---------------------------------------------------------------------------
 
 class _Indicators:
-    """Rolling indicators: BB, RSI, macro MA on 1h; ATR on 15m."""
+    """Thin wrapper: centralized BB/RSI/SMA on aggregated signal TF; custom ATR on entry TF."""
 
     def __init__(
         self,
@@ -182,24 +161,14 @@ class _Indicators:
         atr_len: int,
         bar_agg_trend: int = 4,
     ) -> None:
-        self._bb_len = bb_len
-        self._bb_std = bb_std
-        self._rsi_len = rsi_len
-        self._macro_ma_len = macro_ma_len
         self._atr_len = atr_len
         self._bar_agg = max(bar_agg_trend, 1)
         self._agg_count = 0
-
-        # Signal TF buffers
-        max_sig = max(bb_len, macro_ma_len, rsi_len + 1) + 2
-        self._sig_closes: deque[float] = deque(maxlen=max_sig + 1)
-
-        # Entry TF buffers
+        self._bb = BollingerBands(period=bb_len, upper_mult=bb_std, lower_mult=bb_std)
+        self._rsi_ind = RSI(period=rsi_len)
+        self._macro_ma = SMA(period=macro_ma_len)
         self._entry_closes: deque[float] = deque(maxlen=atr_len + 2)
-
         self._last_ts: datetime | None = None
-
-        # Public state
         self.bb_upper: float | None = None
         self.bb_mid: float | None = None
         self.bb_lower: float | None = None
@@ -213,17 +182,19 @@ class _Indicators:
         if ts == self._last_ts:
             return
         self._last_ts = ts
-
-        # Entry TF: every 15m bar
         self._entry_closes.append(price)
         self._compute_entry_atr()
-
-        # Signal TF: aggregated to 1h
         self._agg_count += 1
         if self._agg_count >= self._bar_agg:
             self._agg_count = 0
-            self._sig_closes.append(price)
-            self._compute_signal()
+            self._bb.update(price)
+            self.bb_upper = self._bb.upper
+            self.bb_mid = self._bb.mid
+            self.bb_lower = self._bb.lower
+            self._rsi_ind.update(price)
+            self.rsi = self._rsi_ind.value
+            self._macro_ma.update(price)
+            self.macro_ma = self._macro_ma.value
 
     def _compute_entry_atr(self) -> None:
         closes = list(self._entry_closes)
@@ -235,36 +206,6 @@ class _Indicators:
             self._atr_history.append(self.atr)
             if len(self._atr_history) >= 10:
                 self.atr_avg = _mean(list(self._atr_history))
-
-    def _compute_signal(self) -> None:
-        closes = list(self._sig_closes)
-        n = len(closes)
-
-        # Bollinger Bands
-        if n >= self._bb_len:
-            bb_slice = closes[-self._bb_len:]
-            self.bb_mid = _mean(bb_slice)
-            std = _stdev(bb_slice, self.bb_mid)
-            self.bb_upper = self.bb_mid + self._bb_std * std
-            self.bb_lower = self.bb_mid - self._bb_std * std
-
-        # RSI
-        if n >= self._rsi_len + 1:
-            changes = [closes[i] - closes[i - 1]
-                       for i in range(n - self._rsi_len, n)]
-            gains = [c for c in changes if c > 0]
-            losses = [-c for c in changes if c < 0]
-            avg_gain = _mean(gains) if gains else 0.0
-            avg_loss = _mean(losses) if losses else 0.0
-            if avg_loss == 0:
-                self.rsi = 100.0
-            else:
-                rs = avg_gain / avg_loss
-                self.rsi = 100.0 - (100.0 / (1.0 + rs))
-
-        # Macro MA
-        if n >= self._macro_ma_len:
-            self.macro_ma = _mean(closes[-self._macro_ma_len:])
 
     def snapshot(self) -> dict[str, float | None]:
         return {
@@ -477,12 +418,12 @@ def create_bb_mean_reversion_engine(
     time_stop_bars: int = 5,
     max_hold_bars: int = 60,
     allow_night: int = 1,
-    max_pyramid_levels: int = 1,
-    pyramid_gamma: float = 0.7,
-    pyramid_trigger_atr: float = 1.5,
+    pyramid_risk_level: int = 0,
 ) -> "PositionEngine":
     """Build a PositionEngine wired with the BB Mean Reversion strategy."""
+    from src.core.policies import PyramidAddPolicy
     from src.core.position_engine import PositionEngine
+    from src.core.types import pyramid_config_from_risk_level
 
     entry = BBMeanReversionEntry(
         lots=lots,
@@ -505,28 +446,13 @@ def create_bb_mean_reversion_engine(
         max_hold_bars=max_hold_bars,
         bar_agg=bar_agg_trend,
     )
-    if max_pyramid_levels > 1:
-        from src.core.policies import PyramidAddPolicy
-        from src.core.types import PyramidConfig
-
-        triggers = [pyramid_trigger_atr * (i + 1) for i in range(max_pyramid_levels - 1)]
-        pyramid_config = PyramidConfig(
-            max_loss=max_loss,
-            max_levels=max_pyramid_levels,
-            add_trigger_atr=triggers,
-            atr_key="entry_tf",
-            gamma=pyramid_gamma,
-            base_lots=lots,
-            internal_atr_len=14,
-        )
-        add_policy = PyramidAddPolicy(pyramid_config)
-    else:
-        add_policy = NoAddPolicy()
+    pcfg = pyramid_config_from_risk_level(pyramid_risk_level, max_loss, lots)
+    add_policy = PyramidAddPolicy(pcfg) if pcfg is not None else NoAddPolicy()
     engine = PositionEngine(
         entry_policy=entry,
         add_policy=add_policy,
         stop_policy=stop,
-        config=EngineConfig(max_loss=max_loss),
+        config=EngineConfig(max_loss=max_loss, pyramid_risk_level=pyramid_risk_level),
     )
     engine.indicator_provider = entry.ind  # type: ignore[attr-defined]
     return engine

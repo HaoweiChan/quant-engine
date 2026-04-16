@@ -37,145 +37,124 @@ from src.core.types import (
     MarketSnapshot,
     Position,
 )
+from src.indicators import RSI, compose_param_schema
 from src.indicators.atr import SmoothedATR
 from src.indicators.ema import EMA
-from src.indicators.rsi import RSI
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
 
 if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
 
 
+_INDICATOR_PARAMS = compose_param_schema({
+    "rsi_period": (RSI, "period"),
+})
+_INDICATOR_PARAMS["rsi_period"]["default"] = 14
+_INDICATOR_PARAMS["rsi_period"]["min"] = 5
+_INDICATOR_PARAMS["rsi_period"]["max"] = 30
+_INDICATOR_PARAMS["rsi_period"]["description"] = "RSI lookback period."
+
 PARAM_SCHEMA: dict[str, dict] = {
     "lots": {
         "type": "int", "default": 1, "min": 1, "max": 10,
         "description": "Contracts per entry (primary leverage lever).",
-        "grid": [1, 2, 3, 4, 5, 6, 8, 10],
     },
     "entry_offset_min": {
         "type": "int", "default": 5, "min": 0, "max": 30,
         "description": "Minutes after 15:00 to enter (0=session open, 15=after OR window).",
-        "grid": [5, 10, 15],
     },
     "exit_before_close_min": {
         "type": "int", "default": 5, "min": 5, "max": 15,
         "description": "Minutes before 05:00 to force close.",
-        "grid": [5, 10],
     },
     "atr_sl_mult": {
         "type": "float", "default": 2.0, "min": 0.5, "max": 4.0,
         "description": "Stop-loss distance as multiplier of daily ATR.",
-        "grid": [1.0, 1.5, 2.0, 2.5, 3.0],
     },
     "use_atr_filter": {
         "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Enable ATR volatility filter (1=on, 0=off).",
-        "grid": [0, 1],
     },
     "atr_filter_mult": {
         "type": "float", "default": 2.0, "min": 1.2, "max": 3.0,
         "description": "Skip entry if daily ATR > this * rolling avg ATR.",
-        "grid": [1.5, 2.0, 2.5],
     },
     "use_trend_filter": {
         "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Enable trend EMA filter (1=on, 0=off).",
-        "grid": [0, 1],
     },
     "trend_ema_len": {
         "type": "int", "default": 20, "min": 5, "max": 60,
         "description": "EMA lookback for trend filter (in sessions, ~1 session/day).",
-        "grid": [10, 20, 40],
     },
     "trend_invert": {
         "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Invert trend filter: 0=require price>EMA (trend), 1=require price<EMA (pullback/mean reversion).",
-        "grid": [0, 1],
     },
     "trail_enabled": {
         "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Enable trailing stop (1=on, 0=off).",
-        "grid": [0, 1],
     },
     "trail_trigger_atr": {
         "type": "float", "default": 1.0, "min": 0.5, "max": 3.0,
         "description": "Profit in ATR multiples to activate trailing stop.",
-        "grid": [0.5, 1.0, 1.5],
     },
     "trail_atr_mult": {
         "type": "float", "default": 1.5, "min": 0.5, "max": 3.0,
         "description": "Trailing stop distance in ATR multiples.",
-        "grid": [1.0, 1.5, 2.0],
     },
     "or_confirm": {
         "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Enable opening range momentum confirmation (1=on, 0=off).",
-        "grid": [0, 1],
     },
     "or_wait_min": {
         "type": "int", "default": 15, "min": 5, "max": 30,
         "description": "Minutes to wait after session open before checking OR confirmation.",
-        "grid": [5, 10, 15, 20, 30],
     },
     "or_threshold_atr": {
         "type": "float", "default": 0.0, "min": 0.0, "max": 1.0,
         "description": "Minimum price rise above session open (in ATR multiples) to confirm entry. 0=any rise.",
-        "grid": [0.0, 0.1, 0.2, 0.3, 0.5],
     },
     "breakeven_enabled": {
         "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Move stop to entry price after profit threshold (1=on, 0=off).",
-        "grid": [0, 1],
     },
     "breakeven_trigger_atr": {
         "type": "float", "default": 1.0, "min": 0.3, "max": 2.0,
         "description": "Profit in ATR multiples to trigger breakeven stop.",
-        "grid": [0.3, 0.5, 0.75, 1.0, 1.5],
     },
     "tp_enabled": {
         "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Enable take-profit exit at fixed ATR multiple (1=on, 0=off).",
-        "grid": [0, 1],
     },
     "tp_atr_mult": {
         "type": "float", "default": 2.0, "min": 0.5, "max": 5.0,
         "description": "Take-profit distance in ATR multiples above entry.",
-        "grid": [1.0, 1.5, 2.0, 2.5, 3.0, 4.0],
     },
     "momentum_filter": {
         "type": "int", "default": 0, "min": 0, "max": 2,
         "description": "Session filter: 0=off, 1=enter only after positive session, 2=enter only after negative session (mean reversion).",
-        "grid": [0, 1, 2],
     },
     "mr_min_drop_atr": {
         "type": "float", "default": 0.0, "min": 0.0, "max": 1.0,
         "description": "Min prior session drop (in ATR multiples) to trigger mean reversion entry. 0=any drop. Only used when momentum_filter=2.",
-        "grid": [0.0, 0.1, 0.2, 0.3, 0.5],
     },
     "rsi_filter_enabled": {
         "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Enable RSI filter — skip entry when RSI is overbought (1=on, 0=off).",
-        "grid": [0, 1],
     },
     "rsi_max_entry": {
         "type": "float", "default": 70.0, "min": 50.0, "max": 85.0,
         "description": "Max RSI for entry. Skip if RSI is above this level.",
-        "grid": [60, 65, 70, 75, 80],
     },
-    "rsi_period": {
-        "type": "int", "default": 14, "min": 5, "max": 30,
-        "description": "RSI lookback period.",
-        "grid": [5, 10, 14],
-    },
+    **_INDICATOR_PARAMS,
     "sizing_mode": {
         "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "0=static lots, 1=Kelly-based dynamic sizing via compute_risk_lots().",
-        "grid": [0, 1],
     },
     "risk_pct": {
         "type": "float", "default": 0.10, "min": 0.01, "max": 0.15,
         "description": "Fraction of equity to risk per trade. TX needs ~0.10 (full Kelly) for 1 lot; MTX works at lower fractions.",
-        "grid": [0.056, 0.08, 0.10],
     },
 }
 

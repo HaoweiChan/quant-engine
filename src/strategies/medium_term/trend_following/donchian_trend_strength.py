@@ -40,155 +40,90 @@ from src.core.types import (
     MarketSnapshot,
     Position,
 )
+from src.indicators import ADX, RSI, VWAP, Donchian, compose_param_schema
 from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
 from src.strategies._session_utils import in_day_session, in_night_session
 
 if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
 
+_INDICATOR_PARAMS = compose_param_schema({
+    "lookback_period": (Donchian, "period"),
+    "adx_len": (ADX, "period"),
+    "rsi_len": (RSI, "period"),
+})
+# Override defaults/bounds to match this strategy's tuning ranges
+_INDICATOR_PARAMS["lookback_period"]["default"] = 20
+_INDICATOR_PARAMS["lookback_period"]["description"] = "Donchian Channel lookback period (bars on signal TF)."
+_INDICATOR_PARAMS["adx_len"]["default"] = 14
+_INDICATOR_PARAMS["rsi_len"]["default"] = 5
+_INDICATOR_PARAMS["rsi_len"]["max"] = 14
 
 PARAM_SCHEMA: dict[str, dict] = {
-    "lookback_period": {
-        "type": "int",
-        "default": 20,
-        "min": 5,
-        "max": 100,
-        "description": "Donchian Channel lookback period (bars on signal TF).",
-        "grid": [10, 15, 20, 30, 50],
-    },
-    "adx_len": {
-        "type": "int",
-        "default": 14,
-        "min": 7,
-        "max": 30,
-        "description": "ADX smoothing period.",
-        "grid": [10, 14, 20],
-    },
+    **_INDICATOR_PARAMS,
     "adx_threshold": {
-        "type": "float",
-        "default": 20.0,
-        "min": 0.0,
-        "max": 40.0,
+        "type": "float", "default": 20.0, "min": 0.0, "max": 40.0,
         "description": "ADX above this = trending (0=disabled).",
-        "grid": [0, 15, 20, 25, 30],
-    },
-    "rsi_len": {
-        "type": "int",
-        "default": 5,
-        "min": 2,
-        "max": 14,
-        "description": "RSI period for structural momentum filter.",
-        "grid": [3, 5, 7],
     },
     "rsi_long_thresh": {
-        "type": "float",
-        "default": 55.0,
-        "min": 40.0,
-        "max": 100.0,
+        "type": "float", "default": 55.0, "min": 40.0, "max": 100.0,
         "description": "RSI must be below this for long entries (100=disabled).",
-        "grid": [45, 50, 55, 100],
     },
     "rsi_short_thresh": {
-        "type": "float",
-        "default": 45.0,
-        "min": 0.0,
-        "max": 60.0,
+        "type": "float", "default": 45.0, "min": 0.0, "max": 60.0,
         "description": "RSI must be above this for short entries (0=disabled).",
-        "grid": [0, 40, 45, 50],
     },
     "risk_per_trade": {
-        "type": "float",
-        "default": 0.0,
-        "min": 0.0,
-        "max": 1_000_000.0,
-        "description": "Target risk per trade in NT$. Lots auto-sized: risk / (stop_pts × point_value). 0=use fixed lots.",
+        "type": "float", "default": 0.0, "min": 0.0, "max": 1_000_000.0,
+        "description": "Target risk per trade in NT$. 0=use fixed lots.",
     },
     "vol_mult": {
-        "type": "float",
-        "default": 0.0,
-        "min": 0.0,
-        "max": 3.0,
+        "type": "float", "default": 0.0, "min": 0.0, "max": 3.0,
         "description": "Volume confirmation: bar vol > vol_mult * rolling avg (0=disabled).",
-        "grid": [0, 0.5, 1.0, 1.5],
     },
     "atr_sl_multi": {
-        "type": "float",
-        "default": 1.5,
-        "min": 0.3,
-        "max": 4.0,
+        "type": "float", "default": 1.5, "min": 0.3, "max": 4.0,
         "description": "Stop loss as fraction of daily ATR.",
-        "grid": [0.5, 1.0, 1.5, 2.0, 3.0],
     },
     "atr_tp_multi": {
-        "type": "float",
-        "default": 3.0,
-        "min": 0.5,
-        "max": 6.0,
+        "type": "float", "default": 3.0, "min": 0.5, "max": 6.0,
         "description": "Take profit as fraction of daily ATR.",
-        "grid": [1.5, 2.0, 3.0, 4.0],
     },
     "trail_atr_multi": {
-        "type": "float",
-        "default": 2.0,
-        "min": 0.5,
-        "max": 4.0,
+        "type": "float", "default": 2.0, "min": 0.5, "max": 4.0,
         "description": "Trailing stop distance as fraction of daily ATR.",
-        "grid": [1.0, 1.5, 2.0, 3.0],
     },
     "time_gate": {
-        "type": "int",
-        "default": 0,
-        "min": 0,
-        "max": 1,
+        "type": "int", "default": 0, "min": 0, "max": 1,
         "description": "Block entries during low-edge windows (1=enabled, 0=disabled).",
     },
     "max_hold_bars": {
-        "type": "int",
-        "default": 120,
-        "min": 20,
-        "max": 500,
+        "type": "int", "default": 120, "min": 20, "max": 500,
         "description": "Max bars to hold before time-exit.",
-        "grid": [40, 60, 90, 120, 200],
     },
     "min_channel_atr": {
-        "type": "float",
-        "default": 0.0,
-        "min": 0.0,
-        "max": 3.0,
+        "type": "float", "default": 0.0, "min": 0.0, "max": 3.0,
         "description": "Min Donchian width as fraction of daily ATR to enter (0=disabled).",
-        "grid": [0, 0.5, 1.0, 1.5, 2.0],
-    },
-    "pyramid_max_levels": {
-        "type": "int",
-        "default": 1,
-        "min": 1,
-        "max": 4,
-        "description": "Max positions: 1=no pyramid, 2-4=anti-martingale adds into winners.",
-        "grid": [1, 2, 3],
-    },
-    "pyramid_trigger_atr": {
-        "type": "float",
-        "default": 1.0,
-        "min": 0.5,
-        "max": 3.0,
-        "description": "Profit threshold per add level in daily ATR units.",
-        "grid": [0.5, 1.0, 1.5, 2.0],
-    },
-    "pyramid_gamma": {
-        "type": "float",
-        "default": 0.5,
-        "min": 0.2,
-        "max": 1.0,
-        "description": "Size decay: add_lots = base_lots * gamma^level (0.5 = halving).",
-        "grid": [0.3, 0.5, 0.7],
     },
     "bar_agg": {
-        "type": "int",
-        "default": 15,
-        "min": 1,
-        "max": 60,
-        "description": "Bar aggregation: 1m->Nm. Overrides signal_timeframe.",
-        "grid": [5, 15, 30, 60],
+        "type": "int", "default": 15, "min": 1, "max": 60,
+        "description": "Bar aggregation: 1m->Nm.",
+    },
+    "profit_lock_atr": {
+        "type": "float", "default": 0.0, "min": 0.0, "max": 3.0,
+        "description": "Tighten trail when floating profit > this * daily ATR (0=disabled).",
+    },
+    "locked_trail_ratio": {
+        "type": "float", "default": 0.5, "min": 0.2, "max": 1.0,
+        "description": "Trail multiplier shrinks to trail_atr_multi * this once profit locked.",
+    },
+    "breakeven_atr": {
+        "type": "float", "default": 0.0, "min": 0.0, "max": 2.0,
+        "description": "Move stop to breakeven when profit > this * daily ATR (0=disabled).",
+    },
+    "entry_slack_atr": {
+        "type": "float", "default": 0.0, "min": 0.0, "max": 1.0,
+        "description": "Relax pullback: allow entry within this * daily ATR beyond midpoint (0=strict).",
     },
 }
 
@@ -223,7 +158,7 @@ def _in_low_edge_window(t: time) -> bool:
 
 
 class _Indicators:
-    """Rolling indicators: Donchian, VWAP, RSI, ADX, volume average."""
+    """Thin wrapper composing centralized indicators (Donchian, ADX, RSI, VWAP)."""
 
     def __init__(
         self,
@@ -231,24 +166,12 @@ class _Indicators:
         adx_len: int = 14,
         rsi_len: int = 5,
     ) -> None:
-        self._lb = lookback_period
-        self._adx_len = adx_len
-        self._rsi_len = rsi_len
-        self._adx_alpha = 2.0 / (adx_len + 1)
-        self._closes: deque[float] = deque(maxlen=lookback_period + 1)
+        self._dc = Donchian(period=lookback_period)
+        self._adx = ADX(period=adx_len)
+        self._rsi = RSI(period=rsi_len)
+        self._vwap_ind = VWAP()
         self._volumes: deque[float] = deque(maxlen=lookback_period)
         self._last_ts: datetime | None = None
-        self._bar_count: int = 0
-        self._prev_price: float | None = None
-        self._plus_dm_ema: float | None = None
-        self._minus_dm_ema: float | None = None
-        self._atr_ema: float | None = None
-        self._adx_ema: float | None = None
-        self._gains: deque[float] = deque(maxlen=rsi_len)
-        self._losses: deque[float] = deque(maxlen=rsi_len)
-        self._vwap_pv_sum: float = 0.0
-        self._vwap_v_sum: float = 0.0
-        self._vwap_session_date: datetime | None = None
         self.daily_atr: float = 0.0
         self.donchian_upper: float | None = None
         self.donchian_lower: float | None = None
@@ -270,84 +193,21 @@ class _Indicators:
         if timestamp == self._last_ts:
             return
         self._last_ts = timestamp
-        self._closes.append(price)
         self.daily_atr = daily_atr
-        self._bar_count += 1
         self.bar_volume = volume
         self._volumes.append(volume)
         self.avg_volume = sum(self._volumes) / len(self._volumes) if self._volumes else 0.0
-        self._update_adx(price)
-        self._update_rsi(price)
-        self._update_vwap(price, volume, timestamp)
-        self._compute_donchian()
-
-    def _update_adx(self, price: float) -> None:
-        if self._prev_price is None:
-            self._prev_price = price
-            return
-        tr = abs(price - self._prev_price)
-        delta = price - self._prev_price
-        pdm = max(delta, 0.0)
-        mdm = max(-delta, 0.0)
-        a = self._adx_alpha
-        if self._atr_ema is None:
-            self._atr_ema = tr
-            self._plus_dm_ema = pdm
-            self._minus_dm_ema = mdm
-        else:
-            self._atr_ema = a * tr + (1 - a) * self._atr_ema
-            self._plus_dm_ema = a * pdm + (1 - a) * self._plus_dm_ema
-            self._minus_dm_ema = a * mdm + (1 - a) * self._minus_dm_ema
-        if self._atr_ema and self._atr_ema > 1e-9:
-            pdi = 100.0 * (self._plus_dm_ema / self._atr_ema)
-            mdi = 100.0 * (self._minus_dm_ema / self._atr_ema)
-            denom = pdi + mdi
-            if denom > 1e-9:
-                dx = 100.0 * abs(pdi - mdi) / denom
-                if self._adx_ema is None:
-                    self._adx_ema = dx
-                else:
-                    self._adx_ema = a * dx + (1 - a) * self._adx_ema
-                self.adx = self._adx_ema
-        self._prev_price = price
-
-    def _update_rsi(self, price: float) -> None:
-        if len(self._closes) < 2:
-            return
-        prev = list(self._closes)[-2]
-        delta = price - prev
-        self._gains.append(max(delta, 0.0))
-        self._losses.append(max(-delta, 0.0))
-        if len(self._gains) < self._rsi_len:
-            return
-        avg_gain = sum(self._gains) / self._rsi_len
-        avg_loss = sum(self._losses) / self._rsi_len
-        if avg_loss < 1e-9:
-            self.rsi = 100.0
-        else:
-            rs = avg_gain / avg_loss
-            self.rsi = 100.0 - 100.0 / (1.0 + rs)
-
-    def _update_vwap(self, price: float, volume: float, timestamp: datetime) -> None:
-        session_key = timestamp.date()
-        if self._vwap_session_date != session_key:
-            self._vwap_pv_sum = 0.0
-            self._vwap_v_sum = 0.0
-            self._vwap_session_date = session_key
-        self._vwap_pv_sum += price * max(volume, 1.0)
-        self._vwap_v_sum += max(volume, 1.0)
-        if self._vwap_v_sum > 0:
-            self.vwap = self._vwap_pv_sum / self._vwap_v_sum
-
-    def _compute_donchian(self) -> None:
-        n = len(self._closes)
-        if n < self._lb:
-            return
-        window = list(self._closes)[-self._lb:]
-        self.donchian_upper = max(window)
-        self.donchian_lower = min(window)
-        self.donchian_mid = (self.donchian_upper + self.donchian_lower) / 2.0
-        self.channel_width = self.donchian_upper - self.donchian_lower
+        self._adx.update(price)
+        self.adx = self._adx.value or 0.0
+        self._rsi.update(price)
+        self.rsi = self._rsi.value
+        self._vwap_ind.update(price, max(volume, 1.0), timestamp)
+        self.vwap = self._vwap_ind.value
+        self._dc.update(price)
+        self.donchian_upper = self._dc.upper
+        self.donchian_lower = self._dc.lower
+        self.donchian_mid = self._dc.mid
+        self.channel_width = self._dc.width or 0.0
 
 
 class DonchianTrendStrengthEntry(EntryPolicy):
@@ -364,6 +224,7 @@ class DonchianTrendStrengthEntry(EntryPolicy):
         atr_sl_multi: float = 1.5,
         atr_tp_multi: float = 3.0,
         time_gate: bool = False,
+        entry_slack_atr: float = 0.0,
     ) -> None:
         self._ind = indicators
         self._lots = lots
@@ -376,6 +237,7 @@ class DonchianTrendStrengthEntry(EntryPolicy):
         self._atr_sl_multi = atr_sl_multi
         self._atr_tp_multi = atr_tp_multi
         self._time_gate = time_gate
+        self._entry_slack_atr = entry_slack_atr
 
     def should_enter(
         self,
@@ -428,7 +290,8 @@ class DonchianTrendStrengthEntry(EntryPolicy):
             "ch_width_atr": round(ind.channel_width / max(daily_atr, 1), 2),
         }
         ct = snapshot.contract_specs.contract_type
-        if uptrend and price <= ind.donchian_mid and rsi_long_ok:
+        slack = self._entry_slack_atr * daily_atr
+        if uptrend and price <= ind.donchian_mid + slack and rsi_long_ok:
             return EntryDecision(
                 lots=lots,
                 contract_type=ct,
@@ -436,7 +299,7 @@ class DonchianTrendStrengthEntry(EntryPolicy):
                 direction="long",
                 metadata=meta,
             )
-        if downtrend and price >= ind.donchian_mid and rsi_short_ok:
+        if downtrend and price >= ind.donchian_mid - slack and rsi_short_ok:
             return EntryDecision(
                 lots=lots,
                 contract_type=ct,
@@ -505,12 +368,18 @@ class DonchianTrendStrengthStop(StopPolicy):
         atr_tp_multi: float = 3.0,
         trail_atr_multi: float = 2.0,
         max_hold_bars: int = 120,
+        profit_lock_atr: float = 0.0,
+        locked_trail_ratio: float = 0.5,
+        breakeven_atr: float = 0.0,
     ) -> None:
         self._ind = indicators
         self._atr_sl_multi = atr_sl_multi
         self._atr_tp_multi = atr_tp_multi
         self._trail_atr_multi = trail_atr_multi
         self._max_hold = max_hold_bars
+        self._profit_lock_atr = profit_lock_atr
+        self._locked_trail_ratio = locked_trail_ratio
+        self._breakeven_atr = breakeven_atr
         self._locked_tp_pts: float = 0.0
         self._bar_counts: dict[str, int] = {}
 
@@ -548,16 +417,26 @@ class DonchianTrendStrengthStop(StopPolicy):
             return price
         entry = position.entry_price
         tp_pts = self._locked_tp_pts
-        if position.direction == "long":
+        is_long = position.direction == "long"
+        floating = (price - entry) if is_long else (entry - price)
+        # Adaptive trail: tighten when profit exceeds threshold
+        trail_multi = self._trail_atr_multi
+        if self._profit_lock_atr > 0 and floating > self._profit_lock_atr * daily_atr:
+            trail_multi *= self._locked_trail_ratio
+        # Breakeven floor: ratchet stop to entry when profit exceeds threshold
+        be_floor = position.stop_level
+        if self._breakeven_atr > 0 and floating > self._breakeven_atr * daily_atr:
+            be_floor = entry if is_long else entry
+        if is_long:
             if price >= entry + tp_pts:
                 return price
-            trail = price - daily_atr * self._trail_atr_multi
-            return max(trail, position.stop_level)
+            trail = price - daily_atr * trail_multi
+            return max(trail, be_floor, position.stop_level)
         else:
             if price <= entry - tp_pts:
                 return price
-            trail = price + daily_atr * self._trail_atr_multi
-            return min(trail, position.stop_level)
+            trail = price + daily_atr * trail_multi
+            return min(trail, be_floor, position.stop_level)
 
 
 def create_donchian_trend_strength_engine(
@@ -577,30 +456,34 @@ def create_donchian_trend_strength_engine(
     trail_atr_multi: float = 2.0,
     time_gate: int = 0,
     max_hold_bars: int = 120,
-    pyramid_max_levels: int = 1,
-    pyramid_trigger_atr: float = 1.0,
-    pyramid_gamma: float = 0.5,
     bar_agg: int = 15,
+    profit_lock_atr: float = 0.0,
+    locked_trail_ratio: float = 0.5,
+    breakeven_atr: float = 0.0,
+    entry_slack_atr: float = 0.0,
+    pyramid_risk_level: int = 0,
     **kwargs,
 ) -> "PositionEngine":
     from src.core.position_engine import PositionEngine
+    from src.core.types import pyramid_config_from_risk_level
 
     indicators = _Indicators(
         lookback_period=lookback_period,
         adx_len=adx_len,
         rsi_len=rsi_len,
     )
-    if pyramid_max_levels > 1:
+    pcfg = pyramid_config_from_risk_level(pyramid_risk_level, max_loss, lots)
+    if pcfg is not None:
         add_policy = DonchianTrendStrengthAdd(
             indicators=indicators,
-            max_levels=pyramid_max_levels,
-            trigger_atr=pyramid_trigger_atr,
-            gamma=pyramid_gamma,
+            max_levels=pcfg.max_levels,
+            trigger_atr=pcfg.add_trigger_atr[0] if pcfg.add_trigger_atr else 1.0,
+            gamma=pcfg.gamma or 0.5,
             base_lots=lots,
         )
     else:
         add_policy = NoAddPolicy()
-    config = EngineConfig(max_loss=max_loss)
+    config = EngineConfig(max_loss=max_loss, pyramid_risk_level=pyramid_risk_level)
     return PositionEngine(
         entry_policy=DonchianTrendStrengthEntry(
             indicators=indicators,
@@ -614,6 +497,7 @@ def create_donchian_trend_strength_engine(
             atr_sl_multi=atr_sl_multi,
             atr_tp_multi=atr_tp_multi,
             time_gate=bool(time_gate),
+            entry_slack_atr=entry_slack_atr,
         ),
         add_policy=add_policy,
         stop_policy=DonchianTrendStrengthStop(
@@ -622,6 +506,9 @@ def create_donchian_trend_strength_engine(
             atr_tp_multi=atr_tp_multi,
             trail_atr_multi=trail_atr_multi,
             max_hold_bars=max_hold_bars,
+            profit_lock_atr=profit_lock_atr,
+            locked_trail_ratio=locked_trail_ratio,
+            breakeven_atr=breakeven_atr,
         ),
         config=config,
     )
