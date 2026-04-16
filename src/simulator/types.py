@@ -56,7 +56,7 @@ class BacktestResult:
 
 @dataclass
 class OptimizerResult:
-    """Result of a strategy parameter optimization run (grid or random search)."""
+    """Result of a strategy parameter optimization run (Optuna or grid search)."""
     trials: pl.DataFrame
     best_params: dict[str, Any]
     best_is_result: BacktestResult

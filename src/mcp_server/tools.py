@@ -220,11 +220,11 @@ TOOLS: list[Tool] = [
     Tool(
         name="run_parameter_sweep",
         description=(
-            "Run grid search or random search over a parameter space. "
-            "Use when you want to find the best value for 1-2 parameters. "
+            "Run Optuna Bayesian (TPE) optimization over a parameter space. "
+            "Use when you want to find the best value for 1-3 parameters. "
             "Do NOT use for more than 3 parameters simultaneously (overfitting risk). "
-            "For grid search: provide sweep_params as {param: [val1, val2, ...]}. "
-            "For random search: provide sweep_params as {param: [min, max]} and set n_samples. "
+            "sweep_params: list of param names (bounds auto-resolved from strategy PARAM_SCHEMA), "
+            "or dict of {name: {min, max, [step], [type]}} for explicit control. "
             "Returns: ranked list of parameter combinations by the chosen metric. "
             "Default metric is sortino. "
             "NOTE: Default costs are automatically applied (0.1% slippage + instrument commission). "
@@ -251,10 +251,26 @@ TOOLS: list[Tool] = [
                     "description": "Fixed parameters not being swept",
                 },
                 "sweep_params": {
-                    "type": "object",
+                    "oneOf": [
+                        {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "List of parameter names to optimize. "
+                                "Bounds are auto-resolved from strategy PARAM_SCHEMA."
+                            ),
+                        },
+                        {
+                            "type": "object",
+                            "description": (
+                                "Dict of {name: {min, max, [step], [type]}} "
+                                "for explicit bound control."
+                            ),
+                        },
+                    ],
                     "description": (
-                        "Parameters to vary: {name: [values]} for grid, "
-                        "{name: [min, max]} for random"
+                        "Parameters to optimize. Prefer a list of names (bounds from schema). "
+                        "Use dict form only when overriding bounds."
                     ),
                 },
                 "strategy": {
@@ -266,11 +282,13 @@ TOOLS: list[Tool] = [
                     ),
                     "default": "pyramid",
                 },
-                "n_samples": {
+                "n_trials": {
                     "type": "integer",
                     "description": (
-                        "For random search: number of random samples. Omit for grid search."
+                        "Number of Optuna trials (default 100). More trials = better "
+                        "exploration but slower. 50-200 is typical."
                     ),
+                    "default": 100,
                 },
                 "metric": {
                     "type": "string",
@@ -1044,7 +1062,7 @@ def register_tools(app: Server) -> None:
                         base_params=arguments["base_params"],
                         sweep_params=arguments["sweep_params"],
                         strategy=arguments.get("strategy", "pyramid"),
-                        n_samples=arguments.get("n_samples"),
+                        n_samples=arguments.get("n_trials"),
                         metric=arguments.get("metric", "sortino"),
                         mode=arguments.get("mode", "production_intent"),
                         scenario=arguments.get("scenario", "strong_bull"),

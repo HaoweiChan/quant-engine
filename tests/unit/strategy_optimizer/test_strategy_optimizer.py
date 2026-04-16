@@ -20,7 +20,7 @@ from src.simulator.strategy_optimizer import (
     _low_trade_count_warnings,
     _validate_objective,
 )
-from src.simulator.types import BacktestResult, WindowResult
+from src.simulator.types import BacktestResult, OptimizerResult, WindowResult
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +203,7 @@ class TestComputeEfficiency:
 
 
 # ---------------------------------------------------------------------------
-# StrategyOptimizer.grid_search — structural tests (no DB)
+# StrategyOptimizer._grid_search — internal grid (structural tests, no DB)
 # ---------------------------------------------------------------------------
 
 class TestGridSearch:
@@ -215,7 +215,7 @@ class TestGridSearch:
     def test_row_count_equals_combinations(self) -> None:
         from src.strategies.short_term.mean_reversion.atr_mean_reversion import create_atr_mean_reversion_engine
         param_grid = {"max_loss": [100_000], "kc_len": [15, 20, 25]}
-        result = self.opt.grid_search(
+        result = self.opt._grid_search(
             create_atr_mean_reversion_engine, param_grid,
             self.bars, self.ts, is_fraction=1.0,
         )
@@ -225,7 +225,7 @@ class TestGridSearch:
         """Task 6.3: trials sorted descending."""
         from src.strategies.short_term.mean_reversion.atr_mean_reversion import create_atr_mean_reversion_engine
         param_grid = {"max_loss": [100_000], "kc_len": [15, 20, 25]}
-        result = self.opt.grid_search(
+        result = self.opt._grid_search(
             create_atr_mean_reversion_engine, param_grid,
             self.bars, self.ts, is_fraction=1.0,
         )
@@ -235,7 +235,7 @@ class TestGridSearch:
     def test_no_oos_result_when_is_fraction_one(self) -> None:
         from src.strategies.short_term.mean_reversion.atr_mean_reversion import create_atr_mean_reversion_engine
         param_grid = {"max_loss": [100_000], "kc_len": [20]}
-        result = self.opt.grid_search(
+        result = self.opt._grid_search(
             create_atr_mean_reversion_engine, param_grid,
             self.bars, self.ts, is_fraction=1.0,
         )
@@ -244,7 +244,7 @@ class TestGridSearch:
     def test_oos_result_present_when_split(self) -> None:
         from src.strategies.short_term.mean_reversion.atr_mean_reversion import create_atr_mean_reversion_engine
         param_grid = {"max_loss": [100_000], "kc_len": [20]}
-        result = self.opt.grid_search(
+        result = self.opt._grid_search(
             create_atr_mean_reversion_engine, param_grid,
             self.bars, self.ts, is_fraction=0.8,
         )
@@ -253,19 +253,17 @@ class TestGridSearch:
     def test_is_oos_bar_counts(self) -> None:
         from src.strategies.short_term.mean_reversion.atr_mean_reversion import create_atr_mean_reversion_engine
         param_grid = {"max_loss": [100_000], "kc_len": [20]}
-        result = self.opt.grid_search(
+        result = self.opt._grid_search(
             create_atr_mean_reversion_engine, param_grid,
             self.bars, self.ts, is_fraction=0.8,
         )
-        # IS has 80% of 200 = 160 bars, OOS has 40 bars
-        # equity curve length = n_bars + 1
         assert len(result.best_is_result.equity_curve) == 161
         assert len(result.best_oos_result.equity_curve) == 41  # type: ignore[union-attr]
 
     def test_bad_objective_raises(self) -> None:
         from src.strategies.short_term.mean_reversion.atr_mean_reversion import create_atr_mean_reversion_engine
         with pytest.raises(ValueError, match="nonexistent_metric"):
-            self.opt.grid_search(
+            self.opt._grid_search(
                 create_atr_mean_reversion_engine,
                 {"max_loss": [100_000], "kc_len": [20]},
                 self.bars, self.ts,
@@ -275,11 +273,73 @@ class TestGridSearch:
     def test_lambda_factory_with_njobs_raises(self) -> None:
         parallel_opt = StrategyOptimizer(adapter=self.adapter, n_jobs=2)
         with pytest.raises(ValueError, match="lambda"):
-            parallel_opt.grid_search(
+            parallel_opt._grid_search(
                 lambda **kw: None,  # type: ignore[return-value, arg-type]
                 {"max_loss": [100_000]},
                 self.bars, self.ts,
             )
+
+
+# ---------------------------------------------------------------------------
+# StrategyOptimizer.optuna_search — Bayesian optimization tests
+# ---------------------------------------------------------------------------
+
+class TestOptunaSearch:
+    def setup_method(self) -> None:
+        self.bars, self.ts = _make_bars(200)
+        self.adapter = _make_mock_adapter()
+        self.opt = StrategyOptimizer(adapter=self.adapter, n_jobs=1)
+
+    def test_returns_optimizer_result(self) -> None:
+        from src.strategies.short_term.mean_reversion.atr_mean_reversion import create_atr_mean_reversion_engine
+        param_defs = {
+            "kc_len": {"type": "int", "min": 10, "max": 30, "step": 5},
+        }
+        result = self.opt.optuna_search(
+            create_atr_mean_reversion_engine, param_defs,
+            self.bars, self.ts,
+            base_params={"max_loss": 100_000},
+            n_trials=5, is_fraction=1.0, seed=42,
+        )
+        assert isinstance(result, OptimizerResult)
+        assert "kc_len" in result.best_params
+        assert result.trials.shape[0] == 5
+
+    def test_respects_param_bounds(self) -> None:
+        from src.strategies.short_term.mean_reversion.atr_mean_reversion import create_atr_mean_reversion_engine
+        param_defs = {
+            "kc_len": {"type": "int", "min": 15, "max": 25},
+        }
+        result = self.opt.optuna_search(
+            create_atr_mean_reversion_engine, param_defs,
+            self.bars, self.ts,
+            base_params={"max_loss": 100_000},
+            n_trials=10, is_fraction=1.0, seed=42,
+        )
+        kc_values = result.trials["kc_len"].to_list()
+        assert all(15 <= v <= 25 for v in kc_values)
+
+    def test_no_oos_when_is_fraction_one(self) -> None:
+        from src.strategies.short_term.mean_reversion.atr_mean_reversion import create_atr_mean_reversion_engine
+        param_defs = {"kc_len": {"type": "int", "min": 15, "max": 25}}
+        result = self.opt.optuna_search(
+            create_atr_mean_reversion_engine, param_defs,
+            self.bars, self.ts,
+            base_params={"max_loss": 100_000},
+            n_trials=3, is_fraction=1.0, seed=42,
+        )
+        assert result.best_oos_result is None
+
+    def test_oos_present_when_split(self) -> None:
+        from src.strategies.short_term.mean_reversion.atr_mean_reversion import create_atr_mean_reversion_engine
+        param_defs = {"kc_len": {"type": "int", "min": 15, "max": 25}}
+        result = self.opt.optuna_search(
+            create_atr_mean_reversion_engine, param_defs,
+            self.bars, self.ts,
+            base_params={"max_loss": 100_000},
+            n_trials=3, is_fraction=0.8, seed=42,
+        )
+        assert result.best_oos_result is not None
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +351,8 @@ class TestWalkForward:
         self.bars, self.ts = _make_bars(500)
         self.adapter = _make_mock_adapter()
         self.opt = StrategyOptimizer(adapter=self.adapter, n_jobs=1)
+        self.param_defs = {"kc_len": {"type": "int", "min": 15, "max": 25}}
+        self.base_params = {"max_loss": 100_000}
 
     def test_window_count_formula(self) -> None:
         """(total_bars - train_bars) // test_bars"""
@@ -298,9 +360,9 @@ class TestWalkForward:
         train, test = 200, 50
         result = self.opt.walk_forward(
             create_atr_mean_reversion_engine,
-            {"max_loss": [100_000], "kc_len": [20]},
-            self.bars, self.ts,
+            self.param_defs, self.bars, self.ts,
             train_bars=train, test_bars=test,
+            base_params=self.base_params, n_trials=3, seed=42,
         )
         expected = (500 - train) // test
         assert len(result.windows) == expected
@@ -310,9 +372,9 @@ class TestWalkForward:
         with pytest.raises(ValueError, match="exceeds total bars"):
             self.opt.walk_forward(
                 create_atr_mean_reversion_engine,
-                {"max_loss": [100_000], "kc_len": [20]},
-                self.bars[:100], self.ts[:100],
+                self.param_defs, self.bars[:100], self.ts[:100],
                 train_bars=80, test_bars=50,
+                base_params=self.base_params, n_trials=3, seed=42,
             )
 
     def test_no_bar_overlap_between_is_and_oos(self) -> None:
@@ -320,9 +382,9 @@ class TestWalkForward:
         train, test = 200, 50
         result = self.opt.walk_forward(
             create_atr_mean_reversion_engine,
-            {"max_loss": [100_000], "kc_len": [20]},
-            self.bars, self.ts,
+            self.param_defs, self.bars, self.ts,
             train_bars=train, test_bars=test,
+            base_params=self.base_params, n_trials=3, seed=42,
         )
         for w in result.windows:
             assert w.is_bars == train
@@ -332,9 +394,9 @@ class TestWalkForward:
         from src.strategies.short_term.mean_reversion.atr_mean_reversion import create_atr_mean_reversion_engine
         result = self.opt.walk_forward(
             create_atr_mean_reversion_engine,
-            {"max_loss": [100_000], "kc_len": [20]},
-            self.bars, self.ts,
+            self.param_defs, self.bars, self.ts,
             train_bars=200, test_bars=50,
+            base_params=self.base_params, n_trials=3, seed=42,
         )
         assert isinstance(result.efficiency, float)
         assert not math.isnan(result.efficiency)

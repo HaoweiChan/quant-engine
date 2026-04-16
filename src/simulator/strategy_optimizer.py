@@ -1,13 +1,13 @@
 """Generic strategy parameter optimizer.
 
 Accepts any `engine_factory(**kwargs) -> PositionEngine` callable and a
-`param_grid` dict, runs real OHLCV backtests for every combination, and
-returns ranked results with full per-trial metrics.
+param definition dict, runs real OHLCV backtests, and returns ranked
+results with full per-trial metrics.
 
 Supports:
-- grid_search   — exhaustive combination sweep with optional IS/OOS split
-- walk_forward  — rolling IS+OOS windows with efficiency scoring
-- random_search — random sampling from continuous param bounds
+- optuna_search — Bayesian (TPE) optimization via Optuna (primary API)
+- walk_forward  — rolling IS+OOS windows with Optuna on each IS phase
+- _grid_search  — exhaustive grid sweep (internal, used by sensitivity check)
 
 For parallel execution (n_jobs > 1), engine_factory MUST be either a
 module-level function or a picklable callable class (not a lambda or closure).
@@ -17,8 +17,10 @@ from __future__ import annotations
 import inspect
 import importlib
 import itertools
+import logging
 
 import numpy as np
+import optuna
 import polars as pl
 
 from datetime import datetime
@@ -39,6 +41,8 @@ from src.simulator.types import (
     WalkForwardResult,
     WindowResult,
 )
+
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 _LOW_TRADE_THRESHOLD = 30
 _OBJECTIVE_DIRECTIONS: dict[str, str] = {
@@ -198,40 +202,40 @@ class StrategyOptimizer:
 
     # -- Public API --
 
-    def grid_search(
+    def optuna_search(
         self,
         engine_factory: Callable[..., PositionEngine],
-        param_grid: dict[str, list[Any]],
+        param_defs: dict[str, dict],
         bars: list[dict[str, Any]],
         timestamps: list[datetime],
+        base_params: dict[str, Any] | None = None,
+        n_trials: int = 100,
+        timeout: float | None = None,
         objective: str = "sortino",
         is_fraction: float = 0.8,
+        seed: int | None = None,
         force_flat_indices: set[int] | None = None,
     ) -> OptimizerResult:
-        """Exhaustive grid search across all param combinations.
+        """Bayesian optimization via Optuna TPE sampler.
 
         Args:
             engine_factory: Module-level callable `(**params) -> PositionEngine`.
-            param_grid:     Dict of param_name → list of candidate values.
+            param_defs:     Dict of param_name → {type, min, max, [step]}.
+                            Only these params are optimized; others come from base_params.
             bars:           OHLCV bar dicts for the full period.
             timestamps:     Matching timestamps for each bar.
-            objective:      Metric name to optimize (must appear in BacktestResult.metrics).
-            is_fraction:    Fraction of bars used as in-sample. Remainder is OOS.
+            base_params:    Fixed params merged into every trial.
+            n_trials:       Number of Optuna trials.
+            timeout:        Max seconds for the study (None = unlimited).
+            objective:      Metric name to optimize.
+            is_fraction:    Fraction of bars used as in-sample.
+            seed:           RNG seed for reproducibility.
         """
-        if self._n_jobs > 1:
-            _check_pickle_safety(engine_factory)
-
-        combos = list(itertools.product(*param_grid.values()))
-        keys = list(param_grid.keys())
-        param_list = [dict(zip(keys, c)) for c in combos]
-
         is_end = int(len(bars) * is_fraction)
         is_bars = bars[:is_end]
         is_ts = timestamps[:is_end]
         oos_bars = bars[is_end:] if is_fraction < 1.0 else []
         oos_ts = timestamps[is_end:] if is_fraction < 1.0 else []
-
-        # Remap force_flat_indices to IS/OOS slices
         is_ffi = (
             {idx for idx in force_flat_indices if idx < is_end} if force_flat_indices else None
         )
@@ -239,38 +243,61 @@ class StrategyOptimizer:
             {idx - is_end for idx in force_flat_indices if idx >= is_end} if force_flat_indices and oos_bars else None
         )
 
-        rows = self._dispatch(engine_factory, param_list, is_bars, is_ts, force_flat_indices=is_ffi)
+        fixed = dict(base_params) if base_params else {}
+        direction = _objective_direction(objective)
+        sampler = optuna.samplers.TPESampler(seed=seed)
+        study = optuna.create_study(
+            direction=direction,
+            sampler=sampler,
+        )
 
-        # Validate objective; skip error rows from parallel failures
-        if rows:
-            _validate_objective(objective, rows)
+        all_rows: list[dict[str, Any]] = []
+        keys = sorted(param_defs.keys())
 
-        objective_direction = _objective_direction(objective)
-        descending = objective_direction == "maximize"
-        (
-            df,
-            disqualified_trials,
-            gate_details,
-            warnings,
-        ) = self._rank_trials(
-            rows=rows,
-            param_keys=keys,
-            objective=objective,
-            descending=descending,
+        def _objective(trial: optuna.Trial) -> float:
+            params = dict(fixed)
+            for name in keys:
+                spec = param_defs[name]
+                lo, hi = spec["min"], spec["max"]
+                step = spec.get("step")
+                if spec.get("type") == "int":
+                    params[name] = trial.suggest_int(name, int(lo), int(hi), step=int(step) if step else 1)
+                else:
+                    params[name] = trial.suggest_float(name, float(lo), float(hi), step=float(step) if step else None)
+            result = self._run_backtest(engine_factory, params, is_bars, is_ts, force_flat_indices=is_ffi)
+            row: dict[str, Any] = dict(params)
+            row.update(result.metrics)
+            row["_trade_count"] = int(result.metrics.get("trade_count", 0.0))
+            all_rows.append(row)
+            val = float(result.metrics.get(objective, 0.0))
+            trade_count = int(result.metrics.get("trade_count", 0.0))
+            if trade_count < self._min_trade_count:
+                if direction == "maximize":
+                    return -1e6
+                return 1e6
+            return val
+
+        study.optimize(_objective, n_trials=n_trials, timeout=timeout)
+
+        if not all_rows:
+            raise ValueError("Optuna study produced no trials")
+        _validate_objective(objective, all_rows)
+
+        descending = direction == "maximize"
+        df, disqualified_trials, gate_details, warnings = self._rank_trials(
+            rows=all_rows, param_keys=keys, objective=objective, descending=descending,
         )
         best_params = {k: df[k][0] for k in keys}
+        best_params.update(fixed)
 
         best_is = self._run_backtest(engine_factory, best_params, is_bars, is_ts, force_flat_indices=is_ffi)
         best_oos = (
             self._run_backtest(engine_factory, best_params, oos_bars, oos_ts, force_flat_indices=oos_ffi)
             if oos_bars else None
         )
-
         gate_results = self._build_gate_results(
-            best_is_result=best_is,
-            best_oos_result=best_oos,
-            objective=objective,
-            objective_direction=objective_direction,
+            best_is_result=best_is, best_oos_result=best_oos,
+            objective=objective, objective_direction=direction,
         )
         promotable = self._mode == "production_intent" and all(gate_results.values())
 
@@ -281,7 +308,7 @@ class StrategyOptimizer:
             best_oos_result=best_oos,
             warnings=warnings,
             objective_name=objective,
-            objective_direction=objective_direction,
+            objective_direction=direction,
             disqualified_trials=disqualified_trials,
             gate_results=gate_results,
             gate_details=gate_details,
@@ -292,19 +319,25 @@ class StrategyOptimizer:
     def walk_forward(
         self,
         engine_factory: Callable[..., PositionEngine],
-        param_grid: dict[str, list[Any]],
+        param_defs: dict[str, dict],
         bars: list[dict[str, Any]],
         timestamps: list[datetime],
         train_bars: int,
         test_bars: int,
+        base_params: dict[str, Any] | None = None,
+        n_trials: int = 100,
         objective: str = "sortino",
+        seed: int | None = None,
         force_flat_indices: set[int] | None = None,
     ) -> WalkForwardResult:
-        """Rolling walk-forward: optimize on IS, verify on OOS, compute efficiency.
+        """Rolling walk-forward: Optuna on IS, verify on OOS, compute efficiency.
 
         Args:
-            train_bars: Number of bars in each IS (training) window.
-            test_bars:  Number of bars in each OOS (test) window.
+            param_defs:  Dict of param_name → {type, min, max, [step]} to optimize.
+            train_bars:  Number of bars in each IS (training) window.
+            test_bars:   Number of bars in each OOS (test) window.
+            base_params: Fixed params merged into every trial.
+            n_trials:    Optuna trials per IS window.
         """
         if train_bars + test_bars > len(bars):
             raise ValueError(
@@ -325,7 +358,6 @@ class StrategyOptimizer:
             w_oos_bars = bars[is_end:oos_end]
             w_oos_ts = timestamps[is_end:oos_end]
 
-            # Remap absolute force_flat_indices to window-local indices
             w_is_ffi = (
                 {idx - is_start for idx in force_flat_indices if is_start <= idx < is_end}
                 if force_flat_indices else None
@@ -335,10 +367,12 @@ class StrategyOptimizer:
                 if force_flat_indices else None
             )
 
-            # Optimize on IS
-            is_opt = self.grid_search(
-                engine_factory, param_grid, w_is_bars, w_is_ts,
-                objective=objective, is_fraction=1.0, force_flat_indices=w_is_ffi,
+            is_opt = self.optuna_search(
+                engine_factory, param_defs, w_is_bars, w_is_ts,
+                base_params=base_params, n_trials=n_trials,
+                objective=objective, is_fraction=1.0,
+                seed=(seed + w) if seed is not None else None,
+                force_flat_indices=w_is_ffi,
             )
             best = is_opt.best_params
             is_trades = int(is_opt.best_is_result.metrics.get("trade_count", 0.0))
@@ -363,46 +397,31 @@ class StrategyOptimizer:
             combined_oos_metrics=combined,
         )
 
-    def random_search(
+    # -- Internal grid search (used by sensitivity check only) --
+
+    def _grid_search(
         self,
         engine_factory: Callable[..., PositionEngine],
-        param_bounds: dict[str, tuple[float, float]],
+        param_grid: dict[str, list[Any]],
         bars: list[dict[str, Any]],
         timestamps: list[datetime],
-        n_trials: int = 50,
         objective: str = "sortino",
         is_fraction: float = 0.8,
-        seed: int | None = None,
         force_flat_indices: set[int] | None = None,
     ) -> OptimizerResult:
-        """Random search over continuous param bounds.
+        """Exhaustive grid search — internal only, used by param_sensitivity."""
+        if self._n_jobs > 1:
+            _check_pickle_safety(engine_factory)
 
-        Args:
-            param_bounds: Dict of param_name → (min_value, max_value).
-            n_trials:     Number of random samples to evaluate.
-            seed:         RNG seed for reproducibility.
-        """
-        rng = np.random.default_rng(seed)
-        param_grid: dict[str, list[Any]] = {}
-        for name, (lo, hi) in param_bounds.items():
-            # Sample uniformly in [lo, hi]
-            samples = rng.uniform(lo, hi, n_trials).tolist()
-            param_grid[name] = samples
-
-        # Build n_trials individual param dicts (not full cartesian product)
-        keys = list(param_bounds.keys())
-        param_list = [
-            {k: param_grid[k][i] for k in keys}
-            for i in range(n_trials)
-        ]
+        combos = list(itertools.product(*param_grid.values()))
+        keys = list(param_grid.keys())
+        param_list = [dict(zip(keys, c)) for c in combos]
 
         is_end = int(len(bars) * is_fraction)
         is_bars = bars[:is_end]
         is_ts = timestamps[:is_end]
         oos_bars = bars[is_end:] if is_fraction < 1.0 else []
         oos_ts = timestamps[is_end:] if is_fraction < 1.0 else []
-
-        # Remap force_flat_indices to IS/OOS slices
         is_ffi = (
             {idx for idx in force_flat_indices if idx < is_end} if force_flat_indices else None
         )
@@ -411,22 +430,13 @@ class StrategyOptimizer:
         )
 
         rows = self._dispatch(engine_factory, param_list, is_bars, is_ts, force_flat_indices=is_ffi)
-
         if rows:
             _validate_objective(objective, rows)
 
         objective_direction = _objective_direction(objective)
         descending = objective_direction == "maximize"
-        (
-            df,
-            disqualified_trials,
-            gate_details,
-            warnings,
-        ) = self._rank_trials(
-            rows=rows,
-            param_keys=keys,
-            objective=objective,
-            descending=descending,
+        df, disqualified_trials, gate_details, warnings = self._rank_trials(
+            rows=rows, param_keys=keys, objective=objective, descending=descending,
         )
         best_params = {k: df[k][0] for k in keys}
 
@@ -435,12 +445,9 @@ class StrategyOptimizer:
             self._run_backtest(engine_factory, best_params, oos_bars, oos_ts, force_flat_indices=oos_ffi)
             if oos_bars else None
         )
-
         gate_results = self._build_gate_results(
-            best_is_result=best_is,
-            best_oos_result=best_oos,
-            objective=objective,
-            objective_direction=objective_direction,
+            best_is_result=best_is, best_oos_result=best_oos,
+            objective=objective, objective_direction=objective_direction,
         )
         promotable = self._mode == "production_intent" and all(gate_results.values())
 

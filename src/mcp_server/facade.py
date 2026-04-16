@@ -1321,7 +1321,7 @@ def run_sweep_for_mcp(
     base_params: dict[str, Any],
     sweep_params: dict[str, Any],
     strategy: str = "pyramid",
-    n_samples: int | None = None,
+    n_samples: int | None = None,  # kept for backward compat; prefer n_trials
     metric: str = "sortino",
     mode: str = "production_intent",
     scenario: str = "strong_bull",
@@ -1338,7 +1338,7 @@ def run_sweep_for_mcp(
     timeframe: str = "daily",
     require_real_data: bool = True,
 ) -> dict[str, Any]:
-    """Run parameter sweep (grid or random search).
+    """Run Optuna Bayesian (TPE) parameter optimization.
 
     min_trade_count: When None (default), auto-resolved from strategy's
         holding_period and current optimization level.
@@ -1476,63 +1476,80 @@ def run_sweep_for_mcp(
     )
     walk_forward_summary: dict[str, Any] | None = None
 
-    if n_samples is not None:
-        # Random search with continuous bounds
-        param_bounds = {}
-        for k, v in sweep_params.items():
-            if isinstance(v, (list, tuple)) and len(v) == 2:
-                param_bounds[k] = (float(v[0]), float(v[1]))
+    # Build param_defs from PARAM_SCHEMA for Optuna optimization.
+    # sweep_params can be:
+    #   - list of param names (bounds from schema)
+    #   - dict of param_name → value list (legacy grid: auto-infer bounds)
+    #   - dict of param_name → {min, max, ...} (explicit bounds)
+    schema = get_strategy_parameter_schema(resolved_slug)
+    schema_params = schema.get("parameters", {})
+
+    param_defs: dict[str, dict] = {}
+    if isinstance(sweep_params, list):
+        for name in sweep_params:
+            spec = schema_params.get(name, {})
+            if "min" not in spec or "max" not in spec:
+                return {"error": f"Param '{name}' has no min/max in schema — cannot optimize"}
+            param_defs[name] = {
+                "type": spec.get("type", "float"),
+                "min": spec["min"],
+                "max": spec["max"],
+                "step": spec.get("step"),
+            }
+    elif isinstance(sweep_params, dict):
+        for name, v in sweep_params.items():
+            if isinstance(v, dict) and "min" in v and "max" in v:
+                param_defs[name] = v
+            elif isinstance(v, (list, tuple)):
+                lo, hi = float(min(v)), float(max(v))
+                spec = schema_params.get(name, {})
+                param_defs[name] = {
+                    "type": spec.get("type", "float"),
+                    "min": lo,
+                    "max": hi,
+                    "step": spec.get("step"),
+                }
             else:
-                return {"error": f"For random search, sweep_params['{k}'] must be [min, max]"}
-        result = optimizer.random_search(
-            engine_factory=_PicklableEngineFactory(factory, clamped_base),
-            param_bounds=param_bounds,
-            bars=bars,
-            timestamps=timestamps,
-            n_trials=n_samples,
-            objective=metric,
-            is_fraction=is_fraction,
-            force_flat_indices=sweep_force_flat,
-        )
-    else:
-        # Grid search
-        param_grid = {}
-        for k, v in sweep_params.items():
-            if isinstance(v, list):
-                param_grid[k] = v
-            else:
-                return {"error": f"For grid search, sweep_params['{k}'] must be a list of values"}
-        if mode == "production_intent":
-            effective_train = train_bars or max(int(len(bars) * 0.6), 50)
-            effective_test = test_bars or max(int(len(bars) * 0.2), 20)
-            if effective_train + effective_test <= len(bars):
-                try:
-                    wf = optimizer.walk_forward(
-                        engine_factory=_PicklableEngineFactory(factory, clamped_base),
-                        param_grid=param_grid,
-                        bars=bars,
-                        timestamps=timestamps,
-                        train_bars=effective_train,
-                        test_bars=effective_test,
-                        objective=metric,
-                        force_flat_indices=sweep_force_flat,
-                    )
-                    walk_forward_summary = {
-                        "windows": len(wf.windows),
-                        "efficiency": wf.efficiency,
-                        "combined_oos_metrics": wf.combined_oos_metrics,
-                    }
-                except ValueError as _wf_err:
-                    walk_forward_summary = {"error": str(_wf_err)}
-        result = optimizer.grid_search(
-            engine_factory=_PicklableEngineFactory(factory, clamped_base),
-            param_grid=param_grid,
-            bars=bars,
-            timestamps=timestamps,
-            objective=metric,
-            is_fraction=is_fraction,
-            force_flat_indices=sweep_force_flat,
-        )
+                return {"error": f"sweep_params['{name}'] must be a list, bounds dict, or param name list"}
+
+    effective_n_trials = n_samples or 100
+
+    if mode == "production_intent":
+        effective_train = train_bars or max(int(len(bars) * 0.6), 50)
+        effective_test = test_bars or max(int(len(bars) * 0.2), 20)
+        if effective_train + effective_test <= len(bars):
+            try:
+                wf = optimizer.walk_forward(
+                    engine_factory=_PicklableEngineFactory(factory, clamped_base),
+                    param_defs=param_defs,
+                    bars=bars,
+                    timestamps=timestamps,
+                    train_bars=effective_train,
+                    test_bars=effective_test,
+                    base_params=clamped_base,
+                    n_trials=effective_n_trials,
+                    objective=metric,
+                    force_flat_indices=sweep_force_flat,
+                )
+                walk_forward_summary = {
+                    "windows": len(wf.windows),
+                    "efficiency": wf.efficiency,
+                    "combined_oos_metrics": wf.combined_oos_metrics,
+                }
+            except ValueError as _wf_err:
+                walk_forward_summary = {"error": str(_wf_err)}
+
+    result = optimizer.optuna_search(
+        engine_factory=_PicklableEngineFactory(factory, clamped_base),
+        param_defs=param_defs,
+        bars=bars,
+        timestamps=timestamps,
+        base_params=clamped_base,
+        n_trials=effective_n_trials,
+        objective=metric,
+        is_fraction=is_fraction,
+        force_flat_indices=sweep_force_flat,
+    )
 
     # Only materialize top 5 trials — avoids converting the full DataFrame to
     # a list of dicts (which can be hundreds of rows for large sweeps).
@@ -1546,7 +1563,7 @@ def run_sweep_for_mcp(
         from src.strategies.param_registry import ParamRegistry
 
         registry = ParamRegistry()
-        search = "random" if n_samples is not None else "grid"
+        search = "optuna"
         # Build notes with cost + timeframe info (matches run_backtest_realdata format)
         _is_intra = timeframe in ("intraday", "1m")
         _sweep_tf_str = f"{sweep_bar_agg}min{'|intraday' if _is_intra else ''}" if mode == "production_intent" and symbol else None
@@ -2107,7 +2124,7 @@ def run_sensitivity_check_for_mcp(
 
     # Step 1: Get parameter schema and active/provided best params
     schema = get_strategy_parameter_schema(resolved_slug)
-    param_defs = schema.get("PARAM_SCHEMA", {})
+    param_defs = schema.get("parameters", {})
 
     if best_params is None:
         active = get_active_params_for_mcp(strategy=resolved_slug)

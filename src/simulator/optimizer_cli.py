@@ -156,7 +156,7 @@ def _run_optimizer(cfg: dict) -> tuple[dict, "OptimizerResult"]:
         min_expectancy=min_expectancy,
         min_oos_objective=min_oos_objective,
     )
-    result = opt.grid_search(
+    result = opt._grid_search(
         engine_factory,
         param_grid,
         bars,
