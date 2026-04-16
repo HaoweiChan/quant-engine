@@ -223,6 +223,48 @@ class AddDecision:
             raise ValueError("lots must be positive")
 
 
+class RiskLevel(Enum):
+    """Account-level pyramid aggressiveness. Set once in account setup."""
+    NONE = 0
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+
+
+_RISK_LEVEL_PRESETS: dict[int, dict] = {
+    0: {},
+    1: {"max_levels": 2, "gamma": 0.5, "trigger_atr_base": 2.0},
+    2: {"max_levels": 3, "gamma": 0.6, "trigger_atr_base": 1.5},
+    3: {"max_levels": 4, "gamma": 0.7, "trigger_atr_base": 1.0},
+}
+
+
+def pyramid_config_from_risk_level(
+    level: int,
+    max_loss: float,
+    base_lots: float = 1.0,
+    atr_key: str = "entry_tf",
+) -> PyramidConfig | None:
+    """Derive a PyramidConfig from an account risk level (0-3).
+    Returns None for level 0 (no pyramiding).
+    """
+    preset = _RISK_LEVEL_PRESETS.get(level)
+    if not preset:
+        return None
+    max_levels = preset["max_levels"]
+    trigger_base = preset["trigger_atr_base"]
+    triggers = [trigger_base * (i + 1) for i in range(max_levels - 1)]
+    return PyramidConfig(
+        max_loss=max_loss,
+        max_levels=max_levels,
+        add_trigger_atr=triggers,
+        atr_key=atr_key,
+        gamma=preset["gamma"],
+        base_lots=base_lots,
+        internal_atr_len=10,
+    )
+
+
 @dataclass
 class EngineConfig:
     max_loss: float
@@ -232,6 +274,7 @@ class EngineConfig:
     disaster_stop_enabled: bool = False
     require_account_for_entry: bool = False
     min_hold_lots: float = 0.0
+    pyramid_risk_level: int = 0
 
     def __post_init__(self) -> None:
         if self.max_loss <= 0:
@@ -240,6 +283,8 @@ class EngineConfig:
             raise ValueError("margin_limit must be in (0.0, 1.0]")
         if self.disaster_atr_mult <= 0:
             raise ValueError("disaster_atr_mult must be positive")
+        if self.pyramid_risk_level not in _RISK_LEVEL_PRESETS:
+            raise ValueError(f"pyramid_risk_level must be 0-3, got {self.pyramid_risk_level}")
 
 
 class RiskAction(Enum):
