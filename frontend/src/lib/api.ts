@@ -619,3 +619,46 @@ export async function runPortfolioStress(params: {
     body: JSON.stringify(params),
   });
 }
+
+/** A saved portfolio allocation from portfolio_opt.db */
+export interface SavedPortfolio {
+  id: number;
+  run_id: number;
+  objective: "max_sharpe" | "max_return" | "min_drawdown" | "risk_parity" | "equal_weight";
+  weights: Record<string, number>;
+  sharpe: number | null;
+  total_return: number | null;
+  annual_return: number | null;
+  max_drawdown_pct: number | null;
+  is_selected: boolean;
+  symbol: string;
+  start_date: string;
+  end_date: string;
+  strategy_slugs: string[];
+  n_strategies: number;
+  run_at: string;
+}
+
+export interface SavedPortfoliosResponse {
+  portfolios: SavedPortfolio[];
+  error?: string;
+}
+
+export async function fetchSavedPortfolios(symbol?: string): Promise<SavedPortfoliosResponse> {
+  const params = new URLSearchParams();
+  if (symbol) params.set("symbol", symbol);
+  const url = params.toString() ? `/api/portfolio/saved?${params}` : "/api/portfolio/saved";
+  return fetchJSON(url);
+}
+
+export async function configureTelegram(botToken: string, chatId: string): Promise<{ status: string; message: string }> {
+  return fetchJSON("/api/paper-trade/configure-telegram", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bot_token: botToken, chat_id: chatId }),
+  });
+}
+
+export async function testTelegram(): Promise<{ status: string; message: string }> {
+  return fetchJSON("/api/paper-trade/test-telegram", { method: "POST" });
+}

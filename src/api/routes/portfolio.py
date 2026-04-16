@@ -104,10 +104,22 @@ async def run_portfolio_backtest(req: PortfolioBacktestRequest) -> dict:
             strategy_slug=entry.slug,
             weight=entry.weight,
         ))
+        metrics = dict(bt.get("metrics", {}))
+        dr_arr = np.asarray(dr, dtype=np.float64)
+        n_days = len(dr_arr)
+        if n_days > 0:
+            total_ret = float(np.prod(1 + dr_arr) - 1)
+            annual_factor = 252 / n_days if n_days > 0 else 1
+            annual_vol = float(np.std(dr_arr) * np.sqrt(252))
+            annual_ret = float((1 + total_ret) ** annual_factor - 1)
+            metrics.setdefault("total_return", total_ret)
+            metrics.setdefault("annual_return", annual_ret)
+            metrics.setdefault("annual_vol", annual_vol)
+            metrics.setdefault("n_days", n_days)
         individual_summaries.append({
             "slug": entry.slug,
             "weight": entry.weight,
-            "metrics": bt.get("metrics", {}),
+            "metrics": metrics,
             "equity_curve": bt.get("equity_curve", []),
         })
 
@@ -270,3 +282,46 @@ async def run_portfolio_optimize(req: PortfolioOptimizeRequest) -> dict:
         max_sharpe=result.max_sharpe.sharpe,
     )
     return output
+
+
+@router.get("/saved")
+async def list_saved_portfolios(symbol: str | None = None, limit: int = 10) -> dict:
+    """List saved portfolio optimization runs with their allocations.
+
+    Returns flattened allocation entries for easy dropdown population.
+    Each entry includes run metadata and allocation details.
+    """
+    from src.core.portfolio_store import PortfolioStore
+
+    try:
+        store = PortfolioStore()
+        runs = store.list_runs(symbol=symbol, limit=limit)
+        store.close()
+    except Exception as exc:
+        logger.warning("portfolio_list_failed", error=str(exc))
+        return {"portfolios": [], "error": str(exc)}
+
+    # Flatten into allocation-centric entries for frontend dropdown
+    portfolios: list[dict] = []
+    for run in runs:
+        for obj_key, alloc in run.get("allocations", {}).items():
+            portfolios.append({
+                "id": alloc["id"],
+                "run_id": run["id"],
+                "objective": alloc["objective"],
+                "weights": alloc["weights"],
+                "sharpe": alloc.get("sharpe"),
+                "total_return": alloc.get("total_return"),
+                "annual_return": alloc.get("annual_return"),
+                "max_drawdown_pct": alloc.get("max_drawdown_pct"),
+                "is_selected": bool(alloc.get("is_selected")),
+                "symbol": run["symbol"],
+                "start_date": run["start_date"],
+                "end_date": run["end_date"],
+                "strategy_slugs": run["strategy_slugs"],
+                "n_strategies": run["n_strategies"],
+                "run_at": run["run_at"],
+            })
+
+    logger.info("portfolio_list_returned", count=len(portfolios))
+    return {"portfolios": portfolios}
