@@ -1,22 +1,16 @@
-# Vol-Managed B&H — optimized 2026-04-11
+# Vol-Managed B&H — refactored 2026-04-16
+# Pure signal emitter — contract sizing handled by PortfolioSizer via
+# exposure_multiplier metadata. Only the 5 signal params live here.
 # Shared params for TX and MTX (single param set, both instruments validated)
-# Validated: real TX 2024-06-01–2026-04-10  Sharpe=1.67  alpha=1.06  MDD=34.7%
-# Validated: real MTX 2024-06-01–2026-04-10 Sharpe=1.62  alpha=1.12  MDD=40.3%
-# B&H Sortino baseline: TX=1.24, MTX=1.26 — strategy exceeds on both
-# Sensitivity: PASSED (max_degradation=0%, no cliffs)
-# MC strong_bull P50 Sharpe=1.08  sideways P50=2.93  gradual_bull P50=0.55
-# Bear/crash MDD gates structural (B&H base lot = permanent hold)
+# Previously validated: real TX 2024-06-01–2026-04-10 Sharpe=1.67 alpha=1.06 MDD=34.7%
+# Previously validated: real MTX 2024-06-01–2026-04-10 Sharpe=1.62 alpha=1.12 MDD=40.3%
 
 [params]
-vol_lookback_days     = 10     # 10-day realized vol — more reactive, better timing
-vol_target_annual     = 0.20   # 20% vol target — larger overlay in calm bull periods
-vol_overlay_max_lots  = 2.0    # max overlay multiplier (scales with base_lots per instrument)
-trend_sma_days        = 20     # 20-day SMA gate — minimum clamp, essentially always above trend in bull
-dd_breaker_pct        = 0.15   # exit overlay when DD >= 15% AND below SMA
-dd_reentry_pct        = 0.05   # re-enter overlay when DD recovers to 5%
-boost_sma_fast_days   = 0      # golden-cross boost disabled
-boost_lots            = 0.0    # boost lots disabled
-stop_atr_mult         = 15.0   # wide nominal stop (base lot protected by min_hold_lots)
+vol_lookback_days = 10    # 10-day realized vol — more reactive, better timing
+trend_sma_days    = 20    # 20-day SMA gate — trend filter
+dd_breaker_pct    = 0.15  # exit overlay when DD >= 15% AND below SMA
+dd_reentry_pct    = 0.05  # re-enter overlay when DD recovers to 5%
+vol_target_annual = 0.20  # 20% vol target for overlay sizing
 
 [optimization]
 level       = 1

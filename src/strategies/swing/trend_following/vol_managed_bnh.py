@@ -1,21 +1,21 @@
-"""Volatility-Managed Buy-and-Hold — Inverse-Vol Overlay + DD Circuit Breaker.
+"""Vol-Managed B&H — Pure Signal Emitter.
 
-Architecture (Moreira & Muir 2017 + Faber TAA):
-  - Base lot (pyramid_level=0) held permanently -> tracks B&H exactly.
-  - Overlay sized by inverse realized vol: lots = vol_target / realized_vol.
-  - DD circuit breaker exits overlay when price < SMA AND drawdown > threshold.
+Base lot (pyramid_level=0) held permanently -> tracks B&H exactly.
+Overlay sized by inverse realized vol as a MULTIPLIER of base position.
+PortfolioSizer translates multiplier x base_lots into contracts.
 
-Alpha source: conditioning on second moment (vol) rather than first moment (trend).
+This strategy is a pure signal emitter: no equity inspection, no contract
+math, no sizing. All contract-count logic lives in PortfolioSizer.
+
+Alpha source: conditioning on second moment (vol) rather than first moment.
 Low-vol periods get more overlay; high-vol periods reduce.
-
-Signal timeframe: 5m bars synthesized into daily closes internally for vol calc.
-Warmup: ~70 min for SmoothedATR + 10 trading days for RealizedVol.
 
 Indicators sourced from src.indicators: RealizedVol, DDCircuitBreaker,
 DailyCloseStream, SMA, SmoothedATR.
 """
 from __future__ import annotations
 
+import warnings
 from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -24,6 +24,7 @@ import structlog
 
 from src.core.policies import AddPolicy, EntryPolicy, StopPolicy
 from src.core.types import (
+    METADATA_EXPOSURE_MULTIPLIER,
     AccountState,
     AddDecision,
     EngineConfig,
@@ -42,12 +43,42 @@ from src.indicators import (
     SmoothedATR,
     compose_param_schema,
 )
-from src.strategies import HoldingPeriod, SignalTimeframe, StopArchitecture, StrategyCategory
+from src.strategies import (
+    HoldingPeriod,
+    SignalTimeframe,
+    StopArchitecture,
+    StrategyCategory,
+)
 
 if TYPE_CHECKING:
     from src.core.position_engine import PositionEngine
 
 logger = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Structural constants — not tunable. If you ever need to tune these,
+# promote back to PARAM_SCHEMA and justify with an ablation study.
+# ---------------------------------------------------------------------------
+
+_OVERLAY_MAX_MULTIPLIER = 2.0
+_STOP_ATR_MULT = 15.0  # nominal; base lot protected by EngineConfig.min_hold_lots=1.0
+
+# Deprecated kwargs accepted silently (with DeprecationWarning) from stale
+# configs / registry entries for one release window.
+_DEPRECATED_KWARGS = frozenset({
+    "trail_atr_mult",
+    "trail_lookback",
+    "max_levels",
+    "add_spacing_atr",
+    "gamma",
+    "margin_cap_pct",
+    "reentry_cooldown",
+    "initial_capital",
+    "boost_sma_fast_days",
+    "boost_lots",
+    "vol_overlay_max_lots",
+    "stop_atr_mult",
+})
 
 # ---------------------------------------------------------------------------
 # Parameter schema — composed from centralized indicator PARAM_SPECs
@@ -71,22 +102,6 @@ _STRATEGY_PARAMS: dict[str, dict] = {
         "type": "float", "default": 0.20, "min": 0.05, "max": 0.40,
         "description": "Target annualized vol for overlay sizing (0.20 = 20%).",
     },
-    "vol_overlay_max_lots": {
-        "type": "float", "default": 2.0, "min": 0.5, "max": 5.0,
-        "description": "Max overlay lots (cap on inverse-vol sizing).",
-    },
-    "boost_sma_fast_days": {
-        "type": "int", "default": 0, "min": 0, "max": 100,
-        "description": "Fast SMA for golden-cross boost (0 = disabled).",
-    },
-    "boost_lots": {
-        "type": "float", "default": 0.0, "min": 0.0, "max": 3.0,
-        "description": "Extra lots on golden cross (0 = disabled).",
-    },
-    "stop_atr_mult": {
-        "type": "float", "default": 15.0, "min": 1.0, "max": 20.0,
-        "description": "Nominal stop multiplier (base lot protected by min_hold_lots).",
-    },
 }
 
 PARAM_SCHEMA: dict[str, dict] = {**_INDICATOR_PARAMS, **_STRATEGY_PARAMS}
@@ -98,10 +113,7 @@ STRATEGY_META: dict = {
     "stop_architecture": StopArchitecture.SWING,
     "expected_duration_minutes": (60 * 24 * 30, 60 * 24 * 180),
     "tradeable_sessions": ["day", "night"],
-    "description": (
-        "B&H base lot + inverse-vol overlay (Moreira-Muir 2017). "
-        "DD circuit breaker (Faber TAA)."
-    ),
+    "description": "B&H base + inverse-vol overlay (pure signal emitter).",
 }
 
 
@@ -110,22 +122,21 @@ STRATEGY_META: dict = {
 # ---------------------------------------------------------------------------
 
 class _OverlayHub:
-    """Centralized state for the inverse-vol overlay, fed one 5m bar per tick."""
+    """Centralized state for the inverse-vol overlay, fed one 5m bar per tick.
+
+    Emits a RAW multiplier in [0, _OVERLAY_MAX_MULTIPLIER] via
+    ``desired_overlay_lots``. PortfolioSizer translates it into contracts.
+    """
 
     def __init__(
         self,
         vol_lookback_days: int,
         vol_target_annual: float,
-        vol_overlay_max_lots: float,
         trend_sma_days: int,
         dd_breaker_pct: float,
         dd_reentry_pct: float,
-        boost_sma_fast_days: int,
-        boost_lots: float,
     ) -> None:
         self._vol_target = vol_target_annual
-        self._max_overlay = vol_overlay_max_lots
-        self._boost_lots = boost_lots
 
         self._daily_stream = DailyCloseStream()
         self._rv = RealizedVol(period=vol_lookback_days)
@@ -134,18 +145,15 @@ class _OverlayHub:
             breaker_pct=dd_breaker_pct, reentry_pct=dd_reentry_pct,
         )
         self.smoothed_atr = SmoothedATR(period=14)
-        self._boost_sma_fast = SMA(period=boost_sma_fast_days) if boost_sma_fast_days > 0 else None
 
         self._prev_daily_close: float | None = None
         self._last_ts: datetime | None = None
-        # Daily overlay decision persists between daily-close events.
+        # Daily overlay multiplier persists between daily-close events.
         self._daily_overlay_lots: float = 0.0
-        self._daily_golden_cross: bool = False
 
         # Public per-tick state; set by entry policy / tick().
+        # Raw multiplier; PortfolioSizer applies base_lots and margin caps.
         self.desired_overlay_lots: float = 0.0
-        self.golden_cross_active: bool = False
-        self.base_lots: float = 1.0
 
     # Public passthroughs for indicator inspection.
     @property
@@ -159,10 +167,6 @@ class _OverlayHub:
     @property
     def trend_sma_value(self) -> float | None:
         return self._trend_sma.value
-
-    @property
-    def boost_sma_fast_value(self) -> float | None:
-        return self._boost_sma_fast.value if self._boost_sma_fast is not None else None
 
     def tick(self, price: float, raw_atr: float, timestamp: datetime) -> None:
         """Update all state from one 5m bar (idempotent on timestamp)."""
@@ -184,10 +188,8 @@ class _OverlayHub:
 
         if self._dd_breaker.tripped:
             self.desired_overlay_lots = 0.0
-            self.golden_cross_active = False
         else:
             self.desired_overlay_lots = self._daily_overlay_lots
-            self.golden_cross_active = self._daily_golden_cross
 
     def _process_daily_close(self, close: float) -> None:
         if self._prev_daily_close is not None:
@@ -195,36 +197,25 @@ class _OverlayHub:
         self._prev_daily_close = close
 
         self._trend_sma.update(close)
-        if self._boost_sma_fast is not None:
-            self._boost_sma_fast.update(close)
-
         self._recompute_daily_overlay(close)
 
     def _recompute_daily_overlay(self, daily_close: float) -> None:
         if not self._rv.ready or self._rv.value is None:
             self._daily_overlay_lots = 0.0
-            self._daily_golden_cross = False
             return
 
-        # Inverse-vol sizing capped at max, with rv floor to avoid blow-up.
-        overlay_lots = min(self._vol_target / max(self._rv.value, 0.01), self._max_overlay)
+        # Inverse-vol sizing capped at max multiplier, with rv floor to avoid blow-up.
+        overlay_lots = min(
+            self._vol_target / max(self._rv.value, 0.01),
+            _OVERLAY_MAX_MULTIPLIER,
+        )
 
         # Trend gate: no overlay when price closed below trend SMA.
         trend_val = self._trend_sma.value
         if trend_val is not None and daily_close < trend_val:
             overlay_lots = 0.0
 
-        # Golden cross boost.
-        fast = self._boost_sma_fast
-        gc = (
-            fast is not None and fast.value is not None
-            and trend_val is not None and fast.value > trend_val
-        )
-        self._daily_golden_cross = gc
-        if gc:
-            overlay_lots += self._boost_lots
-
-        self._daily_overlay_lots = min(overlay_lots, self._max_overlay + self._boost_lots)
+        self._daily_overlay_lots = overlay_lots
 
 
 # ---------------------------------------------------------------------------
@@ -232,14 +223,14 @@ class _OverlayHub:
 # ---------------------------------------------------------------------------
 
 class InverseVolEntryPolicy(EntryPolicy):
-    """Enter risk-sized base position on first bar (permanent B&H). Tick overlay hub."""
+    """Emit base entry on first valid bar. Tick overlay hub.
 
-    def __init__(
-        self, config: PyramidConfig, hub: _OverlayHub, initial_capital: float = 2_000_000.0,
-    ) -> None:
-        self._config = config
+    Pure signal emitter: emits ``lots=1.0`` as a hint. PortfolioSizer resolves
+    to absolute contract count via stop-distance risk sizing.
+    """
+
+    def __init__(self, hub: _OverlayHub) -> None:
         self.hub = hub
-        self._initial_capital = initial_capital
 
     def should_enter(
         self,
@@ -257,29 +248,16 @@ class InverseVolEntryPolicy(EntryPolicy):
         if atr is None or atr <= 0:
             return None
 
-        # Margin-based sizing: base lot's nominal stop is protected by min_hold_lots,
-        # so risk-per-trade sizing is not meaningful; margin fraction gates capital.
-        from src.core.sizing import compute_margin_lots
-        base_lots = compute_margin_lots(
-            equity=account.equity if account is not None else self._initial_capital,
-            margin_per_unit=snapshot.margin_per_unit,
-            margin_fraction=self._config.margin_limit * 0.20,
-            min_lot=snapshot.min_lot,
-        )
-        if base_lots <= 0:
-            return None
-        self.hub.base_lots = base_lots
-
-        stop_distance = self._config.stop_atr_mult * atr
+        stop_distance = _STOP_ATR_MULT * atr
         return EntryDecision(
-            lots=base_lots,
+            lots=1.0,
             contract_type="large",
             initial_stop=snapshot.price - stop_distance,
             direction="long",
             metadata={
                 "rv": self.hub.rv_value,
                 "desired_overlay": self.hub.desired_overlay_lots,
-                "base_lots": base_lots,
+                "sizing_mode": "base",
             },
         )
 
@@ -288,9 +266,7 @@ class InverseVolEntryPolicy(EntryPolicy):
         return {
             "realized_vol": hub.rv_value,
             "trend_sma": hub.trend_sma_value,
-            "boost_sma_fast": hub.boost_sma_fast_value,
             "desired_overlay": hub.desired_overlay_lots,
-            "golden_cross": 1.0 if hub.golden_cross_active else 0.0,
             "dd_pct": hub.dd_breaker.current_dd * 100,
             "dd_tripped": 1.0 if hub.dd_breaker.tripped else 0.0,
         }
@@ -299,16 +275,19 @@ class InverseVolEntryPolicy(EntryPolicy):
         return {
             "realized_vol": {"panel": "sub", "color": "#FF6B6B", "label": "RV (ann.)"},
             "trend_sma": {"panel": "price", "color": "#4ECDC4", "label": "SMA(trend)"},
-            "boost_sma_fast": {"panel": "price", "color": "#45B7D1", "label": "SMA(fast)"},
-            "desired_overlay": {"panel": "sub", "color": "#FFEAA7", "label": "Overlay lots"},
-            "golden_cross": {"panel": "sub", "color": "#96CEB4", "label": "GC active"},
+            "desired_overlay": {"panel": "sub", "color": "#FFEAA7", "label": "Overlay mult"},
             "dd_pct": {"panel": "sub", "color": "#E17055", "label": "DD%"},
             "dd_tripped": {"panel": "sub", "color": "#D63031", "label": "DD tripped"},
         }
 
 
 class InverseVolAddPolicy(AddPolicy):
-    """Add overlay lots based on inverse realized vol when hub says so."""
+    """Emit overlay multiplier as AddDecision when hub says so.
+
+    ``AddDecision.lots`` is the raw multiplier in [0, _OVERLAY_MAX_MULTIPLIER],
+    NOT a contract count. PortfolioSizer resolves it to absolute contracts via
+    ``metadata[METADATA_EXPOSURE_MULTIPLIER]=True``.
+    """
 
     def __init__(self, hub: _OverlayHub) -> None:
         self._hub = hub
@@ -321,20 +300,26 @@ class InverseVolAddPolicy(AddPolicy):
     ) -> AddDecision | None:
         if engine_state.mode == "halted" or not engine_state.positions:
             return None
-        if engine_state.pyramid_level >= 2:  # single overlay level
+        if engine_state.pyramid_level >= 2:  # single overlay level — prevent compounding
             return None
 
         self._hub.tick(snapshot.price, snapshot.atr.get("daily", 0.0), snapshot.timestamp)
         if self._hub.desired_overlay_lots <= 0:
             return None
 
-        # Scale by base_lots so MTX (more base lots) gets proportionally more overlay.
-        lots = max(1.0, round(self._hub.desired_overlay_lots * self._hub.base_lots))
-        return AddDecision(lots=lots, contract_type="large", move_existing_to_breakeven=False)
+        return AddDecision(
+            lots=self._hub.desired_overlay_lots,
+            contract_type="large",
+            move_existing_to_breakeven=False,
+            metadata={
+                METADATA_EXPOSURE_MULTIPLIER: True,
+                "rv": self._hub.rv_value,
+            },
+        )
 
 
 class InverseVolStopPolicy(StopPolicy):
-    """Stop policy: base lot never stops, overlay exits on DD breaker or trend break."""
+    """Base lot never stops; overlay exits on DD breaker or trend break."""
 
     def __init__(self, hub: _OverlayHub, config: PyramidConfig) -> None:
         self._hub = hub
@@ -370,33 +355,45 @@ class InverseVolStopPolicy(StopPolicy):
 
 def create_vol_managed_bnh_engine(
     max_loss: float = 500_000.0,
-    initial_capital: float = 2_000_000.0,
     vol_lookback_days: int = 10,
-    vol_target_annual: float = 0.20,
-    vol_overlay_max_lots: float = 2.0,
     trend_sma_days: int = 20,
     dd_breaker_pct: float = 0.15,
     dd_reentry_pct: float = 0.05,
-    boost_sma_fast_days: int = 0,
-    boost_lots: float = 0.0,
-    stop_atr_mult: float = 15.0,
+    vol_target_annual: float = 0.20,
+    **kwargs,
 ) -> PositionEngine:
     """Build a PositionEngine for vol-managed B&H (inverse-vol overlay).
 
-    Pyramid is NOT tuned here — account-level pyramid_risk_level in EngineConfig
-    governs all pyramid behavior (AGENTS.md invariant #4). The PyramidConfig
-    below encodes this strategy's structural 2-level B&H design as internal
-    constants. Defaults validated 2026-04-11 (TX Sharpe 1.67, MTX Sharpe 1.62).
+    Pure signal emitter: no contract-count math lives here. PortfolioSizer
+    (attached by BacktestRunner / LiveStrategyRunner) owns sizing.
+
+    Unknown kwargs raise TypeError. Deprecated kwargs from the pre-refactor
+    schema are accepted silently (with DeprecationWarning) for one release
+    window so stale registry entries do not crash the factory.
     """
+    unknown = set(kwargs) - _DEPRECATED_KWARGS
+    if unknown:
+        raise TypeError(
+            f"create_vol_managed_bnh_engine: unknown kwargs: {sorted(unknown)}"
+        )
+    if kwargs:
+        deprecated_used = set(kwargs) & _DEPRECATED_KWARGS
+        warnings.warn(
+            f"vol_managed_bnh deprecated kwargs ignored: {sorted(deprecated_used)}",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     from src.core.position_engine import PositionEngine
 
+    # Structural pyramid config (not tuned — encodes 2-level B&H design).
     config = PyramidConfig(
         max_loss=max_loss,
         max_levels=2,
         lot_schedule=[[1, 0], [1, 0]],
         add_trigger_atr=[999.0],  # sentinel — InverseVolAddPolicy controls adds
-        stop_atr_mult=stop_atr_mult,
-        trail_atr_mult=stop_atr_mult,  # unused; required by PyramidConfig
+        stop_atr_mult=_STOP_ATR_MULT,
+        trail_atr_mult=_STOP_ATR_MULT,  # unused; required by PyramidConfig
         trail_lookback=22,
         margin_limit=0.60,
         long_only_compat_mode=True,
@@ -411,14 +408,11 @@ def create_vol_managed_bnh_engine(
     hub = _OverlayHub(
         vol_lookback_days=vol_lookback_days,
         vol_target_annual=vol_target_annual,
-        vol_overlay_max_lots=vol_overlay_max_lots,
         trend_sma_days=trend_sma_days,
         dd_breaker_pct=dd_breaker_pct,
         dd_reentry_pct=dd_reentry_pct,
-        boost_sma_fast_days=boost_sma_fast_days,
-        boost_lots=boost_lots,
     )
-    entry = InverseVolEntryPolicy(config, hub, initial_capital=initial_capital)
+    entry = InverseVolEntryPolicy(hub)
     engine = PositionEngine(
         entry_policy=entry,
         add_policy=InverseVolAddPolicy(hub),
