@@ -43,7 +43,9 @@ const PLAYBACK_POLL_MS = 500;
 type BottomTab = "blotter" | "trades" | "activity";
 
 export function WarRoomLayout() {
-  const [data, setData] = useState<WarRoomData | null>(null);
+  const [data, setData] = useState<WarRoomData | null>(
+    () => useTradingStore.getState().warRoomData as WarRoomData | null,
+  );
   const [deployHistory, setDeployHistory] = useState<DeployLogEntry[]>([]);
   const activeAccountId = useTradingStore((s) => s.activeAccountId);
   const selectedSessionId = useWarRoomStore((s) => s.selectedSessionId);
@@ -169,7 +171,12 @@ export function WarRoomLayout() {
     return sessions[0];
   }, [selectedSessionId, sessions]);
 
-  const chartSymbol = chartSymbolOverride ?? selectedSession?.symbol ?? "TX";
+  // Default to first active session's symbol, then any session's symbol, then TX
+  const defaultSymbol = useMemo(() => {
+    const active = sessions.find((s) => s.status === "active");
+    return active?.symbol ?? sessions[0]?.symbol ?? "TX";
+  }, [sessions]);
+  const chartSymbol = chartSymbolOverride ?? selectedSession?.symbol ?? defaultSymbol;
 
   // Bar loading — initial fetch loads ~3000 bars at the active timeframe.
   // Periodic refresh only fetches bars after the latest cached bar (incremental).
@@ -268,7 +275,7 @@ export function WarRoomLayout() {
     );
   }, [data?.accounts]);
   const activeAccountData = activeAccountId ? accounts[activeAccountId] : null;
-  const isMockAccount = activeAccountData?.sandbox_mode === true || activeAccountId === "mock-dev";
+  const isMockAccount = activeAccountId === "mock-dev";
 
   // Fetch mock-range when mock account selected
   useEffect(() => {
@@ -364,7 +371,7 @@ export function WarRoomLayout() {
   const activeEquity = activeAccountData?.equity ?? 0;
   const activeMarginUsed = activeAccountData?.margin_used ?? 0;
   const activeMarginAvail = activeAccountData?.margin_available ?? 0;
-  const equityRatio = activeMarginUsed > 0 ? activeEquity / activeMarginUsed : Infinity;
+  const equityRatio = activeMarginUsed > 0 && activeEquity > 0 ? activeEquity / activeMarginUsed : null;
 
   const totalPnl = sessions.reduce((sum, s) => sum + (s.snapshot?.realized_pnl ?? 0) + (s.snapshot?.unrealized_pnl ?? 0), 0);
   const worstDD = sessions.reduce((mx, s) => Math.max(mx, s.snapshot?.drawdown_pct ?? 0), 0);
@@ -427,49 +434,51 @@ export function WarRoomLayout() {
       <div className="flex items-center justify-between px-4 py-1.5" style={{ borderBottom: `1px solid ${colors.cardBorder}`, background: colors.sidebar }}>
         <div className="flex items-center gap-5">
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>EQUITY</span>
+            <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>EQUITY</span>
             <span className="text-[13px] font-semibold" style={{ color: colors.text, fontFamily: "var(--font-mono)" }}>
               ${activeEquity.toLocaleString(undefined, { maximumFractionDigits: 0 })}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>Eq Ratio</span>
-            <span className="text-[13px] font-semibold" style={{ color: equityRatio < 1.5 ? colors.red : equityRatio < 3 ? "#D4A017" : colors.green, fontFamily: "var(--font-mono)" }}>
-              {equityRatio === Infinity ? "∞" : `${(equityRatio * 100).toFixed(0)}%`}
+            <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>Eq Ratio</span>
+            <span className="text-[13px] font-semibold" style={{ color: equityRatio == null ? colors.dim : equityRatio < 1.5 ? colors.red : equityRatio < 3 ? "#D4A017" : colors.green, fontFamily: "var(--font-mono)" }}>
+              {equityRatio == null ? "—" : `${(equityRatio * 100).toFixed(0)}%`}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>Avail</span>
+            <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>Avail</span>
             <span className="text-[13px] font-semibold" style={{ color: colors.text, fontFamily: "var(--font-mono)" }}>
               ${activeMarginAvail.toLocaleString(undefined, { maximumFractionDigits: 0 })}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>UnPnL</span>
+            <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>UnPnL</span>
             <span className="text-[13px] font-semibold" style={{ color: totalPnl >= 0 ? colors.green : colors.red, fontFamily: "var(--font-mono)" }}>
               {totalPnl >= 0 ? "+" : ""}${Math.round(totalPnl).toLocaleString()}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>DD</span>
+            <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>DD</span>
             <span className="text-[13px] font-semibold" style={{ color: worstDD > 5 ? colors.red : colors.gold, fontFamily: "var(--font-mono)" }}>
               {worstDD.toFixed(1)}%
             </span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-[10px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>Active</span>
+            <span className="text-[11px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>Active</span>
             <span className="text-[13px] font-semibold" style={{ color: activeSessions.length > 0 ? colors.green : colors.dim, fontFamily: "var(--font-mono)" }}>
               {activeSessions.length}/{sessions.length}
             </span>
           </div>
           {crawling && (
-            <span className="text-[10px]" style={{ color: colors.orange, fontFamily: "var(--font-mono)" }}>
+            <span className="text-[11px]" style={{ color: colors.orange, fontFamily: "var(--font-mono)" }}>
               Syncing bars...
             </span>
           )}
         </div>
-        <SettlementCountdown settlement={data?.settlement} />
-        <KillSwitchBar />
+        <div className="flex items-center gap-3">
+          <SettlementCountdown settlement={data?.settlement} />
+          <KillSwitchBar />
+        </div>
       </div>
 
       {/* Playback controls - only for mock accounts */}
@@ -487,8 +496,8 @@ export function WarRoomLayout() {
           }}
         >
           {/* Session header + add binding */}
-          <div className="px-2 pt-2 pb-1">
-            <div className="text-[8px] font-semibold tracking-wider px-1 mb-1.5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+          <div className="px-2 pt-2 pb-1 overflow-hidden">
+            <div className="text-[11px] font-semibold tracking-wider px-1 mb-1.5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
               SESSIONS
             </div>
             {activeAccountId && (
@@ -503,7 +512,7 @@ export function WarRoomLayout() {
 
           {/* Session Grid */}
           <div className="flex-1 min-h-0 overflow-y-auto">
-            <SessionGrid sessions={sessions} bindings={accountBindings} accountId={activeAccountId ?? undefined} settlement={data?.settlement} onAction={poll} />
+            <SessionGrid sessions={sessions} bindings={accountBindings} accountId={activeAccountId ?? undefined} onAction={poll} />
           </div>
 
           {/* Risk Guards merged into Row 2 stats bar */}
@@ -544,7 +553,7 @@ export function WarRoomLayout() {
                       </button>
                     ))}
                     {barError && (
-                      <span className="text-[8px] ml-auto" style={{ color: colors.red, fontFamily: "var(--font-mono)" }}>
+                      <span className="text-[11px] ml-auto" style={{ color: colors.red, fontFamily: "var(--font-mono)" }}>
                         {barError}
                       </span>
                     )}
@@ -598,7 +607,7 @@ export function WarRoomLayout() {
 
                   {/* Positions table */}
                   <div className="overflow-auto" style={{ height: `${100 - equitySplitPercent}%` }}>
-                    <PositionsTable positions={positions} settlement={data?.settlement} />
+                    <PositionsTable positions={positions} settlement={data?.settlement} sessions={sessions} onAction={poll} />
                   </div>
                 </div>
               </div>
@@ -631,7 +640,13 @@ export function WarRoomLayout() {
                     </button>
                   ))}
                   <div className="flex-1" />
-                  <DeploymentHistory history={deployHistory} onRedeploy={poll} />
+                  <DeploymentHistory
+                    history={deployHistory.filter((d) =>
+                      d.account_id === activeAccountId &&
+                      accountBindings.some((b) => b.slug === d.strategy)
+                    )}
+                    onRedeploy={poll}
+                  />
                 </div>
                 {/* Tab content */}
                 <div className="overflow-y-auto flex-1 min-h-0">

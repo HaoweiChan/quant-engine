@@ -1,6 +1,13 @@
 import { colors } from "@/lib/theme";
 import type { SettlementInfo } from "@/lib/api";
 
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function formatMonth(yyyymm: string): string {
+  const m = parseInt(yyyymm.slice(4), 10);
+  return m >= 1 && m <= 12 ? MONTH_ABBR[m - 1] : yyyymm;
+}
+
 interface SettlementCountdownProps {
   settlement?: SettlementInfo;
 }
@@ -10,26 +17,30 @@ export function SettlementCountdown({ settlement }: SettlementCountdownProps) {
   const days = settlement.days_to_settlement;
   const urgent = days <= 2;
   const warning = days <= 5;
-  const dateLabel = settlement.settlement_date.slice(5).replace("-", "/");
+  const accentColor = urgent ? colors.red : warning ? colors.orange : colors.dim;
+  const dateParts = settlement.settlement_date.split("-");
+  const dateLabel = `${dateParts[1]}/${dateParts[2]}`;
+
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
-        Settle
-      </span>
+    <div
+      className="flex items-center gap-1 px-2 py-0.5 rounded"
+      style={{
+        fontFamily: "var(--font-mono)",
+        background: `${accentColor}10`,
+        border: `1px solid ${accentColor}25`,
+      }}
+    >
       <span
-        className="text-[10px] font-semibold"
-        style={{
-          color: urgent ? colors.red : warning ? colors.orange : colors.muted,
-          fontFamily: "var(--font-mono)",
-        }}
+        className="text-[11px] font-semibold"
+        style={{ color: accentColor }}
       >
         {days}d
       </span>
-      <span className="text-[8px]" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
-        ({dateLabel})
+      <span className="text-[11px]" style={{ color: colors.dim }}>
+        settle {dateLabel}
       </span>
-      <span className="text-[8px]" style={{ color: colors.blue, fontFamily: "var(--font-mono)" }}>
-        {settlement.current_month}
+      <span className="text-[11px]" style={{ color: colors.muted }}>
+        {formatMonth(settlement.current_month)}→{formatMonth(settlement.next_month)}
       </span>
     </div>
   );

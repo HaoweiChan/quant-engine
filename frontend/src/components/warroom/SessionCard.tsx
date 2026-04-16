@@ -2,7 +2,6 @@ import { useState, useMemo } from "react";
 import { colors } from "@/lib/theme";
 import { startSession, stopSession, flattenSession, updateAccountStrategies } from "@/lib/api";
 import { useWarRoomStore } from "@/stores/warRoomStore";
-import { ContractRollBadge } from "./ContractRollBadge";
 import type { WarRoomSession } from "@/lib/api";
 import {
   Dialog,
@@ -14,21 +13,14 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 
-interface RollInfo {
-  holding_period: string;
-  urgency: "none" | "watch" | "imminent" | "overdue";
-  days_to_settlement: number;
-}
-
 interface SessionCardProps {
   session: WarRoomSession;
   allBindings?: { slug: string; symbol: string }[];
   accountId?: string;
-  rollInfo?: RollInfo;
   onAction: () => void;
 }
 
-export function SessionCard({ session, allBindings, accountId, rollInfo, onAction }: SessionCardProps) {
+export function SessionCard({ session, allBindings, accountId, onAction }: SessionCardProps) {
   const selectedSessionId = useWarRoomStore((s) => s.selectedSessionId);
   const setSelectedSessionId = useWarRoomStore((s) => s.setSelectedSessionId);
   const openParamDrawer = useWarRoomStore((s) => s.openParamDrawer);
@@ -125,26 +117,18 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
     >
       {/* Header: status + name */}
       <div className="flex items-center justify-between mb-1.5">
-        <div className="flex items-center gap-1.5">
-          <span style={{ color: statusColor, fontSize: 10 }}>{statusIcon}</span>
-          <span className="text-[12px] font-medium" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
+        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+          <span style={{ color: statusColor, fontSize: 11 }}>{statusIcon}</span>
+          <span className="text-[12px] font-medium truncate" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
             {session.strategy_slug.split("/").pop()}
           </span>
-          <span className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>
+          <span className="text-[11px] shrink-0" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>
             &middot; {session.symbol}
           </span>
         </div>
-        <div className="flex items-center gap-1">
-          {rollInfo && (
-            <ContractRollBadge
-              urgency={rollInfo.urgency}
-              daysToSettlement={rollInfo.days_to_settlement}
-              holdingPeriod={rollInfo.holding_period}
-              compact
-            />
-          )}
+        <div className="flex items-center gap-1 shrink-0">
           {session.is_stale && (
-            <span className="text-[9px] px-1.5 py-0.5 rounded" style={{ background: "rgba(255,165,0,0.12)", color: colors.orange, fontFamily: "var(--font-mono)" }}>
+            <span className="text-[11px] px-1.5 py-0.5 rounded" style={{ background: "rgba(255,165,0,0.12)", color: colors.orange, fontFamily: "var(--font-mono)" }}>
               NEW
             </span>
           )}
@@ -162,12 +146,13 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
         </div>
       </div>
 
+
       {/* Metrics line */}
       {snap && (() => {
         const totalPnl = (snap.realized_pnl ?? 0) + snap.unrealized_pnl;
         return (
         <>
-        <div className="flex gap-3 text-[10px] mb-1" style={{ fontFamily: "var(--font-mono)" }}>
+        <div className="flex gap-3 text-[11px] mb-1" style={{ fontFamily: "var(--font-mono)" }}>
           <span style={{ color: totalPnl >= 0 ? colors.green : colors.red }}>
             PnL {totalPnl >= 0 ? "+" : ""}${Math.round(totalPnl).toLocaleString()}
           </span>
@@ -184,14 +169,14 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
             <button
               onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
               className="border-none bg-transparent cursor-pointer p-0 ml-auto"
-              style={{ color: colors.dim, fontSize: 10, fontFamily: "var(--font-mono)" }}
+              style={{ color: colors.dim, fontSize: 11, fontFamily: "var(--font-mono)" }}
             >
               {expanded ? "▾" : "▸"}
             </button>
           )}
         </div>
         {expanded && extMetrics && (
-          <div className="flex gap-3 text-[10px] mb-1" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
+          <div className="flex gap-3 text-[11px] mb-1" style={{ fontFamily: "var(--font-mono)", color: colors.dim }}>
             <span>Sharpe <span style={{ color: colors.text }}>{extMetrics.sharpe}</span></span>
             <span>Sortino <span style={{ color: colors.text }}>{extMetrics.sortino}</span></span>
             <span>WR <span style={{ color: colors.text }}>{extMetrics.winRate}</span></span>
@@ -202,14 +187,14 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
         );
       })()}
       {!snap && (
-        <div className="text-[10px] mb-1" style={{ fontFamily: "var(--font-mono)", color: colors.blue }}>
+        <div className="text-[11px] mb-1" style={{ fontFamily: "var(--font-mono)", color: colors.blue }}>
           Alloc {Math.round((session.equity_share ?? 1) * 100)}%
         </div>
       )}
 
       {/* Error feedback */}
       {error && (
-        <div className="text-[9px] px-1.5 py-0.5 rounded mb-1" style={{ background: "rgba(255,82,82,0.12)", color: colors.red, fontFamily: "var(--font-mono)" }}>
+        <div className="text-[11px] px-1.5 py-0.5 rounded mb-1" style={{ background: "rgba(255,82,82,0.12)", color: colors.red, fontFamily: "var(--font-mono)" }}>
           {error}
         </div>
       )}
@@ -219,7 +204,7 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
         <button
           onClick={handleToggle}
           disabled={loading}
-          className="flex-1 text-[9px] font-semibold py-1.5 rounded text-white cursor-pointer border-none"
+          className="flex-1 text-[11px] font-semibold py-1.5 rounded text-white cursor-pointer border-none"
           style={{
             background: isRunning ? colors.red : isStuck ? colors.orange : colors.green,
             letterSpacing: "0.5px",
@@ -231,7 +216,7 @@ export function SessionCard({ session, allBindings, accountId, rollInfo, onActio
         </button>
         <button
           onClick={handleParams}
-          className="flex-1 text-[9px] font-semibold py-1.5 rounded cursor-pointer border-none"
+          className="flex-1 text-[11px] font-semibold py-1.5 rounded cursor-pointer border-none"
           style={{
             background: hasParams ? "rgba(90,138,242,0.25)" : "rgba(90,138,242,0.1)",
             color: hasParams ? "#fff" : colors.blue,

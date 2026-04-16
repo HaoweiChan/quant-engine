@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { colors } from "@/lib/theme";
-import type { SettlementInfo } from "@/lib/api";
+import { flattenSession } from "@/lib/api";
+import type { SettlementInfo, WarRoomSession } from "@/lib/api";
 
 interface Position {
   symbol: string;
@@ -11,6 +13,19 @@ interface Position {
   strategy?: string;
   strategy_slug?: string;
 }
+
+interface RollInfo {
+  holding_period: string;
+  urgency: "none" | "watch" | "imminent" | "overdue";
+  days_to_settlement: number;
+}
+
+const URGENCY_STYLES: Record<string, { color: string; label: string }> = {
+  none: { color: colors.dim, label: "" },
+  watch: { color: colors.gold, label: "ROLL" },
+  imminent: { color: colors.orange, label: "ROLL!" },
+  overdue: { color: colors.red, label: "ROLL!!" },
+};
 
 // Deterministic color map keyed by slug segment
 const STRATEGY_COLORS: Record<string, string> = {
@@ -38,13 +53,41 @@ function strategyLabel(slug: string | undefined): string {
   return slug.split("/").pop() ?? slug;
 }
 
-export function PositionsTable({ positions, settlement }: { positions: Position[]; settlement?: SettlementInfo }) {
+export function PositionsTable({ positions, settlement, sessions, onAction }: { positions: Position[]; settlement?: SettlementInfo; sessions?: WarRoomSession[]; onAction?: () => void }) {
+  const [flatteningSlug, setFlatteningSlug] = useState<string | null>(null);
+
+  const sessionBySlug = new Map<string, string>();
+  if (sessions) {
+    for (const s of sessions) sessionBySlug.set(s.strategy_slug, s.session_id);
+  }
+
+  const handleFlatten = async (slug: string | undefined) => {
+    if (!slug) return;
+    const sessionId = sessionBySlug.get(slug);
+    if (!sessionId) return;
+    setFlatteningSlug(slug);
+    try {
+      await flattenSession(sessionId);
+      onAction?.();
+    } catch { /* ignore */ }
+    setFlatteningSlug(null);
+  };
+
+  const rollByStrategy = new Map<string, RollInfo>();
+  if (settlement?.per_session && sessions) {
+    for (const sess of sessions) {
+      const rollInfo = settlement.per_session[sess.session_id];
+      if (rollInfo && rollInfo.urgency !== "none") {
+        rollByStrategy.set(sess.strategy_slug, rollInfo);
+      }
+    }
+  }
   return (
     <div className="rounded h-full flex flex-col" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
       <div className="flex items-center justify-between text-[11px] p-2 border-b shrink-0" style={{ borderColor: colors.cardBorder, fontFamily: "var(--font-mono)" }}>
         <span style={{ color: colors.muted }}>OPEN POSITIONS</span>
         {settlement && (
-          <span style={{ color: colors.blue, fontSize: 9 }}>
+          <span style={{ color: colors.blue, fontSize: 11 }}>
             R1: {settlement.current_month} &rarr; R2: {settlement.next_month}
           </span>
         )}
@@ -56,8 +99,8 @@ export function PositionsTable({ positions, settlement }: { positions: Position[
           <table className="w-full text-[11px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse" }} data-testid="positions-table">
             <thead>
               <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
-                {["Sym", "Strategy", "Side", "Qty", "Entry", "Current", "UnPnL"].map((h) => (
-                  <th key={h} className="text-left py-1 pr-2" style={{ color: colors.dim }}>{h}</th>
+                {["Sym", "Strategy", "Side", "Qty", "Entry", "Current", "UnPnL", "Roll", ""].map((h) => (
+                  <th key={h || "action"} className="text-left py-1 pr-2" style={{ color: colors.dim }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -65,6 +108,9 @@ export function PositionsTable({ positions, settlement }: { positions: Position[
               {positions.map((p, i) => {
                 const slug = p.strategy_slug ?? p.strategy;
                 const col = strategyColor(slug);
+                const rollInfo = slug ? rollByStrategy.get(slug) : undefined;
+                const rollStyle = rollInfo ? URGENCY_STYLES[rollInfo.urgency] : URGENCY_STYLES.none;
+                const isFlattening = flatteningSlug === slug;
                 return (
                   <tr key={i} style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
                     <td className="py-1 pr-2" style={{ color: colors.text }}>{p.symbol}</td>
@@ -86,6 +132,29 @@ export function PositionsTable({ positions, settlement }: { positions: Position[
                     <td className="py-1 pr-2" style={{ color: colors.text }}>${p.current_price.toLocaleString()}</td>
                     <td className="py-1 pr-2" style={{ color: p.unrealized_pnl >= 0 ? colors.green : colors.red }}>
                       {p.unrealized_pnl >= 0 ? "+" : ""}${Math.round(p.unrealized_pnl).toLocaleString()}
+                    </td>
+                    <td className="py-1 pr-2">
+                      {rollInfo ? (
+                        <span
+                          className="px-2 py-0.5 rounded text-[11px] font-bold"
+                          style={{ background: rollInfo.urgency === "overdue" ? "#8B6914" : "#1E4D8C", color: "#fff" }}
+                          title={`${rollInfo.days_to_settlement}d to settlement`}
+                        >
+                          {rollStyle.label} {rollInfo.days_to_settlement}d
+                        </span>
+                      ) : (
+                        <span style={{ color: colors.dim }}>—</span>
+                      )}
+                    </td>
+                    <td className="py-1">
+                      <button
+                        onClick={() => handleFlatten(slug)}
+                        disabled={isFlattening}
+                        className="px-2 py-0.5 rounded text-[11px] font-bold cursor-pointer border-none"
+                        style={{ background: "#991B1B", color: "#fff", opacity: isFlattening ? 0.5 : 1 }}
+                      >
+                        {isFlattening ? "..." : "FLATTEN"}
+                      </button>
                     </td>
                   </tr>
                 );
