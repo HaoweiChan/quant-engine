@@ -19,6 +19,13 @@ def _stdev(vals: list[float], avg: float) -> float:
     return sqrt(variance)
 
 
+PARAM_SPEC: dict[str, dict] = {
+    "period": {"type": "int", "default": 20, "min": 5, "max": 60, "description": "Bollinger SMA lookback period."},
+    "upper_mult": {"type": "float", "default": 2.0, "min": 0.5, "max": 4.0, "description": "Upper band std-dev multiplier."},
+    "lower_mult": {"type": "float", "default": 2.0, "min": 0.5, "max": 4.0, "description": "Lower band std-dev multiplier."},
+}
+
+
 class BollingerBands:
     """Rolling Bollinger Bands on close prices.
 

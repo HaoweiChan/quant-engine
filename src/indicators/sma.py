@@ -8,6 +8,11 @@ from collections import deque
 from statistics import mean
 
 
+PARAM_SPEC: dict[str, dict] = {
+    "period": {"type": "int", "default": 20, "min": 2, "max": 500, "description": "SMA lookback period."},
+}
+
+
 class SMA:
     """Rolling SMA over a fixed window of close prices."""
 

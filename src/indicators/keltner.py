@@ -11,6 +11,12 @@ from collections import deque
 from statistics import mean
 
 
+PARAM_SPEC: dict[str, dict] = {
+    "period": {"type": "int", "default": 20, "min": 5, "max": 60, "description": "Keltner Channel EMA lookback."},
+    "multiplier": {"type": "float", "default": 1.5, "min": 0.5, "max": 4.0, "description": "ATR multiplier for channel width."},
+}
+
+
 class KeltnerChannel:
     """Streaming Keltner Channel on close prices.
 

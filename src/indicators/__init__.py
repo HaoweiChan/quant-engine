@@ -34,6 +34,44 @@ from src.indicators.volume_profile import VolumeProfile, ProfileResult, ProfileB
 from src.indicators.vwap import VWAP
 from src.indicators.williams_r import WilliamsR
 
+def compose_param_schema(
+    indicator_map: dict[str, tuple[type, str]],
+) -> dict[str, dict]:
+    """Build a strategy PARAM_SCHEMA from indicator PARAM_SPEC definitions.
+
+    Args:
+        indicator_map: {strategy_param_name: (IndicatorClass, indicator_param_name)}
+            Maps a strategy-level parameter name to the indicator class and its
+            constructor parameter name, pulling type/min/max/default from the
+            indicator's PARAM_SPEC.
+
+    Returns:
+        dict suitable for merging into a strategy's PARAM_SCHEMA.
+
+    Example::
+        from src.indicators import compose_param_schema, Donchian, RSI
+
+        indicator_params = compose_param_schema({
+            "dc_len": (Donchian, "period"),
+            "rsi_len": (RSI, "period"),
+        })
+        PARAM_SCHEMA = {**indicator_params, **strategy_specific_params}
+    """
+    result: dict[str, dict] = {}
+    for strat_name, (cls, ind_name) in indicator_map.items():
+        mod = __import__(cls.__module__, fromlist=[cls.__name__])
+        spec = getattr(mod, "PARAM_SPEC", {})
+        if ind_name not in spec:
+            raise KeyError(
+                f"{cls.__name__} PARAM_SPEC has no key '{ind_name}'. "
+                f"Available: {list(spec.keys())}"
+            )
+        entry = dict(spec[ind_name])
+        entry["description"] = f"[{cls.__name__}] {entry.get('description', ind_name)}"
+        result[strat_name] = entry
+    return result
+
+
 __all__ = [
     "ADX",
     "ATR",
@@ -71,5 +109,6 @@ __all__ = [
     "VWAP",
     "VolumeProfile",
     "WilliamsR",
+    "compose_param_schema",
     "ema_step",
 ]

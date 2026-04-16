@@ -8,6 +8,11 @@ from __future__ import annotations
 from collections import deque
 
 
+PARAM_SPEC: dict[str, dict] = {
+    "period": {"type": "int", "default": 20, "min": 5, "max": 100, "description": "Donchian channel lookback period."},
+}
+
+
 class Donchian:
     """Rolling Donchian Channel on close prices.
 

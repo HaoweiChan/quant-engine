@@ -8,6 +8,9 @@ from __future__ import annotations
 from datetime import date, datetime
 
 
+PARAM_SPEC: dict[str, dict] = {}
+
+
 class VWAP:
     """Session-resetting VWAP.
 

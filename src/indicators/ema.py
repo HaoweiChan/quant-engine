@@ -10,6 +10,11 @@ from __future__ import annotations
 from collections import deque
 
 
+PARAM_SPEC: dict[str, dict] = {
+    "period": {"type": "int", "default": 20, "min": 2, "max": 500, "description": "EMA lookback period."},
+}
+
+
 class EMA:
     """Streaming EMA with SMA-seed warmup.
 

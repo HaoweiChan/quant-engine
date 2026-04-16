@@ -17,6 +17,12 @@ from collections import deque
 from statistics import mean
 
 
+PARAM_SPEC: dict[str, dict] = {
+    "period": {"type": "int", "default": 14, "min": 5, "max": 60, "description": "ATR lookback period."},
+    "scale": {"type": "float", "default": 1.0, "min": 0.5, "max": 3.0, "description": "Multiplier applied to raw ATR."},
+}
+
+
 class ATR:
     """SMA-based ATR over close-to-close absolute changes.
 

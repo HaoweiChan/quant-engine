@@ -20,6 +20,13 @@ class StochasticResult:
     d: float   # %D line (0-100)
 
 
+PARAM_SPEC: dict[str, dict] = {
+    "k_period": {"type": "int", "default": 14, "min": 5, "max": 30, "description": "Stochastic %K lookback."},
+    "d_period": {"type": "int", "default": 3, "min": 2, "max": 10, "description": "Stochastic %D SMA period."},
+    "smooth": {"type": "int", "default": 3, "min": 1, "max": 10, "description": "Slow stochastic %K smoothing."},
+}
+
+
 class Stochastic:
     """Streaming Stochastic Oscillator.
 

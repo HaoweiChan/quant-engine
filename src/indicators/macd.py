@@ -20,6 +20,13 @@ class MACDResult:
     histogram: float  # macd - signal
 
 
+PARAM_SPEC: dict[str, dict] = {
+    "fast": {"type": "int", "default": 12, "min": 5, "max": 20, "description": "MACD fast EMA period."},
+    "slow": {"type": "int", "default": 26, "min": 15, "max": 50, "description": "MACD slow EMA period."},
+    "signal": {"type": "int", "default": 9, "min": 3, "max": 20, "description": "MACD signal EMA period."},
+}
+
+
 class MACD:
     """Streaming MACD with configurable periods.
 

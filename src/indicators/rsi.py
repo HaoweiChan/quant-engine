@@ -13,6 +13,11 @@ from __future__ import annotations
 from collections import deque
 
 
+PARAM_SPEC: dict[str, dict] = {
+    "period": {"type": "int", "default": 14, "min": 2, "max": 30, "description": "RSI lookback period."},
+}
+
+
 class RSI:
     """SMA-based RSI over a rolling window of gains/losses.
 

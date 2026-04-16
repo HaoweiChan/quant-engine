@@ -13,6 +13,11 @@ expose high/low.
 from __future__ import annotations
 
 
+PARAM_SPEC: dict[str, dict] = {
+    "period": {"type": "int", "default": 14, "min": 7, "max": 30, "description": "ADX EMA smoothing period."},
+}
+
+
 class ADX:
     """Streaming EMA-smoothed ADX on close-to-close changes.
 
