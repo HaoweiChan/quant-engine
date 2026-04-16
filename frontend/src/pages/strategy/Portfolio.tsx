@@ -1,8 +1,8 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ChartCard } from "@/components/ChartCard";
 import { useStrategyStore } from "@/stores/strategyStore";
-import { runPortfolioBacktest, runPortfolioStress } from "@/lib/api";
-import type { MCSimulationResult, PortfolioBacktestResult, PortfolioStrategyEntry } from "@/lib/api";
+import { fetchSavedPortfolios, runPortfolioBacktest, runPortfolioStress } from "@/lib/api";
+import type { MCSimulationResult, PortfolioBacktestResult, PortfolioStrategyEntry, SavedPortfolio } from "@/lib/api";
 import { colors, pnlColor } from "@/lib/theme";
 
 
@@ -91,29 +91,32 @@ const EquityChart = React.memo(function EquityChart({
     data.map((v, i) => `${i === 0 ? "M" : "L"}${xScale(i, data.length).toFixed(1)},${yScale(v).toFixed(1)}`).join(" ");
 
   return (
-    <svg viewBox={`0 0 ${SVG_W} ${SVG_H}`} style={{ width: "100%", height: "auto" }}>
-      {ticks.map((t) => (
-        <g key={t}>
-          <line x1={PAD.left} x2={SVG_W - PAD.right} y1={yScale(t)} y2={yScale(t)} stroke="rgba(255,255,255,0.05)" />
-          <text x={PAD.left - 4} y={yScale(t) + 3} textAnchor="end" fill={colors.dim} fontSize={8} fontFamily="var(--font-mono)">{fmtY(t)}</text>
-        </g>
-      ))}
-      {individuals.map((s, idx) => (
-        <path key={s.slug} d={toPath(s.data)} fill="none" stroke={STRATEGY_COLORS[idx] || colors.dim} strokeWidth={1} opacity={0.35} />
-      ))}
-      <path d={toPath(merged)} fill="none" stroke={colors.cyan} strokeWidth={2} />
-      {/* Legend */}
-      {individuals.map((s, idx) => (
-        <g key={`leg-${s.slug}`} transform={`translate(${PAD.left + 8 + idx * 140}, ${PAD.top + 12})`}>
-          <line x1={0} y1={0} x2={14} y2={0} stroke={STRATEGY_COLORS[idx] || colors.dim} strokeWidth={1.5} opacity={0.5} />
-          <text x={18} y={3} fill={colors.muted} fontSize={8} fontFamily="var(--font-mono)">{s.slug}</text>
-        </g>
-      ))}
-      <g transform={`translate(${PAD.left + 8 + individuals.length * 140}, ${PAD.top + 12})`}>
-        <line x1={0} y1={0} x2={14} y2={0} stroke={colors.cyan} strokeWidth={2} />
-        <text x={18} y={3} fill={colors.text} fontSize={8} fontFamily="var(--font-mono)" fontWeight="bold">Portfolio</text>
-      </g>
-    </svg>
+    <div>
+      <div className="flex items-center gap-3 px-2 pb-2" style={{ fontFamily: "var(--font-mono)" }}>
+        {individuals.map((s, idx) => (
+          <div key={s.slug} className="flex items-center gap-1 text-[11px]">
+            <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: STRATEGY_COLORS[idx] || colors.dim, opacity: 0.7 }} />
+            <span style={{ color: colors.muted }}>{s.slug.split("/").pop()}</span>
+          </div>
+        ))}
+        <div className="flex items-center gap-1 text-[11px]">
+          <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: colors.cyan }} />
+          <span style={{ color: colors.text, fontWeight: 600 }}>Portfolio</span>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${SVG_W} ${SVG_H}`} style={{ width: "100%", height: "auto" }}>
+        {ticks.map((t) => (
+          <g key={t}>
+            <line x1={PAD.left} x2={SVG_W - PAD.right} y1={yScale(t)} y2={yScale(t)} stroke="rgba(255,255,255,0.05)" />
+            <text x={PAD.left - 4} y={yScale(t) + 3} textAnchor="end" fill={colors.dim} fontSize={8} fontFamily="var(--font-mono)">{fmtY(t)}</text>
+          </g>
+        ))}
+        {individuals.map((s, idx) => (
+          <path key={s.slug} d={toPath(s.data)} fill="none" stroke={STRATEGY_COLORS[idx] || colors.dim} strokeWidth={1} opacity={0.35} />
+        ))}
+        <path d={toPath(merged)} fill="none" stroke={colors.cyan} strokeWidth={2} />
+      </svg>
+    </div>
   );
 });
 
@@ -199,7 +202,7 @@ function CorrelationMatrix({ matrix, slugs }: { matrix: number[][]; slugs: strin
           ))}
         </tbody>
       </table>
-      <div className="flex gap-3 mt-2 text-[9px]" style={{ color: colors.dim }}>
+      <div className="flex gap-3 mt-2 text-[11px]" style={{ color: colors.dim }}>
         <span><span style={{ color: colors.red }}>■</span> High (≥0.7)</span>
         <span><span style={{ color: colors.orange }}>■</span> Moderate</span>
         <span><span style={{ color: colors.green }}>■</span> Low (±0.3)</span>
@@ -274,6 +277,8 @@ export function Portfolio() {
   const storeSlippage = useStrategyStore((s) => s.slippageBps);
   const storeCommission = useStrategyStore((s) => s.commissionBps);
   const storeCommissionFixed = useStrategyStore((s) => s.commissionFixed);
+  const setSymbol = useStrategyStore((s) => s.setSymbol);
+  const setDates = useStrategyStore((s) => s.setDates);
 
   const [slots, setSlots] = useState<StrategySlot[]>([
     { slug: "", weight: 50 },
@@ -284,6 +289,54 @@ export function Portfolio() {
   const [loading, setLoading] = useState(false);
   const [stressLoading, setStressLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [savedPortfolios, setSavedPortfolios] = useState<SavedPortfolio[]>([]);
+
+  useEffect(() => {
+    fetchSavedPortfolios().then((res) => {
+      if (res.portfolios?.length) setSavedPortfolios(res.portfolios);
+    });
+  }, []);
+
+  const runBacktestWith = useCallback(async (
+    slotsToRun: StrategySlot[],
+    symbol: string,
+    start: string,
+    end: string,
+  ) => {
+    setLoading(true);
+    setError(null);
+    setBtResult(null);
+    setStressResult(null);
+    const entries: PortfolioStrategyEntry[] = slotsToRun
+      .filter((s) => s.slug)
+      .map((s) => ({ slug: s.slug, weight: s.weight / 100 }));
+    try {
+      const res = await runPortfolioBacktest({
+        strategies: entries,
+        symbol,
+        start,
+        end,
+        initial_capital: storeCapital,
+        slippage_bps: storeSlippage,
+        commission_bps: storeCommission,
+        commission_fixed_per_contract: storeCommissionFixed,
+      });
+      setBtResult(res);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [storeCapital, storeSlippage, storeCommission, storeCommissionFixed]);
+
+  const handleLoadSaved = useCallback((portfolio: SavedPortfolio) => {
+    const entries = Object.entries(portfolio.weights);
+    const newSlots = entries.map(([slug, w]) => ({ slug, weight: Math.round(w * 100) }));
+    setSlots(newSlots);
+    setSymbol(portfolio.symbol);
+    setDates(portfolio.start_date, portfolio.end_date);
+    runBacktestWith(newSlots, portfolio.symbol, portfolio.start_date, portfolio.end_date);
+  }, [setSymbol, setDates, runBacktestWith]);
 
   const hasDuplicates = useMemo(() => {
     const slugs = slots.filter((s) => s.slug).map((s) => s.slug);
@@ -309,31 +362,8 @@ export function Portfolio() {
     setSlots(next.map((s) => ({ ...s, weight: w })));
   };
 
-  const handleMerge = async () => {
-    setLoading(true);
-    setError(null);
-    setBtResult(null);
-    setStressResult(null);
-    const entries: PortfolioStrategyEntry[] = slots
-      .filter((s) => s.slug)
-      .map((s) => ({ slug: s.slug, weight: s.weight / 100 }));
-    try {
-      const res = await runPortfolioBacktest({
-        strategies: entries,
-        symbol: storeSymbol,
-        start: storeStart,
-        end: storeEnd,
-        initial_capital: storeCapital,
-        slippage_bps: storeSlippage,
-        commission_bps: storeCommission,
-        commission_fixed_per_contract: storeCommissionFixed,
-      });
-      setBtResult(res);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
+  const handleMerge = () => {
+    runBacktestWith(slots, storeSymbol, storeStart, storeEnd);
   };
 
   const handleStress = async () => {
@@ -369,6 +399,56 @@ export function Portfolio() {
 
   return (
     <div className="p-4 space-y-4" style={{ fontFamily: "var(--font-mono)" }}>
+      {/* Load Saved Portfolio */}
+      {savedPortfolios.length > 0 && (
+        <ChartCard title="SAVED PORTFOLIOS">
+          <div className="flex flex-wrap gap-2">
+            {savedPortfolios.map((p) => {
+              const shortSlugs = Object.entries(p.weights)
+                .map(([s, w]) => `${s.split("/").pop()} ${Math.round(w * 100)}%`)
+                .join(" · ");
+              return (
+                <button
+                  key={p.id}
+                  onClick={() => handleLoadSaved(p)}
+                  disabled={loading}
+                  className="flex flex-col items-start rounded px-3 py-2 text-left transition-colors"
+                  style={{
+                    background: colors.card,
+                    border: `1px solid ${colors.cardBorder}`,
+                    cursor: loading ? "not-allowed" : "pointer",
+                    minWidth: 180,
+                  }}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-bold" style={{ color: colors.text }}>
+                      {p.objective.replace("_", " ")}
+                    </span>
+                    <span className="text-[11px] px-1.5 py-0.5 rounded" style={{ background: `${colors.blue}20`, color: colors.blue }}>
+                      {p.symbol}
+                    </span>
+                    {p.is_selected && (
+                      <span className="text-[11px] px-1.5 py-0.5 rounded" style={{ background: `${colors.green}20`, color: colors.green }}>
+                        active
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[11px] mt-1" style={{ color: colors.muted }}>{shortSlugs}</span>
+                  <div className="flex gap-3 mt-1 text-[11px]" style={{ color: colors.dim }}>
+                    {p.sharpe != null && <span>Sharpe {p.sharpe.toFixed(2)}</span>}
+                    {p.max_drawdown_pct != null && <span>MDD {(p.max_drawdown_pct * 100).toFixed(1)}%</span>}
+                    {p.total_return != null && <span>Ret {(p.total_return * 100).toFixed(1)}%</span>}
+                  </div>
+                  <span className="text-[11px] mt-0.5" style={{ color: colors.dim }}>
+                    {p.start_date} → {p.end_date}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </ChartCard>
+      )}
+
       {/* Strategy Selection */}
       <ChartCard title="PORTFOLIO STRATEGY SELECTION">
         <div className="space-y-2">
@@ -394,7 +474,7 @@ export function Portfolio() {
                 ))}
               </select>
               <div className="flex items-center gap-1">
-                <span className="text-[10px]" style={{ color: colors.dim }}>Weight</span>
+                <span className="text-[11px]" style={{ color: colors.dim }}>Weight</span>
                 <input
                   type="number"
                   min={1}
@@ -409,12 +489,12 @@ export function Portfolio() {
                     fontFamily: "var(--font-mono)",
                   }}
                 />
-                <span className="text-[10px]" style={{ color: colors.dim }}>%</span>
+                <span className="text-[11px]" style={{ color: colors.dim }}>%</span>
               </div>
               {slots.length > 2 && (
                 <button
                   onClick={() => removeSlot(idx)}
-                  className="text-[10px] px-1.5 py-0.5 rounded"
+                  className="text-[11px] px-1.5 py-0.5 rounded"
                   style={{ color: colors.red, border: `1px solid ${colors.red}44` }}
                 >
                   ✕
@@ -447,7 +527,7 @@ export function Portfolio() {
             </button>
           </div>
           {hasDuplicates && (
-            <div className="text-[10px] mt-1" style={{ color: colors.red }}>
+            <div className="text-[11px] mt-1" style={{ color: colors.red }}>
               Duplicate strategy selected — please choose different strategies
             </div>
           )}
@@ -493,7 +573,7 @@ export function Portfolio() {
               >
                 {stressLoading ? "Running…" : "Run Portfolio Stress Test"}
               </button>
-              <span className="text-[10px]" style={{ color: colors.dim }}>Monte Carlo on merged portfolio returns</span>
+              <span className="text-[11px]" style={{ color: colors.dim }}>Monte Carlo on merged portfolio returns</span>
             </div>
 
             {stressResult && (
@@ -513,7 +593,7 @@ export function Portfolio() {
                       className="flex-1 min-w-[100px] rounded px-3 py-2"
                       style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}
                     >
-                      <div className="text-[9px] uppercase tracking-wide mb-0.5" style={{ color: colors.muted }}>{label}</div>
+                      <div className="text-[11px] uppercase tracking-wide mb-0.5" style={{ color: colors.muted }}>{label}</div>
                       <div
                         className="text-[14px] font-bold"
                         style={{
