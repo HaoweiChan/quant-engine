@@ -271,6 +271,24 @@ config = EngineConfig(max_loss=max_loss, pyramid_risk_level=pyramid_risk_level)
 
 ---
 
+## Start-from-Simple & Ablation-Driven Complexity
+
+When building or refactoring a strategy:
+
+1. **Start with the minimum viable signal** — the core entry indicator (e.g., Donchian
+   breakout) plus one directional filter (e.g., VWAP bias). No optional filters.
+2. **Add complexity only when proven**: Each additional indicator/filter must be justified
+   by an ablation study (run by Quant Researcher) showing it improves Sharpe by ≥ 0.1
+   or reduces MDD by ≥ 2pp.
+3. **Use toggleable filters**: Boolean `use_*` or `*_enabled` params (int 0/1) let the
+   optimizer disable filters that don't contribute. This is preferred over hardcoded logic.
+4. **Keep `_Indicators` thin**: The strategy-local `_Indicators` class should only compose
+   centralized indicators from `src/indicators/`. Custom math belongs in `src/indicators/`.
+5. **Remove what hurts**: If an ablation study shows an indicator degrades performance,
+   remove it from the strategy permanently — don't just disable it by default.
+
+---
+
 ## Code Standards
 
 - All public methods: type annotations required.

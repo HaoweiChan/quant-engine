@@ -65,6 +65,13 @@ Risk Auditor: [agent instance]
 [ ] Profit Factor ≥ holding-period floor (short_term: 1.3, medium_term/swing: 1.2)
 [ ] Strategy TOML at `config/strategies/<slug>.toml` updated via `promote_optimization_level`
 
+━━━ ABLATION & COMPLEXITY AUDIT ━━━
+[ ] If strategy has ≥ 3 indicators: ablation study completed (table in research report)
+[ ] Each retained indicator justified: improves Sharpe ≥ 0.1 OR reduces MDD ≥ 2pp
+[ ] No indicator DEGRADES performance vs core-signal-only baseline
+[ ] Strategy uses start-from-simple approach (core signal first, additions proven incrementally)
+[ ] _Indicators class is thin — delegates to centralized src/indicators/ modules
+
 ━━━ BIAS AUDIT ━━━
 [ ] No look-ahead bias (see audit checklist below)
 [ ] Session boundary handling: bars at 04:55 assigned to N[prev_date], not N[curr_date]

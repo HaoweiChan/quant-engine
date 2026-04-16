@@ -31,6 +31,49 @@ but you make no code changes and you touch no production systems.
 
 ---
 
+## Start-from-Simple & Ablation Study Protocol
+
+**Before optimizing any strategy with multiple indicators**, run an ablation study to
+prove each indicator contributes positively. Complex strategies often underperform
+simpler ones because added filters introduce overfitting or cancel useful signals.
+
+### Start-from-Simple Principle
+Build the strategy incrementally, starting with the core signal only:
+1. **Baseline**: Run the strategy with ONLY its primary signal (e.g., Donchian breakout)
+   plus the minimum directional filter (e.g., VWAP). All optional filters disabled.
+2. **Incremental addition**: Add one indicator/filter at a time. After each addition,
+   run a walk-forward or MC comparison against the previous configuration.
+3. **Keep only what helps**: An indicator is "beneficial" if it improves Sharpe by ≥ 0.1
+   OR reduces MDD by ≥ 2pp without significantly degrading Sharpe. If it doesn't help,
+   remove it — simpler is better.
+
+### Ablation Study Procedure
+For an existing strategy with N indicators/filters:
+1. Run the full strategy as baseline.
+2. Remove each indicator one at a time and re-run (N separate runs).
+3. Compare each ablated version against baseline.
+4. If removing an indicator IMPROVES performance, that indicator is harmful — remove it permanently.
+5. Report results in a table:
+
+```
+## Ablation Study — [Strategy] — [Date]
+| Configuration         | Sharpe | MDD    | Trades | Verdict     |
+|-----------------------|--------|--------|--------|-------------|
+| Full (baseline)       | X.X    | X.X%   | N      | —           |
+| − ADX                 | X.X    | X.X%   | N      | KEEP/REMOVE |
+| − Volume filter       | X.X    | X.X%   | N      | KEEP/REMOVE |
+| − RSI filter          | X.X    | X.X%   | N      | KEEP/REMOVE |
+| Core signal only      | X.X    | X.X%   | N      | BASELINE    |
+```
+
+### When to Run Ablation
+- Before any L2 optimization attempt on a strategy with ≥ 3 indicators
+- When a strategy fails L2 gates (MDD too high, Sharpe too low) — simplification
+  often fixes what parameter tuning cannot
+- When inheriting or reviewing a strategy written by another agent
+
+---
+
 ## Phase 1: Parameter Stress Testing (Simulation)
 
 **Purpose**: Find parameters that survive distributional stress. Not an alpha claim.

@@ -221,6 +221,50 @@ These defaults are injected automatically in the backtest engine (`_build_runner
 
 ---
 
+## Ablation Study & Start-from-Simple Protocol
+
+Before optimizing any strategy with ≥ 3 indicators, run an ablation study.
+
+**Start-from-simple**: Build incrementally — core signal only → add one indicator at a
+time → keep only what helps (Sharpe +0.1 or MDD -2pp). Simpler strategies generalize
+better out-of-sample.
+
+**Ablation study**: For existing strategies, remove each indicator one at a time. If
+removal IMPROVES performance, that indicator is harmful — remove it permanently.
+
+**When required**:
+- Before any L2 optimization attempt on a strategy with ≥ 3 indicators
+- When a strategy fails L2 gates (MDD/Sharpe) — simplification often fixes what
+  parameter tuning cannot
+- When reviewing or inheriting another agent's strategy
+
+The ablation report (table of configurations vs metrics) must be included in the
+research report. The Risk Auditor verifies that every retained indicator is justified.
+
+---
+
+## Ablation Study & Start-from-Simple Protocol
+
+Before optimizing any strategy with ≥ 3 indicators, run an ablation study.
+
+**Start-from-simple**: Build incrementally — core signal only → add one indicator at a
+time → keep only what helps (Sharpe +0.1 or MDD -2pp). Simpler strategies generalize
+better out-of-sample.
+
+**Ablation study**: For existing strategies, remove each indicator one at a time. If
+removal IMPROVES performance, that indicator is harmful — remove it permanently.
+
+**When required**:
+- Before any L2 optimization attempt on a strategy with ≥ 3 indicators
+- When a strategy fails L2 gates (MDD/Sharpe) — simplification often fixes what
+  parameter tuning cannot
+- When reviewing or inheriting another agent's strategy
+
+The ablation report (table of configurations vs metrics) must be included in the
+research report. The Risk Auditor verifies that every retained indicator is justified.
+
+---
+
 ## Quality Gates
 
 A strategy may not be promoted to live unless every item below passes.

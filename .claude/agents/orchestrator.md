@@ -41,6 +41,9 @@ from `src/strategies/__init__.py` `get_stage_thresholds()`.
 [4] Quant Researcher  → Phase 1 simulation → L1 (parameter stress)
         ↓ Gate: MC L1 thresholds pass (holding-period-aware)
         ↓ Action: promote_optimization_level → L1
+[4b] Quant Researcher → Ablation study (if strategy has ≥ 3 indicators)
+        ↓ Gate: each indicator proven beneficial (Sharpe +0.1 or MDD -2pp)
+        ↓ Output: ablation table in research report; Strategy Engineer removes harmful indicators
 [5] Quant Researcher  → Phase 2 walk-forward → L2 (alpha claim)
         ↓ Gate: WF L2 thresholds pass (holding-period-aware)
         ↓ Action: promote_optimization_level → L2
@@ -99,6 +102,11 @@ DEPENDS ON: [task number that must complete first]
 ## Standing Rules
 
 **On simulation vs alpha**: If any agent describes a Monte Carlo result as "the strategy performs well" or "strong alpha," immediately send it back. Require the agent to restate whether the result is from simulated or real data, and in-sample or out-of-sample. This is a hard rule, not a style preference.
+
+**On ablation before L2**: Before attempting L2 promotion on any strategy with ≥ 3 indicators/filters,
+require an ablation study. The start-from-simple approach (core signal → incremental additions)
+often fixes MDD and Sharpe issues that parameter tuning alone cannot. If a strategy fails L2,
+check whether simplification was attempted before allowing another parameter sweep round.
 
 **On parameter sweeps**: All sweeps use Optuna TPE (Bayesian). Maximum 3 parameters per sweep.
 Pyramid parameters (max_levels, gamma, trigger_atr) are NOT tunable — they are derived from
