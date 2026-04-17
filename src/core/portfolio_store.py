@@ -72,10 +72,33 @@ CREATE TABLE IF NOT EXISTS portfolio_stress_tests (
     p95_final       REAL
 );
 
+CREATE TABLE IF NOT EXISTS portfolio_walk_forward_runs (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id                  INTEGER REFERENCES portfolio_runs(id),
+    ran_at                  TEXT NOT NULL,
+    symbol                  TEXT NOT NULL,
+    start_date              TEXT NOT NULL,
+    end_date                TEXT NOT NULL,
+    n_folds                 INTEGER NOT NULL,
+    oos_fraction            REAL NOT NULL,
+    objective               TEXT NOT NULL,
+    strategy_slugs          TEXT NOT NULL,
+    n_folds_computed        INTEGER NOT NULL,
+    aggregate_oos_sharpe    REAL NOT NULL,
+    aggregate_oos_mdd       REAL NOT NULL,
+    worst_fold_oos_mdd      REAL NOT NULL,
+    weight_drift_cv         REAL NOT NULL,
+    correlation_stability   REAL NOT NULL,
+    thresholds_applied_json TEXT,
+    per_fold_json           TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_port_runs_symbol ON portfolio_runs(symbol);
 CREATE INDEX IF NOT EXISTS idx_port_alloc_run ON portfolio_allocations(run_id);
 CREATE INDEX IF NOT EXISTS idx_port_alloc_selected ON portfolio_allocations(is_selected);
 CREATE INDEX IF NOT EXISTS idx_port_stress_run ON portfolio_stress_tests(run_id);
+CREATE INDEX IF NOT EXISTS idx_port_wf_run ON portfolio_walk_forward_runs(run_id);
+CREATE INDEX IF NOT EXISTS idx_port_wf_symbol ON portfolio_walk_forward_runs(symbol);
 """
 
 
@@ -184,6 +207,101 @@ class PortfolioStore:
         self._conn.commit()
         return cur.lastrowid
 
+    def save_walk_forward(
+        self,
+        result: dict[str, Any],
+        symbol: str,
+        start: str,
+        end: str,
+        n_folds: int,
+        oos_fraction: float,
+        run_id: int | None = None,
+    ) -> int:
+        """Persist a portfolio walk-forward result.
+
+        ``result`` must be the ``as_dict()`` output of
+        ``PortfolioWalkForwardResult``. ``run_id`` is an optional foreign
+        key back to ``portfolio_runs`` — pass it when the walk-forward
+        used the same strategies + params as an optimization run.
+        """
+        now = datetime.now(_TAIPEI_TZ).isoformat()
+        cur = self._conn.execute(
+            """INSERT INTO portfolio_walk_forward_runs
+               (run_id, ran_at, symbol, start_date, end_date,
+                n_folds, oos_fraction, objective, strategy_slugs,
+                n_folds_computed, aggregate_oos_sharpe, aggregate_oos_mdd,
+                worst_fold_oos_mdd, weight_drift_cv, correlation_stability,
+                thresholds_applied_json, per_fold_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                run_id, now, symbol, start, end,
+                n_folds, oos_fraction,
+                result.get("objective", "max_sharpe"),
+                json.dumps(result["strategy_slugs"]),
+                result.get("n_folds_computed", 0),
+                result["aggregate_oos_sharpe"],
+                result["aggregate_oos_mdd"],
+                result["worst_fold_oos_mdd"],
+                result["weight_drift_cv"],
+                result["correlation_stability"],
+                json.dumps(result.get("thresholds_applied", {})),
+                json.dumps(result.get("per_fold", [])),
+            ),
+        )
+        self._conn.commit()
+        wf_id = cur.lastrowid
+        logger.info(
+            "portfolio_walk_forward_saved",
+            wf_id=wf_id,
+            run_id=run_id,
+            oos_sharpe=result["aggregate_oos_sharpe"],
+            n_folds=result.get("n_folds_computed", 0),
+        )
+        return wf_id
+
+    def get_walk_forward(self, wf_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM portfolio_walk_forward_runs WHERE id=?", (wf_id,),
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["strategy_slugs"] = json.loads(d.pop("strategy_slugs"))
+        d["thresholds_applied"] = json.loads(d.pop("thresholds_applied_json") or "{}")
+        d["per_fold"] = json.loads(d.pop("per_fold_json"))
+        return d
+
+    def list_walk_forwards(
+        self,
+        run_id: int | None = None,
+        symbol: str | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where: list[str] = []
+        if run_id is not None:
+            where.append("run_id=?")
+            params.append(run_id)
+        if symbol:
+            where.append("symbol=?")
+            params.append(symbol)
+        sql = "SELECT * FROM portfolio_walk_forward_runs"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            d["strategy_slugs"] = json.loads(d.pop("strategy_slugs"))
+            d["thresholds_applied"] = json.loads(
+                d.pop("thresholds_applied_json") or "{}",
+            )
+            d["per_fold"] = json.loads(d.pop("per_fold_json"))
+            out.append(d)
+        return out
+
     def select_allocation(self, run_id: int, objective: str) -> bool:
         """Mark an allocation as the selected/active one for a run.
 
@@ -195,7 +313,9 @@ class PortfolioStore:
             (run_id,),
         )
         cur = self._conn.execute(
-            "UPDATE portfolio_allocations SET is_selected=1, selected_at=? WHERE run_id=? AND objective=?",
+            "UPDATE portfolio_allocations "
+            "SET is_selected=1, selected_at=? "
+            "WHERE run_id=? AND objective=?",
             (now, run_id, objective),
         )
         self._conn.commit()
@@ -262,4 +382,14 @@ class PortfolioStore:
             "SELECT * FROM portfolio_stress_tests WHERE run_id=?", (run["id"],),
         ).fetchall()
         run["stress_tests"] = [dict(s) for s in stresses]
+        # Attach walk-forward runs (ids + aggregate metrics only, avoid
+        # bloating the payload with per-fold JSON).
+        wf_rows = self._conn.execute(
+            """SELECT id, ran_at, objective, n_folds_computed,
+                      aggregate_oos_sharpe, worst_fold_oos_mdd,
+                      weight_drift_cv, correlation_stability
+               FROM portfolio_walk_forward_runs WHERE run_id=?""",
+            (run["id"],),
+        ).fetchall()
+        run["walk_forwards"] = [dict(r) for r in wf_rows]
         return run
