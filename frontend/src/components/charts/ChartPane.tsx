@@ -155,6 +155,7 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
   useEffect(() => {
     if (!containerRef.current) return;
     const chart = createChart(containerRef.current, {
+      autoSize: true,
       width: containerRef.current.clientWidth,
       height,
       layout: {

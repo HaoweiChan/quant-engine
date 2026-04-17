@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import type { IChartApi } from "lightweight-charts";
 import type { OHLCVBar, TradeSignal } from "@/lib/api";
 import type { ActiveIndicator, SeriesOutput } from "@/lib/indicatorRegistry";
@@ -54,9 +54,20 @@ interface ChartStackProps {
   headerLabel?: string;
   /** Callback when visible time range changes (for syncing with other charts) */
   onVisibleRangeChange?: (range: { fromTs: string; toTs: string } | null) => void;
+  /** External range to apply to this chart's primary x-axis (bidirectional sync) */
+  syncRange?: { fromTs: string; toTs: string } | null;
+  /** When set, replaces the Expand button with a view-mode toggle showing this label */
+  viewModeLabel?: string;
+  /** Callback when view-mode toggle button is clicked */
+  onViewModeToggle?: () => void;
 }
 
-export function ChartStack({
+export interface ChartStackHandle {
+  fit: () => void;
+  toggleSecondary: () => void;
+}
+
+export const ChartStack = forwardRef<ChartStackHandle, ChartStackProps>(function ChartStack({
   bars,
   activeIndicators,
   timeframeMinutes = 1,
@@ -69,7 +80,10 @@ export function ChartStack({
   showOverlayControls = false,
   headerLabel,
   onVisibleRangeChange,
-}: ChartStackProps) {
+  syncRange,
+  viewModeLabel,
+  onViewModeToggle,
+}, ref) {
   const chartCardRef = useRef<HTMLDivElement | null>(null);
   const primaryRef = useRef<ChartPaneHandle>(null);
   const secondaryRef = useRef<ChartPaneHandle>(null);
@@ -375,6 +389,8 @@ export function ChartStack({
     if (!primary || ds.length === 0) return;
 
     const emitRange = (range: { from: number; to: number } | null) => {
+      // Suppress emit while we're applying an inbound syncRange (prevents feedback loop)
+      if (syncing.current) return;
       if (!range || ds.length === 0) {
         onVisibleRangeChange(null);
         return;
@@ -398,6 +414,22 @@ export function ChartStack({
       try { primary.timeScale().unsubscribeVisibleLogicalRangeChange(handler); } catch { /* ok */ }
     };
   }, [onVisibleRangeChange, ds]);
+
+  // Apply external syncRange to primary chart (bidirectional sync source).
+  // Suppresses outbound emit via the `syncing` ref to prevent feedback loops.
+  useEffect(() => {
+    if (!syncRange || ds.length === 0) return;
+    const primary = primaryRef.current?.chart();
+    if (!primary) return;
+    const fromIdx = ds.findIndex((b) => b.timestamp >= syncRange.fromTs);
+    const toIdx = ds.findIndex((b) => b.timestamp >= syncRange.toTs);
+    const from = fromIdx === -1 ? 0 : fromIdx;
+    const to = toIdx === -1 ? ds.length - 1 : toIdx;
+    if (syncing.current) return;
+    syncing.current = true;
+    try { primary.timeScale().setVisibleLogicalRange({ from, to }); } catch { /* ok */ }
+    syncing.current = false;
+  }, [syncRange, ds]);
 
   const handleFit = () => {
     const chart = primaryRef.current?.chart();
@@ -430,7 +462,12 @@ export function ChartStack({
     }
   };
 
-  const showHeader = headerLabel || onTimeframeChange || expandable;
+  useImperativeHandle(ref, () => ({
+    fit: handleFit,
+    toggleSecondary: () => setSecondaryVisible((v) => !v),
+  }), [handleFit]);
+
+  const showHeader = headerLabel || onTimeframeChange || expandable || viewModeLabel;
   const noBars = bars.length === 0;
 
   // Calculate dynamic chart heights based on container
@@ -443,7 +480,7 @@ export function ChartStack({
     if (expanded) {
       return { primaryHeight: 520, secondaryHeight: secondaryVisible ? DEFAULT_SECONDARY_HEIGHT : 0 };
     }
-    if (!containerHeight || containerHeight < 200) {
+    if (!containerHeight || containerHeight < 100) {
       return { primaryHeight: DEFAULT_PRIMARY_HEIGHT, secondaryHeight: secondaryVisible ? DEFAULT_SECONDARY_HEIGHT : 0 };
     }
     const availableHeight = containerHeight - totalChrome;
@@ -507,7 +544,16 @@ export function ChartStack({
             >
               {secondaryVisible ? "Hide Sub" : "Sub Chart"}
             </button>
-            {expandable && (
+            {viewModeLabel && onViewModeToggle ? (
+              <button
+                onClick={onViewModeToggle}
+                className="px-2 py-0.5 rounded text-[11px] cursor-pointer border-none uppercase"
+                style={{ fontFamily: "var(--font-mono)", background: "rgba(90,138,242,0.25)", color: colors.blue }}
+                title="Switch view mode"
+              >
+                {viewModeLabel}
+              </button>
+            ) : expandable && (
               <button
                 onClick={toggleExpand}
                 className="px-2 py-0.5 rounded text-[11px] cursor-pointer border-none"
@@ -654,7 +700,7 @@ export function ChartStack({
           volume={volume}
           series={overlaySeries}
           markers={visibleSignalMarkers.length > 0 ? visibleSignalMarkers : undefined}
-          showTimeScale={false}
+          showTimeScale={!secondaryVisible}
           timeframeMinutes={timeframeMinutes}
           onRequestOlderData={handleLoadOlder}
           tickMarkFormatter={formatTick}
@@ -711,4 +757,4 @@ export function ChartStack({
       </>}
     </div>
   );
-}
+});

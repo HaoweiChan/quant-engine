@@ -65,21 +65,8 @@ export function OrderBlotterPane({ playbackFills }: OrderBlotterPaneProps = {}) 
   const isPlayback = playbackFills !== undefined && playbackFills.length > 0;
 
   return (
-    <div className="overflow-y-auto" style={{ maxHeight: 320 }}>
-      <div className="flex items-center justify-between mb-1.5 px-1">
-        <span className="text-[11px] font-semibold" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-          ORDER BLOTTER
-        </span>
-          <span className="flex items-center gap-1 text-[11px]" style={{ fontFamily: "var(--font-mono)" }}>
-          <span
-            className="inline-block w-1.5 h-1.5 rounded-full"
-            style={{ background: isPlayback ? colors.cyan : connected ? colors.green : colors.red }}
-          />
-          <span style={{ color: isPlayback ? colors.cyan : connected ? colors.dim : colors.red }}>
-            {isPlayback ? "PLAYBACK" : connected ? "LIVE" : "DISCONNECTED"}
-          </span>
-        </span>
-      </div>
+    <div className="h-full flex flex-col">
+      <div className="p-2 overflow-y-auto flex-1">
       {events.length === 0 ? (
         <div className="text-[11px] py-3 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
           No events yet.
@@ -98,6 +85,17 @@ export function OrderBlotterPane({ playbackFills }: OrderBlotterPaneProps = {}) 
               <th className="text-right py-0.5 px-1" style={{ color: colors.dim }}>Qty</th>
               <th className="text-right py-0.5 px-1" style={{ color: colors.dim }}>Price</th>
               <th className="text-right py-0.5 px-1" style={{ color: colors.dim }}>Slip(bps)</th>
+              <th className="text-right py-0.5 px-1">
+                <span className="flex items-center justify-end gap-1" style={{ fontFamily: "var(--font-mono)" }}>
+                  <span
+                    className="inline-block w-1.5 h-1.5 rounded-full"
+                    style={{ background: isPlayback ? colors.cyan : connected ? colors.green : colors.red }}
+                  />
+                  <span style={{ color: isPlayback ? colors.cyan : connected ? colors.dim : colors.red }}>
+                    {isPlayback ? "PLAYBACK" : connected ? "LIVE" : "DISCONNECTED"}
+                  </span>
+                </span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -107,6 +105,7 @@ export function OrderBlotterPane({ playbackFills }: OrderBlotterPaneProps = {}) 
           </tbody>
         </table>
       )}
+      </div>
     </div>
   );
 }
