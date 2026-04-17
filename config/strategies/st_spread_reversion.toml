@@ -1,0 +1,21 @@
+[params]
+lookback = 33
+entry_z = 1.624
+exit_z = 0.666
+min_std = 1.0
+stop_extra = 1.5
+max_hold_bars = 180
+
+[optimization]
+level = 1
+level_name = "L1_EXPLORATORY"
+achieved_at = "2026-04-17T12:15:20+08:00"
+holding_period = "short_term"
+
+[optimization.gate_results]
+sharpe = 21.78
+trades_per_fold = 1395
+mdd_pct = 0.051
+sensitivity_cv = 0.033
+profit_factor = 14.65
+win_rate = 0.8953

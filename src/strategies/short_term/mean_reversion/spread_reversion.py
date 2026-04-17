@@ -43,7 +43,7 @@ _INDICATOR_PARAMS = compose_param_schema({
     "min_std": (RollingZScore, "min_std"),
 })
 # Override defaults / bounds to match 1-min spread semantics.
-_INDICATOR_PARAMS["lookback"]["default"] = 60
+_INDICATOR_PARAMS["lookback"]["default"] = 33
 _INDICATOR_PARAMS["lookback"]["min"] = 20
 _INDICATOR_PARAMS["lookback"]["max"] = 200
 _INDICATOR_PARAMS["lookback"]["description"] = "Rolling window for spread mean/std (1-min bars)."
@@ -55,11 +55,11 @@ _INDICATOR_PARAMS["min_std"]["description"] = "Minimum spread std to consider th
 PARAM_SCHEMA: dict[str, dict] = {
     **_INDICATOR_PARAMS,
     "entry_z": {
-        "type": "float", "default": 2.0, "min": 1.0, "max": 4.0,
+        "type": "float", "default": 1.624, "min": 1.0, "max": 4.0,
         "description": "Z-score threshold to enter mean-reversion trade.",
     },
     "exit_z": {
-        "type": "float", "default": 0.3, "min": 0.0, "max": 1.5,
+        "type": "float", "default": 0.666, "min": 0.0, "max": 1.5,
         "description": "Z-score threshold to take profit (near mean).",
     },
     "stop_extra": {
