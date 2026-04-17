@@ -99,6 +99,16 @@ class LiveExecutionEngine:
         base_stats["active_disaster_stops"] = float(self._active_disaster_stops)
         return base_stats
 
+    async def on_bar_open(self, symbol: str, open_price: float) -> None:
+        """Interface parity with PaperExecutionEngine.
+
+        Live mode does not simulate disaster stops against bar opens —
+        the real broker evaluates the condition on the tick stream, so
+        this hook is a no-op here. The paper analogue triggers the
+        simulated fill loop.
+        """
+        del symbol, open_price
+
     async def on_tick(self, price: float, symbol: str) -> None:
         if self._monitor is not None:
             await self._monitor.on_tick(price, symbol)

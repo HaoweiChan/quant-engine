@@ -1,8 +1,9 @@
 """Per-session live strategy runner: bar → snapshot → signal → orders → fills."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, Union
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -21,8 +22,14 @@ from src.core.types import (
 )
 from src.data.session_utils import is_new_session
 from src.execution.engine import ExecutionResult
+from src.execution.live import LiveExecutor, LiveExecutorConfig
+from src.execution.live_execution_engine import LiveExecutionEngine
 from src.execution.paper import PaperExecutor
 from src.execution.paper_execution_engine import PaperExecutionEngine
+
+ExecutionMode = Literal["paper", "live"]
+_AnyExecutor = Union[PaperExecutor, LiveExecutor]
+_AnyExecutionEngine = Union[PaperExecutionEngine, LiveExecutionEngine]
 
 logger = structlog.get_logger(__name__)
 _TAIPEI_TZ = ZoneInfo("Asia/Taipei")
@@ -45,6 +52,10 @@ class LiveStrategyRunner:
         strategy_params: dict[str, Any] | None = None,
         sizing_config: SizingConfig | None = None,
         sizer: PortfolioSizer | None = None,
+        execution_mode: ExecutionMode = "paper",
+        broker_api: Any | None = None,
+        event_loop: asyncio.AbstractEventLoop | None = None,
+        live_executor_config: LiveExecutorConfig | None = None,
     ) -> None:
         """Per-session live strategy runner.
 
@@ -58,6 +69,15 @@ class LiveStrategyRunner:
                 Backward compatible: when ``sizer`` is ``None``, a fresh
                 per-runner ``PortfolioSizer`` is created from ``sizing_config``
                 (legacy behaviour).
+            execution_mode: Resolved by ``mode_resolver.resolve_session_mode``
+                before construction. "paper" builds a simulated executor
+                (default, backward compatible). "live" builds a real
+                broker executor using ``broker_api`` and ``event_loop``.
+            broker_api: shioaji API handle — required when
+                ``execution_mode="live"``.
+            event_loop: asyncio event loop for live callback bridging —
+                required when ``execution_mode="live"``.
+            live_executor_config: Optional override for LiveExecutor.
         """
         self.session_id = session_id
         self.account_id = account_id
@@ -75,10 +95,19 @@ class LiveStrategyRunner:
         self._adapter = TaifexAdapter(backtest_mode=False)
         self._sizer = sizer if sizer is not None else PortfolioSizer(sizing_config)
         self._owns_sizer = sizer is None
-        engine, executor, paper_engine = self._build_components(strategy_params)
+        self._execution_mode: ExecutionMode = execution_mode
+        self._broker_api = broker_api
+        self._event_loop = event_loop
+        self._live_executor_config = live_executor_config
+        # Cached last observed tick price for unrealized-PnL fallback
+        # when running live (LiveExecutor does not hold a _current_price).
+        self._last_bar_close: float = 0.0
+        engine, executor, exec_engine = self._build_components(strategy_params)
         self._engine: PositionEngine = engine
-        self._executor: PaperExecutor = executor
-        self._paper_engine: PaperExecutionEngine = paper_engine
+        self._executor: _AnyExecutor = executor
+        # Legacy attribute name preserved for historical reasons; now
+        # refers to whichever execution engine (paper or live) was built.
+        self._paper_engine: _AnyExecutionEngine = exec_engine
         self._attach_add_sizer()
         logger.info(
             "live_runner_init",
@@ -86,14 +115,22 @@ class LiveStrategyRunner:
             strategy=strategy_slug,
             symbol=symbol,
             equity=equity_budget,
+            mode=execution_mode,
             sizing=self._sizer.config.__dict__,
             shared_sizer=not self._owns_sizer,
         )
 
     def _build_components(
         self, params: dict[str, Any] | None
-    ) -> tuple[PositionEngine, PaperExecutor, PaperExecutionEngine]:
-        """Resolve strategy factory and build engine + executor."""
+    ) -> tuple[PositionEngine, _AnyExecutor, _AnyExecutionEngine]:
+        """Resolve strategy factory and build engine + executor.
+
+        Dispatches between paper and live executors based on
+        ``self._execution_mode``. The mode must have been resolved by
+        the caller via ``mode_resolver.resolve_session_mode`` —
+        constructing a runner directly with the wrong mode is the
+        caller's bug, not this function's.
+        """
         from src.core.types import get_instrument_cost_config
         from src.mcp_server.facade import get_active_params_for_mcp, resolve_factory
 
@@ -106,18 +143,41 @@ class LiveStrategyRunner:
         cost = get_instrument_cost_config(self.symbol)
         specs = self._adapter.get_contract_specs(self.symbol)
         engine: PositionEngine = factory(**merged)
-        executor = PaperExecutor(
-            slippage_points=cost.slippage_bps * specs.point_value / 10000 if cost.slippage_bps else 1.0,
-            current_price=0.0,
-            available_margin=self._equity_budget,
-            margin_per_lot=specs.margin_initial,
+
+        if self._execution_mode == "paper":
+            executor: _AnyExecutor = PaperExecutor(
+                slippage_points=(
+                    cost.slippage_bps * specs.point_value / 10000
+                    if cost.slippage_bps else 1.0
+                ),
+                current_price=0.0,
+                available_margin=self._equity_budget,
+                margin_per_lot=specs.margin_initial,
+            )
+            exec_engine: _AnyExecutionEngine = PaperExecutionEngine(
+                executor=executor,
+                position_engine=engine,
+                config=engine._config,
+            )
+            return engine, executor, exec_engine
+
+        # Live mode — requires a broker API and asyncio loop.
+        if self._broker_api is None or self._event_loop is None:
+            raise ValueError(
+                f"execution_mode='live' for session {self.session_id} requires "
+                "broker_api and event_loop to be provided"
+            )
+        live_executor = LiveExecutor(
+            api=self._broker_api,
+            loop=self._event_loop,
+            config=self._live_executor_config,
         )
-        paper_engine = PaperExecutionEngine(
-            executor=executor,
+        live_engine = LiveExecutionEngine(
+            executor=live_executor,
             position_engine=engine,
             config=engine._config,
         )
-        return engine, executor, paper_engine
+        return engine, live_executor, live_engine
 
     def _attach_add_sizer(self) -> None:
         """Attach PortfolioSizer.size_add hook to the engine.
@@ -190,12 +250,21 @@ class LiveStrategyRunner:
         if not state.positions:
             return 0.0
         specs = self._adapter.get_contract_specs(self.symbol)
+        # PaperExecutor exposes ``_current_price`` set via set_market_state;
+        # LiveExecutor does not (price discovery lives at the broker). Fall
+        # back to the last observed bar close so the PnL reporting path
+        # remains defined in both modes.
+        current_price = getattr(self._executor, "_current_price", None)
+        if not current_price:
+            current_price = self._last_bar_close
+        if not current_price:
+            return 0.0
         total = 0.0
         for pos in state.positions:
             if pos.direction == "long":
-                total += (self._executor._current_price - pos.entry_price) * pos.lots * specs.point_value
+                total += (current_price - pos.entry_price) * pos.lots * specs.point_value
             else:
-                total += (pos.entry_price - self._executor._current_price) * pos.lots * specs.point_value
+                total += (pos.entry_price - current_price) * pos.lots * specs.point_value
         return total
 
     async def on_bar_complete(self, symbol: str, bar: MinuteBar) -> list[ExecutionResult]:
@@ -217,10 +286,15 @@ class LiveStrategyRunner:
         # accurate for cross-runner aggregation (LivePipelineManager uses
         # this to push exposure into the shared PortfolioSizer).
         self._last_margin_per_unit = snapshot.margin_per_unit
-        self._executor.set_market_state(
-            price=snapshot.price,
-            available_margin=max(self._equity_budget + self._realized_pnl - self._margin_used(snapshot), 0),
-        )
+        self._last_bar_close = snapshot.price
+        # ``set_market_state`` is paper-only — LiveExecutor gets price
+        # and margin from the broker. Guard the call so the runner
+        # works uniformly across modes.
+        if hasattr(self._executor, "set_market_state"):
+            self._executor.set_market_state(
+                price=snapshot.price,
+                available_margin=max(self._equity_budget + self._realized_pnl - self._margin_used(snapshot), 0),
+            )
         account = self._make_account(snapshot)
         orders = self._engine.on_snapshot(snapshot, signal=None, account=account)
         if not orders:
@@ -375,7 +449,8 @@ class LiveStrategyRunner:
         if not state.positions:
             return []
         snapshot = self._bar_to_snapshot(bar)
-        self._executor.set_market_state(price=snapshot.price)
+        if hasattr(self._executor, "set_market_state"):
+            self._executor.set_market_state(price=snapshot.price)
         orders: list[Order] = []
         for pos in state.positions:
             close_side = "sell" if pos.direction == "long" else "buy"
