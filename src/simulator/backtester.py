@@ -21,6 +21,7 @@ from src.core.types import (
     MarketEvent,
     MarketSignal,
     MarketSnapshot,
+    Order,
     OrderEvent,
     Position,
     PyramidConfig,
@@ -178,26 +179,30 @@ class BacktestRunner:
                 else:
                     open_entries[sym] = (fill.fill_price, fill.lots, fill.side)
 
-            # Force-close all positions at session end (intraday mode)
+            # Session-end force-close must go through fill_model so commission and
+            # slippage bill uniformly with normal exits.
             if force_flat_indices is not None and i in force_flat_indices and open_entries:
-                close_price = bar["close"]
                 for sym, (entry_price, lots, entry_side) in list(open_entries.items()):
+                    exit_side = "sell" if entry_side == "buy" else "buy"
+                    close_order = Order(
+                        order_type="market",
+                        side=exit_side,
+                        symbol=sym,
+                        contract_type="large",
+                        lots=lots,
+                        price=None,
+                        stop_price=None,
+                        reason="session_close",
+                    )
+                    fill = self._fill_model.simulate(close_order, bar, ts)
+                    trade_log.append(fill)
+                    realized_pnl -= fill.commission_cost
                     if entry_side == "buy":
-                        delta = close_price - entry_price
+                        delta = fill.fill_price - entry_price
                     else:
-                        delta = entry_price - close_price
+                        delta = entry_price - fill.fill_price
                     pnl = delta * lots * snapshot.point_value
                     realized_pnl += pnl
-                    trade_log.append(Fill(
-                        order_type="market",
-                        side="sell" if entry_side == "buy" else "buy",
-                        symbol=sym,
-                        lots=lots,
-                        fill_price=close_price,
-                        slippage=0.0,
-                        timestamp=ts,
-                        reason="session_close",
-                    ))
                 open_entries.clear()
                 engine = self._engine_factory()
                 self._attach_sizer(engine)
