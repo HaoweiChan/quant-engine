@@ -1,0 +1,44 @@
+# Portfolio config: tx_4strategy
+# Last saved: 2026-04-17T14:10:10.050014+08:00
+
+[portfolio]
+name = "tx_4strategy"
+symbol = "TX"
+description = "4-strategy TAIFEX portfolio (vol_managed_bnh + donchian_trend_strength + night_session_long + spread_reversion)"
+
+[[portfolio.strategies]]
+slug = "swing/trend_following/vol_managed_bnh"
+weight = 0.12
+params_source = "config/strategies/swing/trend_following/vol_managed_bnh.toml"
+
+[[portfolio.strategies]]
+slug = "medium_term/trend_following/donchian_trend_strength"
+weight = 0.15
+params_source = "config/strategies/mt_donchian_trend_strength.toml"
+
+[[portfolio.strategies]]
+slug = "short_term/trend_following/night_session_long"
+weight = 0.16
+params_source = "config/strategies/st_night_session_long.toml"
+
+[[portfolio.strategies]]
+slug = "short_term/mean_reversion/spread_reversion"
+weight = 0.57
+params_source = "config/strategies/st_spread_reversion.toml"
+
+[portfolio.kelly]
+fraction = 0.25
+long_only = true
+operating_point = "quarter_kelly"
+
+[optimization]
+level = 2
+level_name = "L2_VALIDATED"
+achieved_at = "2026-04-17T14:10:10.049951+08:00"
+warnings = ["advisory: weight_drift_cv=0.4136 > ceiling 0.3"]
+
+[optimization.gate_results]
+aggregate_oos_sharpe = 7.6551
+worst_fold_oos_mdd = 0.0322
+weight_drift_cv = 0.4136
+correlation_stability = 0.8674
