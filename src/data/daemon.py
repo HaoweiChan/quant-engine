@@ -26,8 +26,9 @@ TAIPEI_TZ = ZoneInfo("Asia/Taipei")
 HEARTBEAT_PATH = Path("/tmp/taifex-data-daemon.heartbeat")
 HEARTBEAT_INTERVAL_SECS = 60
 
-# Build prefix→symbol lookup from the contract registry
-_PREFIX_TO_SYMBOL: dict[str, str] = {c.shioaji_group: c.db_symbol for c in CONTRACTS}
+# Note: routing is done per-contract at subscribe time via self._code_to_symbol,
+# not by prefix. Prefix-routing collapses R1/R2 into the same db_symbol because
+# both share the same shioaji_group (e.g. "TXF").
 
 
 class SessionScheduler:
@@ -81,6 +82,9 @@ class DataDaemon:
         self._shutdown_event = threading.Event()
         self._last_tick_ts: datetime | None = None
         self._tick_count = 0
+        # Resolved-contract-code → db_symbol. Rebuilt on every _subscribe()
+        # because contract codes change after each TAIFEX settlement.
+        self._code_to_symbol: dict[str, str] = {}
 
     def start(self, api_key: str, secret_key: str, simulation: bool = False) -> None:
         """Start the daemon: login, subscribe, and run the main loop."""
@@ -128,22 +132,22 @@ class DataDaemon:
         self._subscribe()
 
     def _subscribe(self) -> None:
-        """Subscribe to tick feeds for all configured contracts."""
+        """Subscribe to tick feeds for all configured contracts.
+
+        Resolves each CONTRACTS entry's shioaji_path (e.g. "Futures.TXF.TXFR1")
+        to its actual contract object and records contract.code → db_symbol so
+        ticks route by exact contract code (R1 vs R2) rather than by prefix.
+        """
         import shioaji as sj
 
         def _on_tick(exchange: Any, tick: Any) -> None:
             code = getattr(tick, "code", "")
+            symbol = self._code_to_symbol.get(code)
+            if symbol is None:
+                return  # not a subscribed contract
             price = float(getattr(tick, "close", 0))
             volume = int(getattr(tick, "volume", 0))
             if price <= 0:
-                return
-
-            symbol: str | None = None
-            for prefix, sym in _PREFIX_TO_SYMBOL.items():
-                if code.startswith(prefix):
-                    symbol = sym
-                    break
-            if symbol is None:
                 return
 
             raw_ts = getattr(tick, "datetime", None)
@@ -168,30 +172,39 @@ class DataDaemon:
         # shioaji fetches contracts asynchronously after login
         time.sleep(2)
 
-        for contract in CONTRACTS:
+        # Rebuild the code map from scratch — contract codes change after settlement.
+        self._code_to_symbol.clear()
+
+        for contract_def in CONTRACTS:
             try:
-                group = getattr(self._api.Contracts.Futures, contract.shioaji_group)
-                candidates = [
-                    c for c in group
-                    if getattr(c, "code", "")[-2:] not in ("R1", "R2")
-                ]
-                if not candidates:
-                    logger.warning("daemon_no_contracts", symbol=contract.db_symbol)
+                obj = self._api.Contracts
+                for part in contract_def.shioaji_path.split("."):
+                    obj = getattr(obj, part)
+                actual_code = getattr(obj, "code", None)
+                if not actual_code:
+                    logger.warning(
+                        "daemon_resolve_failed",
+                        symbol=contract_def.db_symbol,
+                        path=contract_def.shioaji_path,
+                    )
                     continue
-                near_month = min(
-                    candidates,
-                    key=lambda c: getattr(c, "delivery_date", "9999"),
-                )
-                code = getattr(near_month, "code", "?")
                 self._api.quote.subscribe(
-                    near_month,
+                    obj,
                     quote_type=sj.constant.QuoteType.Tick,
                     version=sj.constant.QuoteVersion.v1,
                 )
-                logger.info("daemon_subscribed", symbol=contract.db_symbol, code=code)
+                self._code_to_symbol[actual_code] = contract_def.db_symbol
+                logger.info(
+                    "daemon_subscribed",
+                    symbol=contract_def.db_symbol,
+                    code=actual_code,
+                    path=contract_def.shioaji_path,
+                )
             except Exception as exc:
                 logger.warning(
-                    "daemon_subscribe_failed", symbol=contract.db_symbol, error=str(exc),
+                    "daemon_subscribe_failed",
+                    symbol=contract_def.db_symbol,
+                    error=str(exc),
                 )
 
     def _main_loop(self) -> None:
