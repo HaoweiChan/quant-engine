@@ -32,6 +32,23 @@ CREATE TABLE IF NOT EXISTS account_equity_history (
     margin_used REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_acct_equity_ts ON account_equity_history(account_id, timestamp);
+CREATE TABLE IF NOT EXISTS live_fills (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       TEXT NOT NULL,
+    account_id      TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    strategy_slug   TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    side            TEXT NOT NULL,
+    price           REAL NOT NULL,
+    quantity        INTEGER NOT NULL,
+    fee             REAL NOT NULL DEFAULT 0,
+    pnl_realized    REAL NOT NULL DEFAULT 0,
+    is_session_close INTEGER NOT NULL DEFAULT 0,
+    signal_reason   TEXT NOT NULL DEFAULT '',
+    slippage_bps    REAL
+);
+CREATE INDEX IF NOT EXISTS idx_live_fills_acct_ts ON live_fills(account_id, timestamp);
 """
 
 
@@ -183,3 +200,80 @@ class AccountEquityStore:
                 points,
             )
         return len(points)
+
+
+class FillStore:
+    """Persists live execution fills to trading.db for war room display."""
+
+    def __init__(self, db_path: Path | None = None) -> None:
+        self._db_path = db_path or _DB_PATH
+        self._ensure_schema()
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_schema(self) -> None:
+        with self._conn() as conn:
+            conn.executescript(_SCHEMA)
+
+    def record_fill(
+        self,
+        timestamp: str,
+        account_id: str,
+        session_id: str,
+        strategy_slug: str,
+        symbol: str,
+        side: str,
+        price: float,
+        quantity: int,
+        fee: float = 0.0,
+        pnl_realized: float = 0.0,
+        is_session_close: bool = False,
+        signal_reason: str = "",
+        slippage_bps: float | None = None,
+    ) -> None:
+        """Persist a single fill event."""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO live_fills "
+                "(timestamp, account_id, session_id, strategy_slug, symbol, side, "
+                "price, quantity, fee, pnl_realized, is_session_close, signal_reason, slippage_bps) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    timestamp,
+                    account_id,
+                    session_id,
+                    strategy_slug,
+                    symbol,
+                    side,
+                    price,
+                    quantity,
+                    fee,
+                    pnl_realized,
+                    1 if is_session_close else 0,
+                    signal_reason,
+                    slippage_bps,
+                ),
+            )
+
+    def get_recent_fills(self, account_id: str, limit: int = 200) -> list[dict]:
+        """Retrieve recent fills for an account, newest first."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM live_fills WHERE account_id = ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (account_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_fills_since(self, account_id: str, since: str, limit: int = 200) -> list[dict]:
+        """Retrieve fills after a given timestamp."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM live_fills WHERE account_id = ? AND timestamp > ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (account_id, since, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]

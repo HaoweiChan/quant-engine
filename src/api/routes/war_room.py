@@ -15,6 +15,7 @@ from collections import deque
 from fastapi import APIRouter, Query
 
 from src.api.helpers import get_war_room_data
+from src.trading_session.store import FillStore
 
 router = APIRouter(prefix="/api", tags=["trading"])
 
@@ -685,18 +686,42 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
             }
             for p in (snap.positions if snap and snap.connected else [])
         ]
-        recent_fills_block = [
-            {
-                "timestamp": f.timestamp.isoformat() if hasattr(f.timestamp, "isoformat") else str(f.timestamp),
-                "symbol": f.symbol,
-                "side": f.side,
-                "price": f.price,
-                "quantity": f.quantity,
-                "fee": f.fee,
-                "strategy_slug": None,
-            }
-            for f in (snap.recent_fills if snap and snap.connected else [])
-        ]
+        # For live accounts, read from persistent FillStore instead of broker API
+        # which loses fills on reconnect
+        if acct_id != _MOCK_ACCOUNT_ID:
+            try:
+                fill_store = FillStore()
+                db_fills = fill_store.get_recent_fills(acct_id, limit=200)
+                recent_fills_block = [
+                    {
+                        "timestamp": f["timestamp"],
+                        "symbol": f["symbol"],
+                        "side": f["side"],
+                        "price": float(f["price"]),
+                        "quantity": int(f["quantity"]),
+                        "fee": float(f["fee"]),
+                        "strategy_slug": f["strategy_slug"],
+                        "signal_reason": f.get("signal_reason", ""),
+                        "is_session_close": bool(f.get("is_session_close", 0)),
+                        "slippage_bps": f.get("slippage_bps"),
+                    }
+                    for f in db_fills
+                ]
+            except Exception:
+                recent_fills_block = []
+        else:
+            recent_fills_block = [
+                {
+                    "timestamp": f.timestamp.isoformat() if hasattr(f.timestamp, "isoformat") else str(f.timestamp),
+                    "symbol": f.symbol,
+                    "side": f.side,
+                    "price": f.price,
+                    "quantity": f.quantity,
+                    "fee": f.fee,
+                    "strategy_slug": None,
+                }
+                for f in (snap.recent_fills if snap and snap.connected else [])
+            ]
         equity_curve_block = [
             {"timestamp": t.isoformat(), "equity": e} for t, e in equity_curve
         ]
