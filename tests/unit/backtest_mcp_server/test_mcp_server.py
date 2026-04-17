@@ -316,7 +316,10 @@ class TestFacade:
 class TestToolRegistration:
     def test_tools_list_has_correct_count(self):
         from src.mcp_server.tools import TOOLS
-        assert len(TOOLS) == 17
+        # Portfolio extensions (2026-04-17) added 4 new tools:
+        # run_portfolio_walk_forward, run_portfolio_risk_report,
+        # promote_portfolio_optimization_level, activate_portfolio_allocation.
+        assert len(TOOLS) == 22
 
     def test_all_tools_have_names_and_schemas(self):
         from src.mcp_server.tools import TOOLS
@@ -328,6 +331,12 @@ class TestToolRegistration:
             "scaffold_strategy", "get_run_history", "activate_candidate",
             "run_risk_report", "run_walk_forward",
             "promote_optimization_level", "run_sensitivity_check",
+            "run_portfolio_optimization",
+            # Portfolio extensions (2026-04-17)
+            "run_portfolio_walk_forward",
+            "run_portfolio_risk_report",
+            "promote_portfolio_optimization_level",
+            "activate_portfolio_allocation",
         }
         actual_names = {t.name for t in TOOLS}
         assert actual_names == expected_names

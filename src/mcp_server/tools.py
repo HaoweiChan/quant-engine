@@ -6,33 +6,37 @@ import asyncio
 import functools
 import json
 import logging
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
 from src.mcp_server.facade import (
     activate_candidate_for_mcp,
+    activate_portfolio_allocation_for_mcp,
     get_active_params_for_mcp,
     get_run_history_for_mcp,
     get_strategy_parameter_schema,
+    promote_portfolio_optimization_level_for_mcp,
     run_backtest_for_mcp,
     run_backtest_realdata_for_mcp,
     run_monte_carlo_for_mcp,
     run_portfolio_optimization_for_mcp,
+    run_portfolio_risk_report_for_mcp,
+    run_portfolio_walk_forward_for_mcp,
     run_risk_report_for_mcp,
     run_sensitivity_check_for_mcp,
     run_stress_for_mcp,
     run_sweep_for_mcp,
     run_walk_forward_for_mcp,
 )
+from src.mcp_server.history import OptimizationHistory
 from src.mcp_server.validation import (
     backup_strategy_file,
     list_strategy_files,
     validate_strategy_content,
 )
-from src.mcp_server.history import OptimizationHistory
 
 _STRATEGIES_DIR = Path(__file__).resolve().parent.parent / "strategies"
 
@@ -803,6 +807,155 @@ TOOLS: list[Tool] = [
         },
     ),
     Tool(
+        name="run_portfolio_walk_forward",
+        description=(
+            "Portfolio-level expanding-window walk-forward validation. Keeps "
+            "individual strategy params frozen; re-optimizes WEIGHTS on each "
+            "in-sample fold and applies them to the out-of-sample fold. "
+            "Reports per-fold OOS Sharpe/MDD, weight drift CV, correlation "
+            "stability — the L2 acid-test for a multi-strategy portfolio.\n\n"
+            "Returns per-fold metrics plus aggregate OOS Sharpe, worst-fold MDD, "
+            "weight_drift_cv, correlation_stability."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "strategies": {
+                    "type": "array",
+                    "description": "2-5 strategy entries (same shape as run_portfolio_optimization)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "slug": {"type": "string"},
+                            "params": {"type": "object"},
+                        },
+                        "required": ["slug"],
+                    },
+                    "minItems": 2,
+                    "maxItems": 5,
+                },
+                "symbol": {"type": "string", "default": "TX"},
+                "start": {"type": "string", "default": "2024-06-01"},
+                "end": {"type": "string", "default": "2026-04-10"},
+                "initial_equity": {"type": "number", "default": 2000000.0},
+                "min_weight": {"type": "number", "default": 0.05},
+                "n_folds": {"type": "integer", "default": 3},
+                "oos_fraction": {"type": "number", "default": 0.2},
+                "objective": {
+                    "type": "string",
+                    "enum": ["max_sharpe", "max_return", "min_drawdown", "risk_parity"],
+                    "default": "max_sharpe",
+                },
+                "link_run_id": {
+                    "type": "integer",
+                    "description": "Optional portfolio_runs.id to link this walk-forward to for audit traceability",
+                },
+            },
+            "required": ["strategies"],
+        },
+    ),
+    Tool(
+        name="activate_portfolio_allocation",
+        description=(
+            "Mark a single (run_id, objective) allocation as the selected / "
+            "active portfolio allocation in portfolio_opt.db. Parallels "
+            "activate_candidate for per-strategy params. Deactivates any "
+            "previously-selected allocation for the same run."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "integer",
+                    "description": "portfolio_runs.id from run_portfolio_optimization",
+                },
+                "objective": {
+                    "type": "string",
+                    "enum": ["max_sharpe", "max_return", "min_drawdown", "risk_parity", "equal_weight"],
+                    "default": "max_sharpe",
+                },
+            },
+            "required": ["run_id"],
+        },
+    ),
+    Tool(
+        name="run_portfolio_risk_report",
+        description=(
+            "Portfolio-level 5-layer risk report: sensitivity (±20% return "
+            "scaling), correlation stress (off-diagonals → 0.8), concurrent-stop "
+            "stress (all strategies worst-day simultaneously), slippage stress "
+            "(uniform daily drag), kelly scan (fraction sweep).\n\n"
+            "Returns per-layer status + metrics + overall_status. Intended as "
+            "portfolio-level companion to run_risk_report."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "strategies": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "slug": {"type": "string"},
+                            "params": {"type": "object"},
+                        },
+                        "required": ["slug"],
+                    },
+                    "minItems": 2,
+                    "maxItems": 5,
+                },
+                "weights": {
+                    "type": "object",
+                    "description": "Per-slug weight dict; must sum to ~1.0",
+                    "additionalProperties": {"type": "number"},
+                },
+                "symbol": {"type": "string", "default": "TX"},
+                "start": {"type": "string", "default": "2024-06-01"},
+                "end": {"type": "string", "default": "2026-04-10"},
+                "initial_equity": {"type": "number", "default": 2000000.0},
+                "thresholds": {
+                    "type": "object",
+                    "description": "Optional override of default gate thresholds",
+                    "additionalProperties": {"type": "number"},
+                },
+            },
+            "required": ["strategies", "weights"],
+        },
+    ),
+    Tool(
+        name="promote_portfolio_optimization_level",
+        description=(
+            "Attempt to advance a named portfolio from its current L0-L3 "
+            "optimization level to target_level. Gates are mirror-image of "
+            "per-strategy promotion thresholds adapted for multi-strategy "
+            "portfolios. On success, writes config/portfolios/<name>.toml."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "portfolio_name": {
+                    "type": "string",
+                    "description": "Portfolio identifier (e.g. 'tx_4strategy')",
+                },
+                "target_level": {
+                    "type": "integer",
+                    "description": "Target level (1=L1_EXPLORATORY, 2=L2_VALIDATED, 3=L3_PRODUCTION)",
+                    "enum": [1, 2, 3],
+                },
+                "gate_results": {
+                    "type": "object",
+                    "description": "Metric dict checked against level thresholds (combined_sharpe, aggregate_oos_sharpe, worst_fold_oos_mdd, weight_drift_cv, correlation_stability, slippage_stress_sharpe, paper_trade_sessions)",
+                    "additionalProperties": True,
+                },
+                "portfolio_spec": {
+                    "type": "object",
+                    "description": "Optional initial [portfolio] metadata (name, symbol, strategies, kelly) written on first promotion",
+                },
+            },
+            "required": ["portfolio_name", "target_level", "gate_results"],
+        },
+    ),
+    Tool(
         name="run_portfolio_optimization",
         description=(
             "Find optimal capital allocation weights across 2-5 strategies. "
@@ -1199,6 +1352,7 @@ def register_tools(app: Server) -> None:
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 filepath.write_text(content)
                 import sys as _sys
+
                 from src.strategies.registry import invalidate
 
                 invalidate()
@@ -1211,8 +1365,8 @@ def register_tools(app: Server) -> None:
                 stale_candidates_deactivated = 0
                 deactivation_warning = None
                 try:
-                    from src.strategies.param_registry import ParamRegistry
                     from src.strategies.code_hash import compute_strategy_hash
+                    from src.strategies.param_registry import ParamRegistry
 
                     try:
                         new_hash, _ = compute_strategy_hash(filename)
@@ -1302,7 +1456,6 @@ def register_tools(app: Server) -> None:
                 from src.mcp_server.facade import resolve_strategy_slug
                 from src.strategies import (
                     OptimizationLevel,
-                    get_stage_thresholds,
                     get_thresholds_for_strategy,
                     read_optimization_level,
                     write_optimization_level,
@@ -1381,6 +1534,49 @@ def register_tools(app: Server) -> None:
                     end=arguments.get("end", "2026-03-14"),
                     initial_equity=arguments.get("initial_equity", 2_000_000.0),
                     min_weight=arguments.get("min_weight", 0.10),
+                )
+                return _json_response(result)
+
+            if name == "run_portfolio_walk_forward":
+                result = run_portfolio_walk_forward_for_mcp(
+                    strategies=arguments["strategies"],
+                    symbol=arguments.get("symbol", "TX"),
+                    start=arguments.get("start", "2024-06-01"),
+                    end=arguments.get("end", "2026-04-10"),
+                    initial_equity=arguments.get("initial_equity", 2_000_000.0),
+                    min_weight=arguments.get("min_weight", 0.05),
+                    n_folds=arguments.get("n_folds", 3),
+                    oos_fraction=arguments.get("oos_fraction", 0.2),
+                    objective=arguments.get("objective", "max_sharpe"),
+                    link_run_id=arguments.get("link_run_id"),
+                )
+                return _json_response(result)
+
+            if name == "activate_portfolio_allocation":
+                result = activate_portfolio_allocation_for_mcp(
+                    run_id=arguments["run_id"],
+                    objective=arguments.get("objective", "max_sharpe"),
+                )
+                return _json_response(result)
+
+            if name == "run_portfolio_risk_report":
+                result = run_portfolio_risk_report_for_mcp(
+                    strategies=arguments["strategies"],
+                    weights=arguments["weights"],
+                    symbol=arguments.get("symbol", "TX"),
+                    start=arguments.get("start", "2024-06-01"),
+                    end=arguments.get("end", "2026-04-10"),
+                    initial_equity=arguments.get("initial_equity", 2_000_000.0),
+                    thresholds=arguments.get("thresholds"),
+                )
+                return _json_response(result)
+
+            if name == "promote_portfolio_optimization_level":
+                result = promote_portfolio_optimization_level_for_mcp(
+                    portfolio_name=arguments["portfolio_name"],
+                    target_level=arguments["target_level"],
+                    gate_results=arguments["gate_results"],
+                    portfolio_spec=arguments.get("portfolio_spec"),
                 )
                 return _json_response(result)
 

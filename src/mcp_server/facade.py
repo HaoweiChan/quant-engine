@@ -2546,3 +2546,292 @@ def run_portfolio_optimization_for_mcp(
         output["persistence_warning"] = f"Failed to save to DB: {exc}"
 
     return output
+
+
+# ---------------------------------------------------------------------------
+# Portfolio-level MCP tools (walk-forward, risk report, promotion)
+# ---------------------------------------------------------------------------
+
+def _collect_portfolio_daily_returns(
+    strategies: list[dict[str, Any]],
+    symbol: str,
+    start: str,
+    end: str,
+    initial_equity: float,
+) -> tuple[dict[str, Any], list[str]]:
+    """Backtest each strategy on real data; return {slug: daily_returns_array}.
+
+    Mirrors the inner loop of ``run_portfolio_optimization_for_mcp`` so
+    downstream portfolio tools share the same return-source semantics.
+    """
+    import numpy as np
+
+    daily_returns: dict[str, Any] = {}
+    errors: list[str] = []
+    for entry in strategies:
+        slug = entry["slug"]
+        params = entry.get("params")
+        resolved = resolve_strategy_slug(slug)
+        try:
+            bt = run_backtest_realdata_for_mcp(
+                symbol=symbol,
+                start=start,
+                end=end,
+                strategy=resolved,
+                strategy_params=params,
+                initial_equity=initial_equity,
+            )
+        except Exception as exc:
+            errors.append(f"{slug}: {exc}")
+            continue
+        if "error" in bt:
+            errors.append(f"{slug}: {bt['error']}")
+            continue
+        dr = bt.get("daily_returns", [])
+        if hasattr(dr, "tolist"):
+            dr = dr.tolist()
+        if not dr:
+            errors.append(f"{slug}: no daily returns produced")
+            continue
+        daily_returns[slug] = np.array(dr, dtype=np.float64)
+    return daily_returns, errors
+
+
+def run_portfolio_walk_forward_for_mcp(
+    strategies: list[dict[str, Any]],
+    symbol: str = "TX",
+    start: str = "2024-06-01",
+    end: str = "2026-04-10",
+    initial_equity: float = 2_000_000.0,
+    min_weight: float = 0.05,
+    n_folds: int = 3,
+    oos_fraction: float = 0.2,
+    objective: str = "max_sharpe",
+    link_run_id: int | None = None,
+) -> dict[str, Any]:
+    """Portfolio-level expanding-window walk-forward validation.
+
+    When ``link_run_id`` is supplied, the walk-forward result is persisted
+    to ``portfolio_opt.db`` with a foreign key back to the named
+    ``portfolio_runs`` row so downstream audit can trace weights + OOS
+    metrics back to the same strategy+param set. When ``link_run_id`` is
+    ``None``, persistence still happens (for traceability) but without a
+    run_id linkage.
+    """
+    from src.simulator.portfolio_walk_forward import PortfolioWalkForward
+
+    if len(strategies) < 2:
+        return {"error": "Need at least 2 strategies for portfolio walk-forward"}
+    if len(strategies) > 5:
+        return {"error": "Maximum 5 strategies supported"}
+
+    daily_returns, errors = _collect_portfolio_daily_returns(
+        strategies=strategies,
+        symbol=symbol,
+        start=start,
+        end=end,
+        initial_equity=initial_equity,
+    )
+    if errors:
+        return {"error": f"Backtest failures: {'; '.join(errors)}"}
+    if len(daily_returns) < 2:
+        return {"error": "Need at least 2 successful backtests"}
+
+    try:
+        wf = PortfolioWalkForward(
+            daily_returns=daily_returns,
+            initial_capital=initial_equity,
+            min_weight=min_weight,
+            n_folds=n_folds,
+            oos_fraction=oos_fraction,
+            objective=objective,
+        )
+        result = wf.run()
+    except Exception as exc:
+        return {"error": f"Walk-forward failed: {exc}"}
+
+    output = result.as_dict()
+
+    # Auto-persist to portfolio_opt.db for audit / history
+    try:
+        from src.core.portfolio_store import PortfolioStore
+        store = PortfolioStore()
+        wf_id = store.save_walk_forward(
+            result=output,
+            symbol=symbol,
+            start=start,
+            end=end,
+            n_folds=n_folds,
+            oos_fraction=oos_fraction,
+            run_id=link_run_id,
+        )
+        store.close()
+        output["wf_id"] = wf_id
+        if link_run_id is not None:
+            output["run_id"] = link_run_id
+    except Exception as exc:
+        output["persistence_warning"] = f"Failed to save walk-forward: {exc}"
+    return output
+
+
+def activate_portfolio_allocation_for_mcp(
+    run_id: int,
+    objective: str = "max_sharpe",
+) -> dict[str, Any]:
+    """Mark a single allocation row (run_id, objective) as the selected
+    portfolio allocation.
+
+    Parallels ``activate_candidate`` for per-strategy params. On success,
+    ``portfolio_allocations.is_selected`` becomes ``1`` for the named row
+    and ``0`` for all other objectives in the same run. Returns the
+    activated allocation record or an error dict.
+    """
+    from src.core.portfolio_store import PortfolioStore
+
+    store = PortfolioStore()
+    try:
+        run = store.get_run(run_id)
+        if run is None:
+            return {"error": f"run_id {run_id} not found in portfolio_opt.db"}
+        ok = store.select_allocation(run_id, objective)
+        if not ok:
+            return {
+                "error": (
+                    f"No allocation for run_id={run_id} objective={objective!r}. "
+                    f"Available objectives: {sorted(run.get('allocations', {}).keys())}"
+                ),
+            }
+        selected = store.get_selected_allocation(run_id)
+        return {
+            "status": "activated",
+            "run_id": run_id,
+            "objective": objective,
+            "weights": selected.get("weights") if selected else None,
+            "sharpe": selected.get("sharpe") if selected else None,
+            "selected_at": selected.get("selected_at") if selected else None,
+        }
+    finally:
+        store.close()
+
+
+def run_portfolio_risk_report_for_mcp(
+    strategies: list[dict[str, Any]],
+    weights: dict[str, float],
+    symbol: str = "TX",
+    start: str = "2024-06-01",
+    end: str = "2026-04-10",
+    initial_equity: float = 2_000_000.0,
+    thresholds: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Portfolio-level 5-layer risk report.
+
+    ``weights`` must sum to ~1.0 and cover all strategy slugs in
+    ``strategies``.
+    """
+    from src.simulator.portfolio_risk_report import PortfolioRiskReport
+
+    if len(strategies) < 2:
+        return {"error": "Need at least 2 strategies for portfolio risk report"}
+
+    daily_returns, errors = _collect_portfolio_daily_returns(
+        strategies=strategies,
+        symbol=symbol,
+        start=start,
+        end=end,
+        initial_equity=initial_equity,
+    )
+    if errors:
+        return {"error": f"Backtest failures: {'; '.join(errors)}"}
+
+    slug_set = set(daily_returns.keys())
+    weight_slugs = set(weights.keys())
+    if slug_set != weight_slugs:
+        return {
+            "error": (
+                f"weights keys {sorted(weight_slugs)} must match "
+                f"strategy slugs {sorted(slug_set)}"
+            ),
+        }
+
+    try:
+        report = PortfolioRiskReport(
+            daily_returns=daily_returns,
+            weights=weights,
+            initial_capital=initial_equity,
+            thresholds=thresholds,
+        )
+        result = report.run()
+    except Exception as exc:
+        return {"error": f"Risk report failed: {exc}"}
+    return result.as_dict()
+
+
+def promote_portfolio_optimization_level_for_mcp(
+    portfolio_name: str,
+    target_level: int,
+    gate_results: dict[str, Any],
+    portfolio_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Attempt to promote a portfolio to ``target_level`` (L0=0 … L3=3).
+
+    On successful promotion, writes the new level + ``gate_results`` into
+    ``config/portfolios/<portfolio_name>.toml``. When the file does not
+    yet exist, ``portfolio_spec`` (optional) supplies the initial
+    ``[portfolio]`` metadata (name, symbol, strategies, kelly config).
+    """
+    from src.simulator.portfolio_promotion import (
+        PortfolioOptimizationLevel,
+        load_portfolio_config,
+        promote_portfolio,
+        save_portfolio_config,
+    )
+
+    try:
+        tgt = PortfolioOptimizationLevel.from_int(int(target_level))
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    config = load_portfolio_config(portfolio_name)
+    if portfolio_spec:
+        # Merge user-supplied spec into the [portfolio] section
+        port = config.setdefault("portfolio", {})
+        port.update(portfolio_spec)
+
+    current_level_int = int(config.get("optimization", {}).get("level", 0))
+    current_level = PortfolioOptimizationLevel.from_int(current_level_int)
+
+    promotion = promote_portfolio(
+        current_level=current_level,
+        target_level=tgt,
+        gate_results=gate_results,
+    )
+
+    if promotion.passed:
+        config.setdefault("optimization", {})
+        config["optimization"]["level"] = promotion.new_level.value
+        config["optimization"]["level_name"] = promotion.new_level.name
+        config["optimization"]["achieved_at"] = promotion.promoted_at or ""
+        config["optimization"]["gate_results"] = gate_results
+        # Persist any advisory warnings as a first-class section so
+        # operators reading the TOML see regime / concentration notes.
+        if promotion.warnings:
+            config["optimization"]["warnings"] = list(promotion.warnings)
+        elif "warnings" in config.get("optimization", {}):
+            # Clear stale warnings when the re-promotion has none.
+            del config["optimization"]["warnings"]
+        saved_path = save_portfolio_config(portfolio_name, config)
+    else:
+        saved_path = None
+
+    return {
+        "portfolio_name": portfolio_name,
+        "passed": promotion.passed,
+        "new_level": promotion.new_level.value,
+        "new_level_name": promotion.new_level.name,
+        "failure_reasons": promotion.failure_reasons,
+        "thresholds_checked": promotion.thresholds_checked,
+        "advisory_thresholds_checked": promotion.advisory_thresholds_checked,
+        "warnings": promotion.warnings,
+        "promoted_at": promotion.promoted_at,
+        "config_path": str(saved_path) if saved_path else None,
+    }
