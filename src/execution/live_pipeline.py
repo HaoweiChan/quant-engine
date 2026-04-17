@@ -16,7 +16,7 @@ from src.broker_gateway.live_bar_store import LiveMinuteBarStore, MinuteBar
 from src.core.sizing import PortfolioSizer, SizingConfig
 from src.execution.live_strategy_runner import LiveStrategyRunner
 from src.trading_session.manager import SessionManager
-from src.trading_session.store import AccountEquityStore
+from src.trading_session.store import AccountEquityStore, FillStore
 
 logger = structlog.get_logger(__name__)
 
@@ -56,6 +56,7 @@ class LivePipelineManager:
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started = False
+        self._fill_store = FillStore()
 
     @property
     def portfolio_sizer(self) -> PortfolioSizer | None:
@@ -221,16 +222,40 @@ class LivePipelineManager:
             )
 
     async def _notify_fills(self, runner: LiveStrategyRunner, results: list) -> None:
-        """Send Telegram notification and blotter broadcast for each fill."""
+        """Send Telegram notification, blotter broadcast, and persist each fill."""
         for result in results:
             if result.status != "filled":
                 continue
+            fill_timestamp = result.order.metadata.get("timestamp", "")
+            is_session_close = result.order.reason == "session_close"
+            pnl_realized = result.metadata.get("realized_pnl", 0.0)
+
+            # Persist fill to database
+            try:
+                self._fill_store.record_fill(
+                    timestamp=fill_timestamp,
+                    account_id=runner.account_id,
+                    session_id=runner.session_id,
+                    strategy_slug=runner.strategy_slug,
+                    symbol=runner.symbol,
+                    side=result.order.side,
+                    price=result.fill_price,
+                    quantity=int(result.fill_qty),
+                    fee=0.0,
+                    pnl_realized=pnl_realized,
+                    is_session_close=is_session_close,
+                    signal_reason=result.order.reason or "",
+                    slippage_bps=result.slippage_bps,
+                )
+            except Exception:
+                logger.debug("fill_store_persist_failed", exc_info=True)
+
             # Broadcast to blotter WebSocket
             try:
                 from src.api.ws.blotter import blotter_broadcaster
                 await blotter_broadcaster.broadcast({
                     "type": "fill",
-                    "timestamp": result.order.metadata.get("timestamp", ""),
+                    "timestamp": fill_timestamp,
                     "account_id": runner.account_id,
                     "session_id": runner.session_id,
                     "strategy_slug": runner.strategy_slug,
@@ -241,8 +266,8 @@ class LivePipelineManager:
                     "expected_price": result.expected_price,
                     "slippage_bps": result.slippage_bps,
                     "fee": 0.0,
-                    "pnl_realized": result.metadata.get("realized_pnl", 0.0),
-                    "is_session_close": result.order.reason == "session_close",
+                    "pnl_realized": pnl_realized,
+                    "is_session_close": is_session_close,
                     "signal_reason": result.order.reason,
                     "source": "live",
                 })

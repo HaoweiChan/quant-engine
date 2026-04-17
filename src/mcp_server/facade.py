@@ -358,12 +358,25 @@ def _get_spread_meta(strategy_slug: str) -> dict | None:
     return None
 
 
-def _build_spread_bars(db, leg1_sym: str, leg2_sym: str, start, end, bar_agg: int = 1):
+def _build_spread_bars(
+    db,
+    leg1_sym: str,
+    leg2_sym: str,
+    start,
+    end,
+    bar_agg: int = 1,
+    offset_override: float | None = None,
+):
     """Construct synthetic spread bars: price = leg1 - leg2 + offset.
 
     The spread (R1-R2) can be negative, but MarketSnapshot requires price>0.
     A constant offset shifts all values positive without affecting z-score
     signals (z = (x-mean)/std is shift-invariant).
+
+    Args:
+        offset_override: If provided, use this offset instead of computing
+            from historical min. Used by live spread visualization to maintain
+            z-score continuity with the live session offset.
     """
     from src.data.db import OHLCVBar
     r1_raw = _load_bars_for_tf(db, leg1_sym, start, end, bar_agg)
@@ -371,7 +384,7 @@ def _build_spread_bars(db, leg1_sym: str, leg2_sym: str, start, end, bar_agg: in
     if not r1_raw or not r2_raw:
         return None, f"Missing data: {leg1_sym}={len(r1_raw or [])} bars, {leg2_sym}={len(r2_raw or [])} bars"
     r2_map = {b.timestamp: b for b in r2_raw}
-    # First pass: find min spread to determine offset
+    # First pass: find min spread to determine offset (unless overridden)
     raw_closes = []
     for b1 in r1_raw:
         b2 = r2_map.get(b1.timestamp)
@@ -379,7 +392,10 @@ def _build_spread_bars(db, leg1_sym: str, leg2_sym: str, start, end, bar_agg: in
             raw_closes.append(b1.close - b2.close)
     if not raw_closes:
         return None, "No overlapping timestamps between legs"
-    offset = max(-min(raw_closes) + 100.0, 0.0)
+    if offset_override is not None and offset_override >= 0:
+        offset = offset_override
+    else:
+        offset = max(-min(raw_closes) + 100.0, 0.0)
     # Second pass: build bars with offset applied
     spread_bars = []
     for b1 in r1_raw:
