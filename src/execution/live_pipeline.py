@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import datetime
 from typing import Any
 
 import structlog
 
 from src.broker_gateway.live_bar_store import LiveMinuteBarStore, MinuteBar
-from src.core.sizing import SizingConfig
+from src.core.sizing import PortfolioSizer, SizingConfig
 from src.execution.live_strategy_runner import LiveStrategyRunner
 from src.trading_session.manager import SessionManager
 from src.trading_session.store import AccountEquityStore
@@ -23,7 +22,17 @@ logger = structlog.get_logger(__name__)
 
 
 class LivePipelineManager:
-    """Manages the lifecycle of LiveStrategyRunner instances for all active sessions."""
+    """Manages the lifecycle of LiveStrategyRunner instances for all active sessions.
+
+    Optional shared portfolio sizer:
+        When a ``portfolio_sizer`` is supplied, the manager aggregates open
+        exposure across all active runners before each bar dispatch and
+        pushes it to the sizer via ``set_open_exposure``. Downstream runners
+        that consume the shared sizer can then enforce a portfolio-wide
+        ``portfolio_margin_cap`` and apply Kelly-mode scaling uniformly.
+        This hook is backward compatible — when no sizer is supplied the
+        legacy per-runner sizing behaviour is unchanged.
+    """
 
     # Default sizing: 2% risk per trade, 50% margin cap, max 10 lots
     DEFAULT_SIZING = SizingConfig(risk_per_trade=0.02, margin_cap=0.50, max_lots=10, min_lots=1)
@@ -35,16 +44,60 @@ class LivePipelineManager:
         equity_store: AccountEquityStore,
         notifier: Any = None,
         sizing_config: SizingConfig | None = None,
+        portfolio_sizer: PortfolioSizer | None = None,
     ) -> None:
         self._sm = session_manager
         self._bar_store = bar_store
         self._equity_store = equity_store
         self._notifier = notifier
         self._sizing_config = sizing_config or self.DEFAULT_SIZING
+        self._portfolio_sizer = portfolio_sizer
         self._runners: dict[str, LiveStrategyRunner] = {}
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started = False
+
+    @property
+    def portfolio_sizer(self) -> PortfolioSizer | None:
+        """The shared portfolio sizer, if any, driving global margin/Kelly policy."""
+        return self._portfolio_sizer
+
+    def aggregate_open_exposure(self) -> dict[str, float]:
+        """Compute aggregate open margin across all runners, keyed by strategy slug.
+
+        Used to feed the shared PortfolioSizer with cross-strategy exposure so
+        shared-pool cap enforcement can see the full book, not just one runner.
+        Iterates under ``self._lock`` via ``iter_runners()`` so concurrent
+        ``_sync_runners`` mutations cannot produce an inconsistent aggregate.
+        """
+        exposure: dict[str, float] = {}
+        for _sid, runner in self.iter_runners():
+            slug = runner.strategy_slug
+            margin = float(getattr(runner, "margin_used", 0.0) or 0.0)
+            exposure[slug] = exposure.get(slug, 0.0) + margin
+        return exposure
+
+    def refresh_portfolio_exposure(self) -> None:
+        """Push aggregated exposure into the shared portfolio sizer.
+
+        Safe to call when no portfolio_sizer is configured — becomes a no-op.
+        """
+        if self._portfolio_sizer is None:
+            return
+        try:
+            self._portfolio_sizer.set_open_exposure(self.aggregate_open_exposure())
+        except Exception:
+            logger.exception("portfolio_exposure_refresh_failed")
+
+    def iter_runners(self) -> list[tuple[str, LiveStrategyRunner]]:
+        """Lock-safe snapshot of (session_id, runner) pairs.
+
+        Use this from cross-cutting code (kill-switch, dashboard) that must
+        iterate runners without risking a ``dictionary changed size during
+        iteration`` race with ``_sync_runners``.
+        """
+        with self._lock:
+            return list(self._runners.items())
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         """Register bar callback and create runners for all active sessions."""
@@ -101,6 +154,7 @@ class LivePipelineManager:
                         symbol=session.symbol,
                         equity_budget=effective_eq,
                         sizing_config=self._sizing_config,
+                        sizer=self._portfolio_sizer,
                     )
                     self._runners[sid] = runner
                     logger.info(
@@ -141,8 +195,14 @@ class LivePipelineManager:
     async def _dispatch_bar(
         self, runner: LiveStrategyRunner, symbol: str, bar: MinuteBar
     ) -> None:
-        """Run one bar through a runner and record aggregate account equity."""
+        """Run one bar through a runner and record aggregate account equity.
+
+        When a shared portfolio sizer is configured, refresh its view of
+        cross-strategy exposure BEFORE the runner ticks so sizing decisions
+        see the full book state.
+        """
         try:
+            self.refresh_portfolio_exposure()
             results = await runner.on_bar_complete(symbol, bar)
             if results:
                 logger.info(
@@ -180,12 +240,15 @@ class LivePipelineManager:
             logger.debug("telegram_notify_failed", exc_info=True)
 
     def _record_account_equity(self, account_id: str) -> None:
-        """Sum equity across all runners for an account and record once."""
+        """Sum equity (and margin used) across all runners for an account."""
         try:
-            total_equity = sum(
-                r.equity for r in self._runners.values()
-                if r.account_id == account_id
+            runners = [r for _sid, r in self.iter_runners() if r.account_id == account_id]
+            total_equity = sum(r.equity for r in runners)
+            total_margin = sum(
+                float(getattr(r, "margin_used", 0.0) or 0.0) for r in runners
             )
-            self._equity_store.record(account_id, total_equity, margin_used=0.0)
+            self._equity_store.record(
+                account_id, total_equity, margin_used=total_margin,
+            )
         except Exception:
             pass

@@ -44,7 +44,21 @@ class LiveStrategyRunner:
         equity_budget: float,
         strategy_params: dict[str, Any] | None = None,
         sizing_config: SizingConfig | None = None,
+        sizer: PortfolioSizer | None = None,
     ) -> None:
+        """Per-session live strategy runner.
+
+        Args:
+            sizer: Optional shared ``PortfolioSizer`` injected by a
+                ``LivePipelineManager`` that is enforcing a portfolio-wide
+                margin cap or Kelly-mode allocation. When supplied, the
+                runner consumes the shared sizer rather than constructing
+                its own — this is how cross-strategy margin pooling and
+                per-slug Kelly scaling take effect at the runner boundary.
+                Backward compatible: when ``sizer`` is ``None``, a fresh
+                per-runner ``PortfolioSizer`` is created from ``sizing_config``
+                (legacy behaviour).
+        """
         self.session_id = session_id
         self.account_id = account_id
         self.strategy_slug = strategy_slug
@@ -54,8 +68,13 @@ class LiveStrategyRunner:
         self._fill_history: list[ExecutionResult] = []
         self._last_bar_ts: datetime | None = None
         self._bar_count = 0
+        # Cached margin-per-unit from the most recent snapshot, so
+        # ``margin_used`` can be computed outside the bar-tick context
+        # (e.g. by LivePipelineManager.aggregate_open_exposure).
+        self._last_margin_per_unit: float = 0.0
         self._adapter = TaifexAdapter(backtest_mode=False)
-        self._sizer = PortfolioSizer(sizing_config)
+        self._sizer = sizer if sizer is not None else PortfolioSizer(sizing_config)
+        self._owns_sizer = sizer is None
         engine, executor, paper_engine = self._build_components(strategy_params)
         self._engine: PositionEngine = engine
         self._executor: PaperExecutor = executor
@@ -68,6 +87,7 @@ class LiveStrategyRunner:
             symbol=symbol,
             equity=equity_budget,
             sizing=self._sizer.config.__dict__,
+            shared_sizer=not self._owns_sizer,
         )
 
     def _build_components(
@@ -124,6 +144,7 @@ class LiveStrategyRunner:
                 requested_lots=decision.lots,
                 base_lots=base_lots,
                 is_multiplier=is_multiplier,
+                strategy_slug=self.strategy_slug,
             )
             if result.lots < 1:
                 return None
@@ -143,6 +164,25 @@ class LiveStrategyRunner:
     @property
     def equity(self) -> float:
         return self._equity_budget + self._realized_pnl + self._unrealized_pnl
+
+    @property
+    def margin_used(self) -> float:
+        """Current margin consumption across all open positions.
+
+        Uses the most recently observed ``margin_per_unit`` from the bar
+        tick. Returns 0 before the first bar completes — consumers
+        (``LivePipelineManager.aggregate_open_exposure``) treat that as
+        "no cross-strategy exposure yet".
+        """
+        if self._last_margin_per_unit <= 0:
+            return 0.0
+        state = self._engine.get_state()
+        return sum(p.lots * self._last_margin_per_unit for p in state.positions)
+
+    @property
+    def positions(self) -> list[Position]:
+        """Snapshot of the engine's open positions (safe for kill-switch iteration)."""
+        return list(self._engine.get_state().positions)
 
     @property
     def _unrealized_pnl(self) -> float:
@@ -173,6 +213,10 @@ class LiveStrategyRunner:
         if self._is_session_close_bar(bar.timestamp):
             return await self._force_flat(bar)
         snapshot = self._bar_to_snapshot(bar)
+        # Cache margin_per_unit so the public ``margin_used`` property is
+        # accurate for cross-runner aggregation (LivePipelineManager uses
+        # this to push exposure into the shared PortfolioSizer).
+        self._last_margin_per_unit = snapshot.margin_per_unit
         self._executor.set_market_state(
             price=snapshot.price,
             available_margin=max(self._equity_budget + self._realized_pnl - self._margin_used(snapshot), 0),
@@ -213,6 +257,7 @@ class LiveStrategyRunner:
                     stop_distance=stop_dist,
                     point_value=snapshot.contract_specs.point_value,
                     margin_per_unit=snapshot.margin_per_unit,
+                    strategy_slug=self.strategy_slug,
                 )
                 if result.lots <= 0:
                     logger.info("sizer_rejected_entry", session=self.session_id, details=result.details)
