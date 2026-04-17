@@ -59,8 +59,6 @@ class PortfolioOptimizeRequest(BaseModel):
 def _validate_strategies(strategies: list[StrategyEntry]) -> None:
     if len(strategies) < 2:
         raise HTTPException(400, "Portfolio requires at least 2 strategies")
-    if len(strategies) > 3:
-        raise HTTPException(400, "Maximum 3 strategies allowed")
 
 
 def _run_individual_backtests(

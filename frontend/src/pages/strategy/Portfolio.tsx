@@ -350,7 +350,6 @@ export function Portfolio() {
   };
 
   const addSlot = () => {
-    if (slots.length >= 3) return;
     const newWeight = Math.round(100 / (slots.length + 1));
     setSlots((prev) => [...prev.map((s) => ({ ...s, weight: newWeight })), { slug: "", weight: newWeight }]);
   };
@@ -503,15 +502,13 @@ export function Portfolio() {
             </div>
           ))}
           <div className="flex items-center gap-3 pt-1">
-            {slots.length < 3 && (
-              <button
-                onClick={addSlot}
-                className="text-[11px] px-3 py-1 rounded"
-                style={{ color: colors.cyan, border: `1px solid ${colors.cyan}44` }}
-              >
-                + Add Strategy {String.fromCharCode(65 + slots.length)}
-              </button>
-            )}
+            <button
+              onClick={addSlot}
+              className="text-[11px] px-3 py-1 rounded"
+              style={{ color: colors.cyan, border: `1px solid ${colors.cyan}44` }}
+            >
+              + Add Strategy {String.fromCharCode(65 + slots.length)}
+            </button>
             <button
               onClick={handleMerge}
               disabled={!canMerge}
