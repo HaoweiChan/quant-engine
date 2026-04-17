@@ -12,6 +12,8 @@ import { parseTimestampMs, parseTimestampSec } from "@/lib/time";
 import { KillSwitchBar } from "@/components/KillSwitchBar";
 import { OrderBlotterPane } from "@/components/OrderBlotterPane";
 import { ChartStack } from "@/components/charts/ChartStack";
+import { SpreadView } from "./SpreadView";
+import { PanelHeader } from "./PanelHeader";
 
 import { usePlaybackStore } from "@/stores/playbackStore";
 import { PlaybackBar } from "./PlaybackBar";
@@ -22,7 +24,6 @@ import { PositionsTable } from "./PositionsTable";
 import { TradesTable } from "./TradesTable";
 import { EquityPanel } from "./EquityPanel";
 import { ActivityLog } from "./ActivityLog";
-import { DeploymentHistory } from "./DeploymentHistory";
 import { ParamCompareDrawer } from "./ParamCompareDrawer";
 import { SettlementCountdown } from "./SettlementCountdown";
 
@@ -81,6 +82,8 @@ export function WarRoomLayout() {
   const setBars = useStore(warRoomStore, (s) => s.setBars);
   const [tfMinutes, setTf] = useState(60);
   const [chartSymbolOverride, setChartSymbolOverride] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"single" | "spread">("single");
+  const prevSplitRef = useRef<number | null>(null);
   const [crawling, setCrawling] = useState(false);
   const [barError, setBarError] = useState<string | null>(null);
   const [fallbackSymbol, setFallbackSymbol] = useState<string | null>(null);
@@ -251,6 +254,19 @@ export function WarRoomLayout() {
   }, [setBars, warRoomStore, playbackRangeStartMs]);
 
   useEffect(() => { return () => { if (crawlPollRef.current) clearInterval(crawlPollRef.current); }; }, []);
+
+  // Auto-expand chart pane in spread mode so all 3 panels fit without overlapping equity.
+  // Restores user's previous split when returning to single mode.
+  useEffect(() => {
+    if (viewMode === "spread") {
+      if (prevSplitRef.current === null) prevSplitRef.current = chartSplitPercent;
+      setChartSplitPercent(92);
+    } else if (prevSplitRef.current !== null) {
+      setChartSplitPercent(prevSplitRef.current);
+      prevSplitRef.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode]);
 
   const handleTfChange = (tf: number) => {
     setTf(tf);
@@ -562,22 +578,43 @@ export function WarRoomLayout() {
                       </span>
                     )}
                   </div>
-                  <div className="flex-1 min-h-0 overflow-hidden">
-                    <ChartStack
-                      key={`${activeAccountId}-${chartSymbol}-${tfMinutes}`}
-                      bars={visibleBars}
-                      activeIndicators={[]}
-                      timeframeMinutes={tfMinutes}
-                      showVolume={true}
-                      liveTick={lastLiveTick}
-                      signals={chartSignals.length > 0 ? chartSignals : undefined}
-                      onTimeframeChange={handleTfChange}
-                      timeframeOptions={TF_OPTIONS}
-                      expandable={true}
-                      showOverlayControls={true}
-                      onVisibleRangeChange={handleVisibleRangeChange}
-                      headerLabel={`${chartSymbol} LIVE${fallbackSymbol ? ` (${fallbackSymbol} data)` : ""}`}
-                    />
+                  <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+                    {viewMode === "spread" ? (
+                      <SpreadView
+                        symbol={chartSymbol}
+                        tfMinutes={tfMinutes}
+                        onTimeframeChange={handleTfChange}
+                        timeframeOptions={TF_OPTIONS}
+                        onSwitchToSingle={() => setViewMode("single")}
+                      />
+                    ) : (
+                      <>
+                        <PanelHeader
+                          chip={chartSymbol}
+                          chipColor={colors.cyan}
+                          symbol={fallbackSymbol ? `LIVE (${fallbackSymbol} data)` : "LIVE"}
+                          bars={visibleBars}
+                          liveValue={lastLiveTick?.close}
+                        />
+                        <div className="flex-1 min-h-0">
+                          <ChartStack
+                            key={`${activeAccountId}-${chartSymbol}-${tfMinutes}`}
+                            bars={visibleBars}
+                            activeIndicators={[]}
+                            timeframeMinutes={tfMinutes}
+                            showVolume={true}
+                            liveTick={lastLiveTick}
+                            signals={chartSignals.length > 0 ? chartSignals : undefined}
+                            onTimeframeChange={handleTfChange}
+                            timeframeOptions={TF_OPTIONS}
+                            showOverlayControls={true}
+                            onVisibleRangeChange={handleVisibleRangeChange}
+                            viewModeLabel="single"
+                            onViewModeToggle={() => setViewMode("spread")}
+                          />
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -643,22 +680,12 @@ export function WarRoomLayout() {
                       {tab === "blotter" ? "ORDER BLOTTER" : tab === "trades" ? "RECENT TRADES" : "ACTIVITY LOG"}
                     </button>
                   ))}
-                  <div className="flex-1" />
-                  <DeploymentHistory
-                    history={deployHistory.filter((d) =>
-                      d.account_id === activeAccountId &&
-                      accountBindings.some((b) => b.slug === d.strategy)
-                    )}
-                    onRedeploy={poll}
-                  />
                 </div>
                 {/* Tab content */}
                 <div className="overflow-y-auto flex-1 min-h-0">
                   {bottomTab === "blotter" && <OrderBlotterPane playbackFills={playbackEnabled ? fills : undefined} />}
                   {bottomTab === "trades" && (
-                    <div className="p-2">
-                      <TradesTable fills={fills} />
-                    </div>
+                    <TradesTable fills={fills} />
                   )}
                   {bottomTab === "activity" && (
                     <ActivityLog
@@ -666,6 +693,7 @@ export function WarRoomLayout() {
                       accountId={activeAccountId}
                       fills={playbackEnabled ? fills : undefined}
                       playbackMode={playbackEnabled}
+                      bindings={accountBindings}
                     />
                   )}
                 </div>

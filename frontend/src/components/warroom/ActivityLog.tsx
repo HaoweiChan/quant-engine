@@ -12,6 +12,7 @@ interface ActivityLogProps {
   accountId: string | null;
   fills?: MockFill[];
   playbackMode?: boolean;
+  bindings?: { slug: string; symbol: string }[];
 }
 
 function fillActionLabel(fill: MockFill): { label: string; color: string } {
@@ -21,7 +22,7 @@ function fillActionLabel(fill: MockFill): { label: string; color: string } {
   return { label: "SELL", color: colors.red };
 }
 
-export function ActivityLog({ deployHistory, accountId, fills, playbackMode }: ActivityLogProps) {
+export function ActivityLog({ deployHistory, accountId, fills, playbackMode, bindings }: ActivityLogProps) {
   if (playbackMode && fills && fills.length > 0) {
     return (
       <div className="h-full flex flex-col">
@@ -47,7 +48,10 @@ export function ActivityLog({ deployHistory, accountId, fills, playbackMode }: A
   }
 
   const filtered = accountId
-    ? deployHistory.filter((d) => d.account_id === accountId)
+    ? deployHistory.filter((d) =>
+        d.account_id === accountId &&
+        (!bindings || bindings.some((b) => b.slug === d.strategy))
+      )
     : deployHistory;
 
   return (
