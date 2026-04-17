@@ -1,19 +1,23 @@
 """R1-R2 spread monitor for contract rolling optimization.
 
 Tracks the price differential between near-month (R1) and next-month (R2)
-contracts to identify optimal roll windows. Spread = R2_price - R1_price.
+contracts to identify optimal roll windows. Spread = R1_price - R2_price.
 
-A positive spread (contango) means R2 trades at a premium.
-A negative spread (backwardation) means R2 trades at a discount.
+A negative spread (contango) means R2 trades at a premium (R1 < R2).
+A positive spread (backwardation) means R2 trades at a discount (R1 > R2).
 
 For rolling long positions, the best time to roll is when the spread
 (cost of carry) is minimized. The monitor records spread history and
 provides optimal-window detection.
+
+Also provides LiveSpreadBuffer for real-time tick pairing used by the
+war room spread visualization.
 """
 from __future__ import annotations
 
 import sqlite3
 import structlog
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -37,7 +41,7 @@ class SpreadSnapshot:
     symbol: str
     r1_price: float
     r2_price: float
-    spread: float          # R2 - R1 (absolute points)
+    spread: float          # R1 - R2 (absolute points)
     spread_pct: float      # spread / R1 * 100 (%)
 
 
@@ -143,6 +147,184 @@ class SpreadMonitor:
         """Most recent spread snapshot for a symbol."""
         window = self._windows.get(symbol)
         return window.latest if window else None
+
+
+# -- Live spread buffer for war room visualization --
+
+@dataclass
+class LiveSpreadTick:
+    """Single paired spread tick for real-time visualization."""
+    timestamp_ms: int
+    symbol: str
+    r1_price: float
+    r2_price: float
+    spread: float
+    offset: float
+
+
+class LiveSpreadBuffer:
+    """Buffer R1/R2 ticks, emit spread only on matched timestamps.
+
+    Used by the war room spread visualization to pair R1/R2 ticks and
+    compute live spread values with a session-scoped offset for z-score
+    continuity.
+
+    Tick pairing uses 200ms buckets to handle timing jitter between legs.
+    """
+
+    def __init__(
+        self,
+        symbol: str = "TX",
+        bucket_ms: int = 200,
+        max_lag_ms: int = 2000,
+        stale_threshold_ms: int = 5000,
+        warmup_bars: int = 60,
+        max_buffer_per_leg: int = 1000,
+    ) -> None:
+        self._symbol = symbol
+        self._bucket_ms = bucket_ms
+        self._max_lag_ms = max_lag_ms
+        self._stale_threshold_ms = stale_threshold_ms
+        self._warmup_bars = warmup_bars
+        self._max_buffer = max_buffer_per_leg
+
+        self._r1_buffer: dict[int, float] = {}
+        self._r2_buffer: dict[int, float] = {}
+        self._spread_history: list[float] = []
+        self._session_offset: float | None = None
+        self._last_emit_ms: int = 0
+        self._last_r1_ms: int = 0
+        self._last_r2_ms: int = 0
+
+    def on_tick(
+        self, code: str, price: float, ts_ms: int
+    ) -> LiveSpreadTick | None:
+        """Process an R1 or R2 tick. Returns a spread tick if pair matched."""
+        bucket = (ts_ms // self._bucket_ms) * self._bucket_ms
+
+        if code.endswith("R1"):
+            self._r1_buffer[bucket] = price
+            self._last_r1_ms = ts_ms
+        elif code.endswith("R2"):
+            self._r2_buffer[bucket] = price
+            self._last_r2_ms = ts_ms
+        else:
+            return None
+
+        # Check for matched pair in this bucket
+        if bucket in self._r1_buffer and bucket in self._r2_buffer:
+            r1 = self._r1_buffer.pop(bucket)
+            r2 = self._r2_buffer.pop(bucket)
+            spread = r1 - r2
+
+            # Track spread history for warmup offset computation
+            self._spread_history.append(spread)
+            if len(self._spread_history) > self._warmup_bars * 2:
+                self._spread_history = self._spread_history[-self._warmup_bars:]
+
+            # Compute session offset from first warmup_bars spreads
+            if self._session_offset is None and len(self._spread_history) >= self._warmup_bars:
+                min_spread = min(self._spread_history[:self._warmup_bars])
+                self._session_offset = max(0.0, -min_spread + 100.0)
+
+            offset = self._session_offset if self._session_offset is not None else 100.0
+            self._last_emit_ms = ts_ms
+
+            return LiveSpreadTick(
+                timestamp_ms=ts_ms,
+                symbol=self._symbol,
+                r1_price=r1,
+                r2_price=r2,
+                spread=spread,
+                offset=offset,
+            )
+
+        # Prune stale entries to prevent memory growth
+        self._prune_stale(ts_ms)
+        return None
+
+    def _prune_stale(self, now_ms: int) -> None:
+        """Remove tick entries older than max_lag_ms."""
+        cutoff = now_ms - self._max_lag_ms
+        self._r1_buffer = {k: v for k, v in self._r1_buffer.items() if k > cutoff}
+        self._r2_buffer = {k: v for k, v in self._r2_buffer.items() if k > cutoff}
+
+        # Enforce max buffer size with hysteresis (prune to 50% on overflow)
+        if len(self._r1_buffer) > self._max_buffer:
+            sorted_keys = sorted(self._r1_buffer.keys())
+            keep = sorted_keys[-(self._max_buffer // 2):]
+            self._r1_buffer = {k: self._r1_buffer[k] for k in keep}
+        if len(self._r2_buffer) > self._max_buffer:
+            sorted_keys = sorted(self._r2_buffer.keys())
+            keep = sorted_keys[-(self._max_buffer // 2):]
+            self._r2_buffer = {k: self._r2_buffer[k] for k in keep}
+
+    def is_stale(self, now_ms: int | None = None) -> tuple[bool, str | None]:
+        """Check if spread feed is stale (no paired emit in threshold).
+
+        Returns (is_stale, missing_leg) where missing_leg is 'R1', 'R2', or 'BOTH'.
+        """
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
+
+        if self._last_emit_ms == 0:
+            # Never emitted - check if we have any ticks at all
+            if self._last_r1_ms == 0 and self._last_r2_ms == 0:
+                return True, "BOTH"
+            elif self._last_r1_ms == 0:
+                return True, "R1"
+            elif self._last_r2_ms == 0:
+                return True, "R2"
+            return False, None
+
+        if now_ms - self._last_emit_ms > self._stale_threshold_ms:
+            # Determine which leg is missing
+            r1_stale = now_ms - self._last_r1_ms > self._stale_threshold_ms
+            r2_stale = now_ms - self._last_r2_ms > self._stale_threshold_ms
+            if r1_stale and r2_stale:
+                return True, "BOTH"
+            elif r1_stale:
+                return True, "R1"
+            elif r2_stale:
+                return True, "R2"
+            return True, None  # Both legs active but not pairing
+
+        return False, None
+
+    def get_session_offset(self) -> float:
+        """Get current session offset (default 100.0 if warmup incomplete)."""
+        return self._session_offset if self._session_offset is not None else 100.0
+
+    def reset_session(self) -> None:
+        """Reset buffer state for new trading session."""
+        self._r1_buffer.clear()
+        self._r2_buffer.clear()
+        self._spread_history.clear()
+        self._session_offset = None
+        self._last_emit_ms = 0
+        self._last_r1_ms = 0
+        self._last_r2_ms = 0
+        logger.info("live_spread_buffer_reset", symbol=self._symbol)
+
+    @property
+    def symbol(self) -> str:
+        return self._symbol
+
+    @property
+    def warmup_complete(self) -> bool:
+        return self._session_offset is not None
+
+
+# Singleton instance for war room
+_live_buffers: dict[str, LiveSpreadBuffer] = {}
+
+
+def get_live_buffer(symbol: str = "TX") -> LiveSpreadBuffer:
+    """Get or create a per-symbol LiveSpreadBuffer instance."""
+    global _live_buffers
+    if symbol not in _live_buffers:
+        _live_buffers[symbol] = LiveSpreadBuffer(symbol=symbol)
+    return _live_buffers[symbol]
 
 
 # -- DB persistence for historical spread analysis --
