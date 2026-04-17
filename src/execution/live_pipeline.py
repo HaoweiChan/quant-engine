@@ -221,7 +221,35 @@ class LivePipelineManager:
             )
 
     async def _notify_fills(self, runner: LiveStrategyRunner, results: list) -> None:
-        """Send Telegram notification for each fill."""
+        """Send Telegram notification and blotter broadcast for each fill."""
+        for result in results:
+            if result.status != "filled":
+                continue
+            # Broadcast to blotter WebSocket
+            try:
+                from src.api.ws.blotter import blotter_broadcaster
+                await blotter_broadcaster.broadcast({
+                    "type": "fill",
+                    "timestamp": result.order.metadata.get("timestamp", ""),
+                    "account_id": runner.account_id,
+                    "session_id": runner.session_id,
+                    "strategy_slug": runner.strategy_slug,
+                    "symbol": runner.symbol,
+                    "side": result.order.side,
+                    "price": result.fill_price,
+                    "quantity": int(result.fill_qty),
+                    "expected_price": result.expected_price,
+                    "slippage_bps": result.slippage_bps,
+                    "fee": 0.0,
+                    "pnl_realized": result.metadata.get("realized_pnl", 0.0),
+                    "is_session_close": result.order.reason == "session_close",
+                    "signal_reason": result.order.reason,
+                    "source": "live",
+                })
+            except Exception:
+                logger.debug("blotter_broadcast_failed", exc_info=True)
+
+        # Send Telegram notifications
         if not self._notifier:
             return
         try:

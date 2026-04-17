@@ -85,5 +85,45 @@ describe("marketDataStore", () => {
       expect(newState.lastLiveTick!.low).toBe(104);
       expect(newState.lastLiveTick!.volume).toBe(50);
     });
+
+    it("handles offset-tagged timestamps (+08:00) from WebSocket correctly", () => {
+      // Production scenario: DB bars are naive Taipei, WebSocket ticks have +08:00 offset
+      // This test verifies the timezone normalization fix works correctly
+      const bars = [
+        { timestamp: "2025-03-01 10:00:00", open: 100, high: 105, low: 99, close: 103, volume: 1000 },
+      ];
+      useMarketDataStore.setState({ bars, lastLiveTick: bars[0], tfMinutes: 1 });
+
+      // Tick at 10:01:15 Taipei time with +08:00 offset should trigger new bar
+      const state = useMarketDataStore.getState();
+      state.processLiveTick({ price: 104, volume: 50, timestamp: "2025-03-01T10:01:15+08:00" });
+
+      const newState = useMarketDataStore.getState();
+      // Should have rolled over to a new bar (minute boundary crossed)
+      expect(newState.bars).toHaveLength(2);
+      expect(newState.lastLiveTick).not.toBeNull();
+      expect(newState.lastLiveTick!.timestamp).toBe("2025-03-01 10:01:00");
+      expect(newState.lastLiveTick!.open).toBe(104);
+      expect(newState.lastLiveTick!.volume).toBe(50);
+    });
+
+    it("updates same bar when offset-tagged tick is within same minute", () => {
+      // Tick within the same minute should update the existing bar, not create new one
+      const bars = [
+        { timestamp: "2025-03-01 10:00:00", open: 100, high: 105, low: 99, close: 103, volume: 1000 },
+      ];
+      useMarketDataStore.setState({ bars, lastLiveTick: bars[0], tfMinutes: 1 });
+
+      const state = useMarketDataStore.getState();
+      state.processLiveTick({ price: 108, volume: 50, timestamp: "2025-03-01T10:00:30+08:00" });
+
+      const newState = useMarketDataStore.getState();
+      // Should update the same bar, not create new one
+      expect(newState.bars).toHaveLength(1);
+      expect(newState.lastLiveTick).not.toBeNull();
+      expect(newState.lastLiveTick!.timestamp).toBe("2025-03-01 10:00:00");
+      expect(newState.lastLiveTick!.high).toBe(108); // Updated from tick
+      expect(newState.lastLiveTick!.close).toBe(108);
+    });
   });
 });

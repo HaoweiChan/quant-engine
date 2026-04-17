@@ -162,7 +162,6 @@ export function RiskTab() {
   const allSessions = warRoomData?.all_sessions ?? [];
   const acctSessions = allSessions.filter((s) => s.account_id === activeAccountId);
 
-  const totalEquity = activeAccount?.equity ?? 0;
   const marginUsed = activeAccount?.margin_used ?? 0;
   const marginAvail = activeAccount?.margin_available ?? 0;
   const totalUnrealizedPnl = acctSessions.reduce((sum, s) => sum + (s.snapshot?.unrealized_pnl ?? 0), 0);

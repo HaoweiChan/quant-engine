@@ -339,17 +339,25 @@ class LiveStrategyRunner:
         return sum(p.lots * snapshot.margin_per_unit for p in state.positions)
 
     def _process_fills(self, results: list[ExecutionResult], snapshot: MarketSnapshot) -> None:
+        pv = snapshot.contract_specs.point_value
         for r in results:
             if r.status != "filled":
                 continue
             self._fill_history.append(r)
-            pv = snapshot.contract_specs.point_value
-            if r.order.reason in ("exit", "stop", "session_close"):
-                # Approximate realized PnL from the fill
-                if r.order.side == "sell":
-                    self._realized_pnl += (r.fill_price - r.expected_price) * r.fill_qty * pv
-                else:
-                    self._realized_pnl += (r.expected_price - r.fill_price) * r.fill_qty * pv
+            fill_pnl = 0.0
+            if r.order.reason in ("exit", "stop", "stop_loss", "trail_stop", "trailing_stop",
+                                   "session_close", "close", "circuit_breaker"):
+                # Calculate realized PnL using entry price from order metadata
+                entry_price = r.order.metadata.get("entry_price") if r.order.metadata else None
+                if entry_price is not None:
+                    if r.order.side == "sell":  # Closing a long
+                        fill_pnl = (r.fill_price - entry_price) * r.fill_qty * pv
+                    else:  # Closing a short
+                        fill_pnl = (entry_price - r.fill_price) * r.fill_qty * pv
+                    self._realized_pnl += fill_pnl
+                # Store realized PnL in result metadata for notifications
+                r.metadata["realized_pnl"] = fill_pnl
+                r.metadata["entry_price"] = entry_price
             logger.info(
                 "live_fill",
                 session_id=self.session_id,
@@ -358,6 +366,7 @@ class LiveStrategyRunner:
                 price=r.fill_price,
                 slippage=r.slippage,
                 reason=r.order.reason,
+                realized_pnl=fill_pnl,
             )
 
     async def _force_flat(self, bar: MinuteBar) -> list[ExecutionResult]:
@@ -378,6 +387,7 @@ class LiveStrategyRunner:
                 reason="session_close",
                 order_class="algo_exit",
                 parent_position_id=pos.position_id,
+                metadata={"entry_price": pos.entry_price, "timestamp": bar.timestamp.isoformat()},
             ))
         if not orders:
             return []
