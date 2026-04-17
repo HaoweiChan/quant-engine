@@ -668,6 +668,8 @@ _market_data_subscriber = None
 _live_bar_store = None
 _live_pipeline = None
 _telegram_dispatcher = None
+_live_portfolio_store = None
+_live_portfolio_manager = None
 
 
 _subscriber_tick_count = 0
@@ -851,6 +853,7 @@ def _init_war_room() -> None:
     """Lazy-init the SessionManager, GatewayRegistry, and LivePipeline singletons."""
     global _session_manager, _gateway_registry, _account_equity_store
     global _live_bar_store, _live_pipeline
+    global _live_portfolio_store, _live_portfolio_manager
     if _gateway_registry is not None:
         return
     from src.broker_gateway.account_db import AccountDB
@@ -867,6 +870,16 @@ def _init_war_room() -> None:
     session_db = SessionDB()
     _session_manager = SessionManager(registry=_gateway_registry, store=store, session_db=session_db)
     _session_manager.restore_from_db()
+    # Initialize LivePortfolio store + manager alongside SessionManager. The
+    # portfolio manager runs on the same DB file as sessions and does not
+    # touch the broker, so this is cheap at startup.
+    from src.trading_session.live_portfolio_manager import LivePortfolioManager
+    from src.trading_session.portfolio_db import LivePortfolioStore
+    _live_portfolio_store = LivePortfolioStore()
+    _live_portfolio_manager = LivePortfolioManager(
+        store=_live_portfolio_store,
+        session_manager=_session_manager,
+    )
     _account_equity_store = AccountEquityStore()
     _live_bar_store = LiveMinuteBarStore()
     # Seed mock accounts with synthetic equity history (idempotent).
@@ -962,6 +975,11 @@ def get_gateway_registry():
 def get_session_manager():
     _init_war_room()
     return _session_manager
+
+
+def get_live_portfolio_manager():
+    _init_war_room()
+    return _live_portfolio_manager
 
 
 def get_live_pipeline():

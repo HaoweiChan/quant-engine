@@ -20,6 +20,22 @@ class EquityShareUpdate(BaseModel):
     )
 
 
+class ExecutionModeUpdate(BaseModel):
+    """Per-session execution mode override.
+
+    `mode=None` clears the override and restores inheritance (the
+    session will fall back to account default via mode_resolver).
+    Rejected with 409 when the session is bound to a portfolio.
+    """
+    mode: str | None = Field(
+        default=None,
+        description=(
+            "Per-session execution mode override. 'paper', 'live', or null. "
+            "Null clears the override and restores account-level inheritance."
+        ),
+    )
+
+
 class BatchAllocation(BaseModel):
     session_id: str
     share: float = Field(..., gt=0.0, le=1.0)
@@ -134,9 +150,40 @@ async def list_sessions() -> list[dict]:
             "status": s.status,
             "deployed_candidate_id": s.deployed_candidate_id,
             "equity_share": s.equity_share,
+            "execution_mode": s.execution_mode,
+            "portfolio_id": s.portfolio_id,
+            "virtual_equity": s.virtual_equity,
         }
         for s in sessions
     ]
+
+
+@router.patch("/{session_id}/mode")
+async def update_execution_mode(
+    session_id: str, body: ExecutionModeUpdate,
+) -> dict:
+    """Set or clear a session's execution_mode override.
+
+    Rejected with 409 when the session is bound to a portfolio —
+    portfolio-bound sessions inherit from the portfolio. Use the
+    portfolio flip endpoint instead.
+    """
+    mgr = _get_session_manager()
+    try:
+        session = mgr.set_execution_mode(session_id, body.mode)
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail=msg) from None
+        if "bound to portfolio" in msg:
+            raise HTTPException(status_code=409, detail=msg) from None
+        raise HTTPException(status_code=400, detail=msg) from None
+    return {
+        "session_id": session.session_id,
+        "account_id": session.account_id,
+        "execution_mode": session.execution_mode,
+        "portfolio_id": session.portfolio_id,
+    }
 
 
 @router.patch("/{session_id}/equity-share")

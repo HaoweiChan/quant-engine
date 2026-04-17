@@ -21,6 +21,7 @@ from src.api.routes import (
     editor,
     heartbeat,
     kill_switch,
+    live_portfolios,
     meta,
     monte_carlo,
     ohlcv,
@@ -124,6 +125,7 @@ app.include_router(editor.router)
 app.include_router(params.router)
 app.include_router(deploy.router)
 app.include_router(sessions.router)
+app.include_router(live_portfolios.router)
 app.include_router(meta.router)
 app.include_router(kill_switch.router)
 app.include_router(heartbeat.router)
