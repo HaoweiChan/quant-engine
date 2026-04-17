@@ -674,6 +674,10 @@ _live_portfolio_manager = None
 
 _subscriber_tick_count = 0
 _subscriber_last_tick_ts = None
+# Resolved-contract-code → db_symbol map. Populated at subscribe time so the
+# tick callback can route by exact code (R1 vs R2) rather than by the
+# group-prefix collapsing routine that used to lump R2 ticks into R1's table.
+_code_to_symbol: dict[str, str] = {}
 
 
 def get_subscriber_stats() -> dict:
@@ -728,69 +732,133 @@ def _start_market_data_subscriber() -> None:
     bar_store = _live_bar_store
 
     def _connect_and_subscribe(sj_mod) -> Any:
-        """Login and subscribe to tick data. Returns the api object."""
+        """Login and subscribe to R1+R2 tick feeds for all configured contracts.
+
+        Walks each CONTRACTS entry's shioaji_path (e.g. "Futures.TXF.TXFR1")
+        to its actual contract object so R1 and R2 are subscribed separately
+        and routed by exact contract code, not by group prefix.
+        """
+        from src.data.contracts import CONTRACTS
+
         api = sj_mod.Shioaji(simulation=False)
         api.login(api_key=api_key, secret_key=secret_key)
         logger.info("market_data_subscriber: connected to Sinopac")
         time.sleep(2)
-        futures_groups = [("TX", "TXF"), ("MTX", "MXF"), ("TMF", "TMF")]
-        for symbol, group_name in futures_groups:
+
+        # Rebuild on every reconnect — contract codes change after settlement.
+        _code_to_symbol.clear()
+
+        for contract_def in CONTRACTS:
             try:
-                group = getattr(api.Contracts.Futures, group_name)
-                candidates = [c for c in group if getattr(c, "code", "")[-2:] not in ("R1", "R2")]
-                if not candidates:
+                obj = api.Contracts
+                for part in contract_def.shioaji_path.split("."):
+                    obj = getattr(obj, part)
+                actual_code = getattr(obj, "code", None)
+                if not actual_code:
+                    logger.warning(
+                        "market_data_subscriber: resolve failed for %s (path=%s)",
+                        contract_def.db_symbol, contract_def.shioaji_path,
+                    )
                     continue
-                contract = min(candidates, key=lambda c: getattr(c, "delivery_date", "9999"))
                 api.quote.subscribe(
-                    contract,
+                    obj,
                     quote_type=sj_mod.constant.QuoteType.Tick,
                     version=sj_mod.constant.QuoteVersion.v1,
                 )
-                logger.info("market_data_subscriber: subscribed to %s (%s)", symbol, getattr(contract, "code", "?"))
+                _code_to_symbol[actual_code] = contract_def.db_symbol
+                logger.info(
+                    "market_data_subscriber: subscribed to %s (code=%s, path=%s)",
+                    contract_def.db_symbol, actual_code, contract_def.shioaji_path,
+                )
             except Exception as exc:
-                logger.warning("market_data_subscriber: subscribe failed for %s: %s", symbol, exc)
+                logger.warning(
+                    "market_data_subscriber: subscribe failed for %s: %s",
+                    contract_def.db_symbol, exc,
+                )
         return api
 
     def _run_subscriber() -> None:
         global _market_data_subscriber, _subscriber_tick_count, _subscriber_last_tick_ts
         tick_loop = None
 
+        # Track last tick timestamp for session boundary detection
+        _last_tick_ts_for_session: datetime | None = None
+
         def _on_tick(exchange, tick) -> None:
-            nonlocal tick_loop
+            nonlocal tick_loop, _last_tick_ts_for_session
             global _subscriber_tick_count, _subscriber_last_tick_ts
             code = getattr(tick, "code", "")
-            if code.endswith("R1") or code.endswith("R2"):
-                return
+            symbol = _code_to_symbol.get(code)
+            if symbol is None:
+                return  # not a subscribed contract
             price = float(getattr(tick, "close", 0))
-            volume = int(getattr(tick, "volume", 0))
             if price <= 0:
                 return
-            symbol = "TX" if code.startswith("TXF") else "MTX" if code.startswith("MXF") else "TMF" if code.startswith("TMF") else None
-            if symbol is None:
-                return
+            volume = int(getattr(tick, "volume", 0))
+
             raw_ts = getattr(tick, "datetime", None)
             if isinstance(raw_ts, datetime):
                 tick_ts = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=ZoneInfo("Asia/Taipei"))
             else:
                 tick_ts = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
+
+            # Determine spread leg from db_symbol: TX→R1, TX_R2→R2.
+            is_r2 = symbol.endswith("_R2")
+            spread_symbol = symbol[:-3] if is_r2 else symbol
+            leg_code = f"{spread_symbol}R2" if is_r2 else f"{spread_symbol}R1"
+
+            # Tee both R1 and R2 legs to the per-symbol spread buffer.
+            try:
+                from src.data.spread_monitor import get_live_buffer
+                from src.data.session_utils import is_new_session
+                from src.api.ws.spread_feed import push_spread_tick, push_session_reset
+                from src.api.main import get_main_loop
+
+                spread_buffer = get_live_buffer(spread_symbol)
+                if _last_tick_ts_for_session is not None and is_new_session(_last_tick_ts_for_session, tick_ts):
+                    spread_buffer.reset_session()
+                    loop = tick_loop
+                    if not loop or loop.is_closed():
+                        loop = get_main_loop()
+                    if loop and loop.is_running():
+                        asyncio.run_coroutine_threadsafe(push_session_reset(spread_buffer.symbol), loop)
+                _last_tick_ts_for_session = tick_ts
+
+                ts_ms = int(tick_ts.timestamp() * 1000)
+                spread_tick = spread_buffer.on_tick(leg_code, price, ts_ms)
+                if spread_tick is not None:
+                    loop = tick_loop
+                    if not loop or loop.is_closed():
+                        loop = get_main_loop()
+                        tick_loop = loop
+                    if loop and loop.is_running():
+                        asyncio.run_coroutine_threadsafe(push_spread_tick(spread_tick), loop)
+            except Exception:
+                pass  # don't let spread processing break main tick flow
+
             _subscriber_tick_count += 1
             _subscriber_last_tick_ts = tick_ts
+
+            # Persist to ohlcv_bars under the exact symbol (R1 → TX, R2 → TX_R2).
             if bar_store is not None:
                 try:
                     bar_store.ingest_tick(symbol, price, volume, tick_ts)
                 except Exception:
                     pass
-            try:
-                from src.api.ws.live_feed import push_tick
-                from src.api.main import get_main_loop
-                loop = tick_loop
-                if not loop or loop.is_closed():
-                    loop = get_main_loop()
-                    tick_loop = loop
-                if loop and loop.is_running():
-                    asyncio.run_coroutine_threadsafe(push_tick(symbol, price, volume, tick_ts), loop)
-            except Exception:
-                pass
+
+            # Live broadcast only for R1 (single-mode chart shows the front month).
+            if not is_r2:
+                try:
+                    from src.api.ws.live_feed import push_tick
+                    from src.api.main import get_main_loop
+                    loop = tick_loop
+                    if not loop or loop.is_closed():
+                        loop = get_main_loop()
+                        tick_loop = loop
+                    if loop and loop.is_running():
+                        asyncio.run_coroutine_threadsafe(push_tick(symbol, price, volume, tick_ts), loop)
+                except Exception:
+                    pass
 
         while True:
             try:

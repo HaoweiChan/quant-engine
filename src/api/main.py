@@ -36,7 +36,7 @@ from src.api.routes import (
 )
 from src.api.ws import backtest as ws_backtest
 from src.api.ws import blotter as ws_blotter
-from src.api.ws import live_feed, risk
+from src.api.ws import live_feed, risk, spread_feed
 
 _main_loop: asyncio.AbstractEventLoop | None = None
 _frontend_dist = Path(
@@ -140,6 +140,7 @@ app.include_router(live_feed.router)
 app.include_router(ws_backtest.router)
 app.include_router(risk.router)
 app.include_router(ws_blotter.router)
+app.include_router(spread_feed.router)
 
 @app.get("/api/health")
 async def health() -> dict:
