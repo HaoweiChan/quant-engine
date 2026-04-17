@@ -241,6 +241,42 @@ class SessionManager:
             return None
         return session.effective_equity(acct_snap.equity)
 
+    def set_execution_mode(
+        self, session_id: str, mode: str | None,
+    ) -> TradingSession:
+        """Set the per-session execution_mode override.
+
+        Rejects the change when the session is bound to a portfolio —
+        portfolio-bound sessions inherit the portfolio's mode, so a
+        per-session override would be invisible anyway. The War Room
+        UI should disable the control in that case; this server-side
+        check is the safety net.
+
+        Args:
+            session_id: Target session.
+            mode: "paper", "live", or None. None clears the override
+                and restores inheritance.
+        """
+        if mode is not None and mode not in ("paper", "live"):
+            raise ValueError(f"mode must be 'paper', 'live', or None, got {mode!r}")
+        session = self._sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session not found: {session_id}")
+        if session.portfolio_id:
+            raise ValueError(
+                f"Session {session_id} is bound to portfolio "
+                f"{session.portfolio_id!r}; change the portfolio mode instead"
+            )
+        session.execution_mode = mode  # type: ignore[assignment]
+        if self._session_db:
+            self._session_db.update_execution_mode(session_id, mode)
+        logger.info(
+            "session_execution_mode_changed",
+            session_id=session_id,
+            mode=mode,
+        )
+        return session
+
     def set_status(self, session_id: str, target_status: str) -> TradingSession:
         """Validate transition and update session status."""
         session = self._sessions.get(session_id)

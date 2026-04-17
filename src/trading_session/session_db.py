@@ -29,10 +29,16 @@ CREATE TABLE IF NOT EXISTS sessions (
     peak_equity           REAL NOT NULL DEFAULT 0,
     deployed_candidate_id INTEGER,
     equity_share          REAL NOT NULL DEFAULT 1.0,
+    execution_mode        TEXT,
+    virtual_equity        REAL,
+    portfolio_id          TEXT,
     updated_at            TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_acct_strat_sym
     ON sessions(account_id, strategy_slug, symbol);
+-- Note: idx_sessions_portfolio is created in _migrate_schema after the
+-- portfolio_id column is ensured; creating it here would fail on legacy
+-- sessions tables that predate the column.
 CREATE TABLE IF NOT EXISTS deployment_log (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     deployed_at  TEXT NOT NULL,
@@ -76,6 +82,11 @@ class SessionDB:
 
         The sessions table pre-dated the equity_share allocation field.
         Add it in place so legacy rows default to 1.0 (full allocation).
+
+        Per-session execution_mode, virtual_equity and portfolio_id were
+        added in the LivePortfolio feature — all NULL by default so
+        legacy sessions resolve via the account fallback branch in
+        mode_resolver, preserving current behaviour bit-for-bit.
         """
         cols = {
             row["name"]
@@ -85,7 +96,19 @@ class SessionDB:
             self._conn.execute(
                 "ALTER TABLE sessions ADD COLUMN equity_share REAL NOT NULL DEFAULT 1.0"
             )
-            self._conn.commit()
+        if "execution_mode" not in cols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN execution_mode TEXT")
+        if "virtual_equity" not in cols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN virtual_equity REAL")
+        if "portfolio_id" not in cols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN portfolio_id TEXT")
+        # Create the index unconditionally — IF NOT EXISTS makes this safe on
+        # repeat startups, and it runs after the column is guaranteed present.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_portfolio "
+            "ON sessions(portfolio_id, status)"
+        )
+        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -96,13 +119,16 @@ class SessionDB:
             """INSERT OR REPLACE INTO sessions
                (session_id, account_id, strategy_slug, symbol, status,
                 started_at, initial_equity, peak_equity, deployed_candidate_id,
-                equity_share, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                equity_share, execution_mode, virtual_equity, portfolio_id,
+                updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session.session_id, session.account_id, session.strategy_slug,
                 session.symbol, session.status, session.started_at.isoformat(),
                 session.initial_equity, session.peak_equity,
-                session.deployed_candidate_id, session.equity_share, now,
+                session.deployed_candidate_id, session.equity_share,
+                session.execution_mode, session.virtual_equity,
+                session.portfolio_id, now,
             ),
         )
         self._conn.commit()
@@ -122,6 +148,50 @@ class SessionDB:
             (candidate_id, now, session_id),
         )
         self._conn.commit()
+
+    def update_execution_mode(
+        self, session_id: str, mode: str | None,
+    ) -> None:
+        """Persist the per-session execution_mode override.
+
+        mode=None restores inheritance (account fallback via resolver).
+        """
+        if mode is not None and mode not in ("paper", "live"):
+            raise ValueError(f"mode must be 'paper', 'live', or None, got {mode!r}")
+        now = datetime.now(_TAIPEI_TZ).isoformat()
+        self._conn.execute(
+            "UPDATE sessions SET execution_mode = ?, updated_at = ? WHERE session_id = ?",
+            (mode, now, session_id),
+        )
+        self._conn.commit()
+
+    def update_portfolio_id(
+        self, session_id: str, portfolio_id: str | None,
+    ) -> None:
+        """Attach or detach a session from a LivePortfolio."""
+        now = datetime.now(_TAIPEI_TZ).isoformat()
+        self._conn.execute(
+            "UPDATE sessions SET portfolio_id = ?, updated_at = ? WHERE session_id = ?",
+            (portfolio_id, now, session_id),
+        )
+        self._conn.commit()
+
+    def update_virtual_equity(
+        self, session_id: str, virtual_equity: float | None,
+    ) -> None:
+        now = datetime.now(_TAIPEI_TZ).isoformat()
+        self._conn.execute(
+            "UPDATE sessions SET virtual_equity = ?, updated_at = ? WHERE session_id = ?",
+            (virtual_equity, now, session_id),
+        )
+        self._conn.commit()
+
+    def sessions_for_portfolio(self, portfolio_id: str) -> list[TradingSession]:
+        """Load all sessions bound to a portfolio."""
+        rows = self._conn.execute(
+            "SELECT * FROM sessions WHERE portfolio_id = ?", (portfolio_id,),
+        ).fetchall()
+        return [self._row_to_session(r) for r in rows]
 
     def update_equity_share(self, session_id: str, share: float) -> None:
         """Persist a new equity_share for the session.
@@ -168,33 +238,23 @@ class SessionDB:
             return float(row["equity_share"])
         return 1.0
 
-    def load_all(self) -> list[TradingSession]:
-        rows = self._conn.execute("SELECT * FROM sessions").fetchall()
-        sessions: list[TradingSession] = []
-        for r in rows:
-            sessions.append(TradingSession(
-                session_id=r["session_id"],
-                account_id=r["account_id"],
-                strategy_slug=r["strategy_slug"],
-                symbol=r["symbol"],
-                status=r["status"],
-                started_at=datetime.fromisoformat(r["started_at"]),
-                initial_equity=r["initial_equity"],
-                peak_equity=r["peak_equity"],
-                deployed_candidate_id=r["deployed_candidate_id"],
-                equity_share=self._row_equity_share(r),
-            ))
-        return sessions
-
-    def find_session(
-        self, account_id: str, strategy_slug: str, symbol: str,
-    ) -> TradingSession | None:
-        row = self._conn.execute(
-            "SELECT * FROM sessions WHERE account_id = ? AND strategy_slug = ? AND symbol = ?",
-            (account_id, strategy_slug, symbol),
-        ).fetchone()
-        if not row:
+    @staticmethod
+    def _row_optional_str(row, col: str) -> str | None:
+        if col not in row.keys():  # noqa: SIM118
             return None
+        value = row[col]
+        return value if value is not None else None
+
+    @staticmethod
+    def _row_optional_float(row, col: str) -> float | None:
+        if col not in row.keys():  # noqa: SIM118
+            return None
+        value = row[col]
+        return float(value) if value is not None else None
+
+    @classmethod
+    def _row_to_session(cls, row) -> TradingSession:
+        """Hydrate a sqlite3.Row into a TradingSession."""
         return TradingSession(
             session_id=row["session_id"],
             account_id=row["account_id"],
@@ -205,8 +265,26 @@ class SessionDB:
             initial_equity=row["initial_equity"],
             peak_equity=row["peak_equity"],
             deployed_candidate_id=row["deployed_candidate_id"],
-            equity_share=self._row_equity_share(row),
+            equity_share=cls._row_equity_share(row),
+            execution_mode=cls._row_optional_str(row, "execution_mode"),  # type: ignore[arg-type]
+            virtual_equity=cls._row_optional_float(row, "virtual_equity"),
+            portfolio_id=cls._row_optional_str(row, "portfolio_id"),
         )
+
+    def load_all(self) -> list[TradingSession]:
+        rows = self._conn.execute("SELECT * FROM sessions").fetchall()
+        return [self._row_to_session(r) for r in rows]
+
+    def find_session(
+        self, account_id: str, strategy_slug: str, symbol: str,
+    ) -> TradingSession | None:
+        row = self._conn.execute(
+            "SELECT * FROM sessions WHERE account_id = ? AND strategy_slug = ? AND symbol = ?",
+            (account_id, strategy_slug, symbol),
+        ).fetchone()
+        if not row:
+            return None
+        return self._row_to_session(row)
 
     def log_deployment(
         self,

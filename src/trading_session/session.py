@@ -4,10 +4,13 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
+from typing import Literal
 
 _TAIPEI_TZ = timezone(timedelta(hours=8))
 
 from src.broker_gateway.types import LivePosition
+
+ExecutionMode = Literal["paper", "live"]
 
 
 @dataclass
@@ -66,11 +69,25 @@ class TradingSession:
     # compatible). Multiple active sessions on the same account should sum
     # to <= 1.0. See SessionManager.effective_equity() for the read path.
     equity_share: float = 1.0
+    # Per-session execution mode override. None = inherit from portfolio (if
+    # bound) or fall back to account.sandbox_mode. Set via mode_resolver.
+    execution_mode: ExecutionMode | None = None
+    # Virtual equity for paper sessions running on a live account. Isolated
+    # from account.equity — a paper fill only mutates this field, never the
+    # real account balance. None for live sessions.
+    virtual_equity: float | None = None
+    # Foreign key to a LivePortfolio. When set, the portfolio's mode
+    # overrides execution_mode (see mode_resolver.resolve_session_mode).
+    portfolio_id: str | None = None
 
     def __post_init__(self) -> None:
         if not (0.0 < self.equity_share <= 1.0):
             raise ValueError(
                 f"equity_share must be in (0, 1], got {self.equity_share!r}"
+            )
+        if self.execution_mode is not None and self.execution_mode not in ("paper", "live"):
+            raise ValueError(
+                f"execution_mode must be 'paper', 'live', or None, got {self.execution_mode!r}"
             )
 
     def effective_equity(self, account_equity: float) -> float:
@@ -92,6 +109,9 @@ class TradingSession:
         initial_equity: float = 0.0,
         status: str = "stopped",
         equity_share: float = 1.0,
+        execution_mode: ExecutionMode | None = None,
+        virtual_equity: float | None = None,
+        portfolio_id: str | None = None,
     ) -> TradingSession:
         return cls(
             session_id=str(uuid.uuid4()),
@@ -103,4 +123,7 @@ class TradingSession:
             initial_equity=initial_equity,
             peak_equity=initial_equity,
             equity_share=equity_share,
+            execution_mode=execution_mode,
+            virtual_equity=virtual_equity,
+            portfolio_id=portfolio_id,
         )
