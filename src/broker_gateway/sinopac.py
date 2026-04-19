@@ -66,6 +66,7 @@ class SinopacGateway(BrokerGateway):
         self._reconnect_interval_secs = 20.0
         self._tick_loop: asyncio.AbstractEventLoop | None = None
         self._live_bar_store = LiveMinuteBarStore()
+        self._sim_equity: float = 100_000.0
 
     @property
     def broker_name(self) -> str:
