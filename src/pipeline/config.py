@@ -203,18 +203,58 @@ def load_prediction_config(path: Path | None = None) -> PredictionConfig:
     )
 
 
+def _resolve_api_credentials() -> tuple[str, str]:
+    """Return (api_key, api_secret) for Shioaji.
+
+    Resolution order:
+    1. Local .env file (loaded with override=False so existing env vars win)
+    2. Google Secret Manager (sinopac group in secrets.toml)
+    """
+    import os
+
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
+
+    api_key = os.getenv("SHIOAJI_API_KEY")
+    api_secret = os.getenv("SHIOAJI_API_SECRET")
+
+    if api_key and api_secret:
+        return api_key, api_secret
+
+    # Fall back to GSM
+    import structlog
+    log = structlog.get_logger(__name__)
+    log.info("shioaji_creds_not_in_env_falling_back_to_gsm")
+
+    try:
+        from src.secrets.manager import get_secret_manager
+        sm = get_secret_manager()
+        group = sm.get_group("sinopac")    # keys: api_key, secret_key
+        gsm_key    = group.get("api_key")
+        gsm_secret = group.get("secret_key")
+    except Exception as exc:
+        raise ValueError(
+            "SHIOAJI_API_KEY / SHIOAJI_API_SECRET not found in .env "
+            f"and GSM lookup failed: {exc}"
+        ) from exc
+
+    if not gsm_key or not gsm_secret:
+        raise ValueError(
+            "GSM sinopac group is missing 'api_key' or 'secret_key' — "
+            "check config/secrets.toml and GSM secret names."
+        )
+    return gsm_key, gsm_secret
+
+
 def create_sinopac_connector(simulation: bool = False) -> Any:
-    """Create a SinopacConnector logged in via GSM credentials."""
+    """Create a SinopacConnector, resolving credentials from .env then GSM."""
     import shioaji as sj
-
     from src.data.connector import SinopacConnector
-    from src.secrets.manager import get_secret_manager
 
-    sm = get_secret_manager()
-    creds = sm.get_group("sinopac")
+    api_key, api_secret = _resolve_api_credentials()
     api = sj.Shioaji(simulation=simulation)
     connector = SinopacConnector(api=api)
-    connector.login(creds["api_key"], creds["secret_key"])
+    connector.login(api_key, api_secret)
     return connector
 
 
