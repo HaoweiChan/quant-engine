@@ -11,7 +11,17 @@ logger = structlog.get_logger(__name__)
 
 
 class PaperExecutor(ExecutionEngine):
-    """Simulate order fills at current price with configurable slippage."""
+    """Simulate order fills at current price with configurable slippage and
+    per-side commission.
+
+    Slippage is applied as a price adjustment (adverse to the order side).
+    Commission is recorded as ``ExecutionResult.metadata['commission']`` in
+    NT dollars so downstream PnL accounting (live_strategy_runner,
+    trading_session.store) can deduct it consistently with the backtester's
+    MarketImpactFillModel. The previous implementation applied slippage
+    only, producing paper-trade PnL that overstated by ~NT$50/leg vs the
+    backtest cost model on MTX.
+    """
 
     def __init__(
         self,
@@ -19,12 +29,18 @@ class PaperExecutor(ExecutionEngine):
         current_price: float = 0.0,
         available_margin: float = float("inf"),
         margin_per_lot: float = 184_000.0,
+        commission_per_contract_per_side: float = 0.0,
     ) -> None:
         super().__init__()
         self._slippage_points = slippage_points
         self._current_price = current_price
         self._available_margin = available_margin
         self._margin_per_lot = margin_per_lot
+        # Stored as NT dollars per contract per side. Caller passes
+        # `instrument_cost_config.commission_per_contract / 2` to convert
+        # the round-trip number to a per-side number, since each fill is
+        # one side of a round trip.
+        self._commission_per_contract_per_side = commission_per_contract_per_side
         self._fill_history: list[ExecutionResult] = []
 
     def set_market_state(
@@ -87,9 +103,15 @@ class PaperExecutor(ExecutionEngine):
         else:
             fill_price = expected - self._slippage_points
         slippage = fill_price - expected
+        # Per-fill commission in NT dollars. Recorded under metadata so
+        # callers can sum it across results without re-deriving the cost
+        # config — and so backtest/paper PnL drift detectors can compare
+        # this directly to MarketImpactFillModel's commission.
+        commission_nt = order.lots * self._commission_per_contract_per_side
 
         return ExecutionResult(
             order=order, status="filled",
             fill_price=fill_price, expected_price=expected,
             slippage=slippage, fill_qty=order.lots, remaining_qty=0.0,
+            metadata={"commission": commission_nt},
         )

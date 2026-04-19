@@ -95,6 +95,14 @@ class LiveStrategyRunner:
         self._adapter = TaifexAdapter(backtest_mode=False)
         self._sizer = sizer if sizer is not None else PortfolioSizer(sizing_config)
         self._owns_sizer = sizer is None
+        # Per-trading-day daily ATR cache. The previous design defaulted
+        # to a hardcoded 100.0 every bar (`taifex.py:to_snapshot` line 51),
+        # so disaster-stop distances and any ATR-aware stops were sized
+        # against a constant, not the actual instrument volatility. The
+        # cache key is `data.session_utils.trading_day(bar.timestamp)` so
+        # the value refreshes once per TAIFEX trading day. See B4.
+        from datetime import date as _date
+        self._daily_atr_by_day: dict[_date, float] = {}
         self._execution_mode: ExecutionMode = execution_mode
         self._broker_api = broker_api
         self._event_loop = event_loop
@@ -125,6 +133,11 @@ class LiveStrategyRunner:
     ) -> tuple[PositionEngine, _AnyExecutor, _AnyExecutionEngine]:
         """Resolve strategy factory and build engine + executor.
 
+        When ``QUANT_PINNED_EXECUTION`` is enabled and the active candidate
+        has a stored ``strategy_code``, the engine executes the pinned source
+        rather than importing the current ``src/strategies/<slug>.py``. This
+        insulates the live session from in-flight edits to the strategy file.
+
         Dispatches between paper and live executors based on
         ``self._execution_mode``. The mode must have been resolved by
         the caller via ``mode_resolver.resolve_session_mode`` —
@@ -132,19 +145,91 @@ class LiveStrategyRunner:
         caller's bug, not this function's.
         """
         from src.core.types import get_instrument_cost_config
-        from src.mcp_server.facade import get_active_params_for_mcp, resolve_factory
+        from src.mcp_server.facade import (
+            PinnedExecutionError,
+            get_active_params_for_mcp,
+            resolve_factory_by_hash,
+        )
 
-        factory = resolve_factory(self.strategy_slug)
         merged = dict(params or {})
-        if not merged:
-            active = get_active_params_for_mcp(strategy=self.strategy_slug)
-            if active.get("source") == "registry":
-                merged = active.get("params", {})
+        active = get_active_params_for_mcp(strategy=self.strategy_slug)
+        active_source = active.get("source") if isinstance(active, dict) else None
+        active_params = active.get("params", {}) or {}
+        if not merged and active_source == "registry":
+            merged = active_params
+        pinned_hash = active.get("strategy_hash") if isinstance(active, dict) else None
+        pinned_code = active.get("strategy_code") if isinstance(active, dict) else None
+
+        # B5 precondition guard: surface every silent precedence path so a
+        # mismatched runner doesn't quietly trade with the wrong code or
+        # params. Three failure modes are pinned by these checks:
+        #   1. User passed params that mask non-empty active registry params
+        #      (the user's params win silently — confirm intent in logs).
+        #   2. Active candidate has an unexpected ``source`` that the runner
+        #      doesn't know how to merge (registry vs defaults vs unknown).
+        #   3. ``pinned_hash`` is set but ``pinned_code`` is missing — the
+        #      `resolve_factory_by_hash` path 4 will then look the code up
+        #      in the registry; if that fails, PinnedExecutionError fires
+        #      and we refuse to start. Still warn so the operator sees that
+        #      the runner is one DB outage away from refusing to start.
+        if params and active_source == "registry" and active_params and active_params != merged:
+            logger.warning(
+                "live_runner_param_override",
+                session_id=self.session_id,
+                slug=self.strategy_slug,
+                active_keys=sorted(active_params.keys()),
+                user_keys=sorted(merged.keys()),
+                note="user-provided params win over registry-active params",
+            )
+        if active_source not in (None, "registry", "defaults"):
+            logger.warning(
+                "live_runner_active_params_unknown_source",
+                session_id=self.session_id,
+                slug=self.strategy_slug,
+                source=active_source,
+            )
+        if pinned_hash and not pinned_code:
+            logger.warning(
+                "live_runner_pinned_hash_without_code",
+                session_id=self.session_id,
+                slug=self.strategy_slug,
+                pinned_hash=(pinned_hash or "")[:12],
+                note="will look up code via ParamRegistry; refuses to start if absent",
+            )
+
+        try:
+            factory, _pinned_meta = resolve_factory_by_hash(
+                self.strategy_slug,
+                strategy_hash=pinned_hash,
+                strategy_code=pinned_code,
+            )
+        except PinnedExecutionError:
+            # Refuse to start a live session against unloadable pinned code.
+            # Silently falling through to the current file would defeat the
+            # whole point of pin-by-hash execution on the live path.
+            logger.error(
+                "live_runner_pinned_compile_failed",
+                session_id=self.session_id,
+                slug=self.strategy_slug,
+                pinned_hash=(pinned_hash or "")[:12] or None,
+            )
+            raise
+
+        logger.info(
+            "live_runner_pinned",
+            session_id=self.session_id,
+            slug=self.strategy_slug,
+            pinned_hash=(pinned_hash or "")[:12] or None,
+            using_pin=bool(pinned_hash and pinned_code),
+        )
         cost = get_instrument_cost_config(self.symbol)
         specs = self._adapter.get_contract_specs(self.symbol)
         engine: PositionEngine = factory(**merged)
 
         if self._execution_mode == "paper":
+            # Commission is round-trip per contract; PaperExecutor charges
+            # per fill (one side), so divide by 2 to keep round-trip cost
+            # aligned with the backtester's MarketImpactFillModel.
             executor: _AnyExecutor = PaperExecutor(
                 slippage_points=(
                     cost.slippage_bps * specs.point_value / 10000
@@ -153,6 +238,7 @@ class LiveStrategyRunner:
                 current_price=0.0,
                 available_margin=self._equity_budget,
                 margin_per_lot=specs.margin_initial,
+                commission_per_contract_per_side=cost.commission_per_contract / 2.0,
             )
             exec_engine: _AnyExecutionEngine = PaperExecutionEngine(
                 executor=executor,
@@ -390,7 +476,77 @@ class LiveStrategyRunner:
             "low": bar.low,
             "volume": bar.volume,
             "timestamp": bar.timestamp,
+            "daily_atr": self._daily_atr_for(bar.timestamp),
         })
+
+    def _daily_atr_for(self, ts: datetime) -> float:
+        """Return the cached daily ATR for ``ts``'s trading day.
+
+        Computes from the last 14 daily closes in market.db on a cache
+        miss so each trading day pays the lookup cost exactly once. If
+        the database is unreachable or has fewer than 2 daily bars,
+        falls back to TaifexAdapter's hardcoded 100.0 (matching the
+        legacy behaviour rather than crashing the runner).
+        """
+        from src.data.session_utils import trading_day
+
+        day = trading_day(ts)
+        cached = self._daily_atr_by_day.get(day)
+        if cached is not None:
+            return cached
+
+        atr = 100.0
+        try:
+            atr = self._compute_daily_atr(self.symbol, day, lookback=14)
+        except Exception:
+            logger.debug(
+                "live_runner_daily_atr_compute_failed",
+                slug=self.strategy_slug,
+                day=day.isoformat(),
+                exc_info=True,
+            )
+        self._daily_atr_by_day[day] = atr
+        return atr
+
+    @staticmethod
+    def _compute_daily_atr(symbol: str, day, lookback: int = 14) -> float:
+        """Read the last ``lookback`` daily-resampled bars from market.db
+        and return the mean True Range. Used by the per-session cache.
+        """
+        import sqlite3
+        from pathlib import Path
+
+        db_path = Path(__file__).resolve().parent.parent.parent / "data" / "market.db"
+        if not db_path.exists():
+            return 100.0
+        conn = sqlite3.connect(str(db_path))
+        try:
+            # Pull the last `lookback*2` calendar days of daily bars to
+            # tolerate weekends/holidays without slicing them out manually.
+            rows = conn.execute(
+                """
+                SELECT high, low, close FROM ohlcv_bars
+                WHERE symbol = ? AND timeframe_minutes = 1440 AND date(timestamp) <= date(?)
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (symbol, day.isoformat(), lookback + 1),
+            ).fetchall()
+        finally:
+            conn.close()
+        if len(rows) < 2:
+            return 100.0
+        # Reverse so prev_close[i] = rows[i-1].close.
+        rows = list(reversed(rows))
+        trs: list[float] = []
+        for i in range(1, len(rows)):
+            high, low, _close = rows[i]
+            prev_close = rows[i - 1][2]
+            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            trs.append(float(tr))
+        if not trs:
+            return 100.0
+        return sum(trs) / len(trs)
 
     def _make_account(self, snapshot: MarketSnapshot) -> AccountState:
         state = self._engine.get_state()

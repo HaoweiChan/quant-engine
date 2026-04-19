@@ -8,17 +8,28 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Any
 
 import structlog
 
 from src.broker_gateway.live_bar_store import LiveMinuteBarStore, MinuteBar
+from src.broker_gateway.live_spread_buffer import LiveSpreadBarBuilder
 from src.core.sizing import PortfolioSizer, SizingConfig
 from src.execution.live_strategy_runner import LiveStrategyRunner
 from src.trading_session.manager import SessionManager
 from src.trading_session.store import AccountEquityStore, FillStore
 
 logger = structlog.get_logger(__name__)
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
+
+# Safety-net force-flat fires 30 seconds after the last tradeable minute
+# of each TAIFEX session. This catches the case where a broker tick gap
+# at 04:59 / 13:44 means LiveStrategyRunner.on_bar_complete never sees
+# the session-close bar, leaving positions to carry into the next session.
+_NIGHT_FORCE_FLAT_TIME = dt_time(4, 59, 30)   # 30s after night close last bar
+_DAY_FORCE_FLAT_TIME = dt_time(13, 44, 30)    # 30s after day close last bar
 
 
 class LivePipelineManager:
@@ -53,10 +64,31 @@ class LivePipelineManager:
         self._sizing_config = sizing_config or self.DEFAULT_SIZING
         self._portfolio_sizer = portfolio_sizer
         self._runners: dict[str, LiveStrategyRunner] = {}
+        # Per-spread-runner synthetic bar builders. When a runner's
+        # strategy declares ``spread_legs`` in STRATEGY_META, the
+        # pipeline subscribes a LiveSpreadBarBuilder to the bar store
+        # and routes the paired R1+R2 synthetic bar to the runner
+        # (instead of the raw single-leg bar that the legacy
+        # `_matches_symbol.startswith` check used to forward, which is
+        # what made spread strategies trade on single-leg prices in
+        # live mode — see plan C1).
+        self._spread_builders: dict[str, LiveSpreadBarBuilder] = {}
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started = False
         self._fill_store = FillStore()
+        # Session-close fallback: an asyncio task that fires force-flat
+        # at the deterministic session-end times even if the broker tick
+        # stream gaps and the per-runner on_bar_complete check (which
+        # depends on receiving a bar at exactly 04:59 / 13:44) misses.
+        self._force_flat_task: asyncio.Task | None = None
+        # Optional broker-position reconciler. Wired in via ``start()``;
+        # when present, its ``start_loop`` task runs alongside the
+        # bar-dispatch + force-flat plumbing so engine ↔ broker
+        # position drift is detected on a timer instead of only at
+        # disaster-stop fill time.
+        self._reconciler: Any | None = None
+        self._reconciler_task: asyncio.Task | None = None
 
     @property
     def portfolio_sizer(self) -> PortfolioSizer | None:
@@ -100,20 +132,61 @@ class LivePipelineManager:
         with self._lock:
             return list(self._runners.items())
 
-    def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
-        """Register bar callback and create runners for all active sessions."""
+    def start(
+        self,
+        loop: asyncio.AbstractEventLoop | None = None,
+        reconciler: Any | None = None,
+    ) -> None:
+        """Register bar callback, create runners, and optionally start
+        the broker-position reconciliation loop.
+
+        The ``reconciler`` argument is supplied by the caller because
+        ``PositionReconciler`` needs broker-specific state (the shioaji
+        API handle, an engine-position getter) that the pipeline
+        manager doesn't own. Passing it here keeps the wiring explicit
+        and lets the same pipeline run with or without reconciliation
+        (e.g. CI tests, paper-only smoke runs).
+        """
         if self._started:
             return
         self._loop = loop
         self._bar_store.register_bar_callback(self._on_bar_complete)
         self._sync_runners()
         self._started = True
+        self._reconciler = reconciler
+        # Spawn the session-close safety-net timer when an event loop is
+        # available. The task awaits until the next session-close moment
+        # then triggers force-flat across all runners.
+        if loop is not None and not loop.is_closed():
+            try:
+                self._force_flat_task = loop.create_task(self._force_flat_loop())
+            except Exception:
+                logger.exception("live_pipeline_force_flat_task_start_failed")
+            if reconciler is not None:
+                try:
+                    self._reconciler_task = loop.create_task(reconciler.start_loop())
+                    logger.info("live_pipeline_reconciler_started")
+                except Exception:
+                    logger.exception(
+                        "live_pipeline_reconciler_start_failed",
+                    )
         logger.info("live_pipeline_started", runners=len(self._runners))
 
     def stop(self) -> None:
-        """Tear down all runners."""
+        """Tear down all runners and cancel the session-close + reconciler tasks."""
         with self._lock:
             self._runners.clear()
+        for attr in ("_force_flat_task", "_reconciler_task"):
+            task = getattr(self, attr, None)
+            if task is not None and not task.done():
+                try:
+                    task.cancel()
+                except Exception:
+                    logger.exception(
+                        "live_pipeline_task_cancel_failed", task=attr,
+                    )
+            setattr(self, attr, None)
+        self._reconciler = None
         self._started = False
         logger.info("live_pipeline_stopped")
 
@@ -139,6 +212,7 @@ class LivePipelineManager:
             stale = [sid for sid in self._runners if sid not in active_sessions]
             for sid in stale:
                 del self._runners[sid]
+                self._spread_builders.pop(sid, None)
                 logger.info("live_runner_removed", session_id=sid)
             # Create runners for new active sessions
             for sid, session in active_sessions.items():
@@ -158,6 +232,7 @@ class LivePipelineManager:
                         sizer=self._portfolio_sizer,
                     )
                     self._runners[sid] = runner
+                    self._maybe_register_spread_builder(sid, session)
                     logger.info(
                         "live_runner_created",
                         session_id=sid,
@@ -168,10 +243,77 @@ class LivePipelineManager:
                 except Exception:
                     logger.exception("live_runner_create_failed", session_id=sid)
 
+    def _maybe_register_spread_builder(self, session_id: str, session: Any) -> None:
+        """If the session's strategy has spread metadata, build a
+        LiveSpreadBarBuilder for it so the runner sees synthetic
+        spread bars instead of raw single-leg bars.
+        """
+        try:
+            from src.strategies.registry import get_info
+
+            info = get_info(session.strategy_slug)
+            legs = (info.meta or {}).get("spread_legs") if info else None
+        except Exception:
+            legs = None
+        if not legs or len(legs) != 2:
+            return
+        # Account-relative legs: when the seeder/loader places a spread
+        # strategy on a different underlying than the META default
+        # (e.g. MTX instead of TX), build the leg pair from the session's
+        # symbol so the live builder watches the right tick streams.
+        leg1 = session.symbol
+        leg2 = f"{session.symbol}_R2"
+        builder = LiveSpreadBarBuilder(
+            spread_symbol=session.symbol,
+            leg1_symbol=leg1,
+            leg2_symbol=leg2,
+        )
+        builder.attach_to_store(self._bar_store)
+        builder.register_callback(
+            lambda sym, bar, _sid=session_id: self._on_spread_bar(_sid, sym, bar),
+        )
+        self._spread_builders[session_id] = builder
+        logger.info(
+            "live_spread_builder_registered",
+            session_id=session_id,
+            slug=session.strategy_slug,
+            legs=[leg1, leg2],
+        )
+
+    def _on_spread_bar(self, session_id: str, symbol: str, bar: MinuteBar) -> None:
+        """Synthetic-spread callback. Routes the paired bar to the spread
+        runner via the same async dispatcher used for raw bars.
+        """
+        runner = self._runners.get(session_id)
+        if runner is None:
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._dispatch_bar(runner, symbol, bar), loop)
+        except Exception:
+            logger.exception(
+                "live_pipeline_spread_dispatch_error",
+                session_id=session_id,
+                symbol=symbol,
+            )
+
     def _on_bar_complete(self, symbol: str, bar: MinuteBar) -> None:
-        """Callback from LiveMinuteBarStore — dispatches to matching runners."""
-        runners = list(self._runners.values())
-        if not runners:
+        """Callback from LiveMinuteBarStore — dispatches to matching runners.
+
+        Spread runners are excluded here: they receive bars only via
+        their attached LiveSpreadBarBuilder, which emits a synthetic
+        spread bar when both legs report at the same minute_ts. Routing
+        raw single-leg bars to a spread runner was the source of the
+        live-spread mispricing bug — see plan C1.
+        """
+        runners_to_dispatch = [
+            (sid, r)
+            for sid, r in self.iter_runners()
+            if sid not in self._spread_builders
+        ]
+        if not runners_to_dispatch:
             return
         loop = self._loop
         if loop is None or loop.is_closed():
@@ -182,14 +324,14 @@ class LivePipelineManager:
             except Exception:
                 logger.debug("live_pipeline_no_event_loop")
                 return
-        for runner in runners:
+        for sid, runner in runners_to_dispatch:
             try:
                 coro = self._dispatch_bar(runner, symbol, bar)
                 asyncio.run_coroutine_threadsafe(coro, loop)
             except Exception:
                 logger.exception(
                     "live_pipeline_dispatch_error",
-                    session_id=runner.session_id,
+                    session_id=sid,
                     symbol=symbol,
                 )
 
@@ -284,6 +426,7 @@ class LivePipelineManager:
                 if result.status != "filled":
                     continue
                 msg = (
+                    f"<b>Account:</b> {runner.account_id}\n"
                     f"<b>{strategy_name}</b> ({runner.symbol})\n"
                     f"{format_trade(result)}\n"
                     f"Equity: {runner.equity:,.0f}"
@@ -291,6 +434,82 @@ class LivePipelineManager:
                 await self._notifier.dispatch(msg)
         except Exception:
             logger.debug("telegram_notify_failed", exc_info=True)
+
+    @staticmethod
+    def _next_force_flat_at(now: datetime) -> datetime:
+        """Return the next session-close fallback wake time after ``now``."""
+        today_targets = [
+            now.replace(
+                hour=t.hour, minute=t.minute, second=t.second, microsecond=0,
+            )
+            for t in (_NIGHT_FORCE_FLAT_TIME, _DAY_FORCE_FLAT_TIME)
+        ]
+        future = [t for t in today_targets if t > now]
+        if future:
+            return min(future)
+        # All times today have passed — wake at the first slot tomorrow.
+        return (now + timedelta(days=1)).replace(
+            hour=_NIGHT_FORCE_FLAT_TIME.hour,
+            minute=_NIGHT_FORCE_FLAT_TIME.minute,
+            second=_NIGHT_FORCE_FLAT_TIME.second,
+            microsecond=0,
+        )
+
+    async def _force_flat_loop(self) -> None:
+        """Safety-net loop: at each session boundary, call _force_flat on
+        every runner using a synthesised bar with the close-time timestamp.
+
+        Runs forever; cancelled in stop(). Idempotent — runners that have
+        already flattened (no open positions) just return [] from
+        ``_force_flat`` without sending any orders.
+        """
+        try:
+            while True:
+                now = datetime.now(_TAIPEI_TZ)
+                next_at = self._next_force_flat_at(now)
+                wait_s = max(1.0, (next_at - now).total_seconds())
+                logger.info(
+                    "force_flat_timer_scheduled",
+                    next_at=next_at.isoformat(),
+                    wait_s=int(wait_s),
+                )
+                await asyncio.sleep(wait_s)
+                await self._fire_force_flat()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("force_flat_loop_error")
+
+    async def _fire_force_flat(self) -> None:
+        """Build a synthesised session-close bar and call _force_flat on
+        each runner. Errors per runner are swallowed so one bad runner
+        cannot starve the rest of the safety net.
+        """
+        now = datetime.now(_TAIPEI_TZ)
+        # Snap timestamp back to the actual session-close minute (04:59 / 13:44).
+        if now.time() >= _DAY_FORCE_FLAT_TIME and now.time().hour < _NIGHT_FORCE_FLAT_TIME.hour:
+            close_min = now.replace(hour=13, minute=44, second=0, microsecond=0)
+        else:
+            close_min = now.replace(hour=4, minute=59, second=0, microsecond=0)
+        synthetic_bar = MinuteBar(
+            timestamp=close_min,
+            open=0.0, high=0.0, low=0.0, close=0.0, volume=0,
+        )
+        for sid, runner in self.iter_runners():
+            try:
+                results = await runner._force_flat(synthetic_bar)
+                if results:
+                    logger.warning(
+                        "force_flat_timer_fired",
+                        session_id=sid,
+                        positions_closed=len(results),
+                        ts=close_min.isoformat(),
+                    )
+            except Exception:
+                logger.exception(
+                    "force_flat_timer_runner_failed",
+                    session_id=sid,
+                )
 
     def _record_account_equity(self, account_id: str) -> None:
         """Sum equity (and margin used) across all runners for an account."""

@@ -313,6 +313,16 @@ class SinopacGateway(BrokerGateway):
             else:
                 raise
 
+        # Sinopac's simulation endpoint sometimes returns a margin payload
+        # successfully but with equity=0 (no raise to trigger the fallback
+        # above). Treat that as "no real paper balance yet" and seed the
+        # display from _sim_equity so the war-room doesn't show $0 for a
+        # connected paper account.
+        if getattr(self, "_simulation", False) and equity <= 0:
+            equity = getattr(self, "_sim_equity", 1_000_000.0)
+            if available <= 0:
+                available = equity
+
         positions = self._fetch_positions()
         unrealized = sum(p.unrealized_pnl for p in positions)
         fills = self._fetch_fills()
