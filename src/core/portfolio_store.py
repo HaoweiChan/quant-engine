@@ -5,6 +5,7 @@ and results can be compared across time periods.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -118,7 +119,96 @@ class PortfolioStore:
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._migrate_content_hash()
+        self._migrate_cost_columns()
         self._conn.commit()
+
+    def _migrate_content_hash(self) -> None:
+        """Add content_hash column if missing, backfill existing rows, purge dupes."""
+        cols = {
+            r[1]
+            for r in self._conn.execute("PRAGMA table_info(portfolio_allocations)")
+        }
+        if "content_hash" in cols:
+            return
+        self._conn.execute(
+            "ALTER TABLE portfolio_allocations ADD COLUMN content_hash TEXT"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_port_alloc_hash "
+            "ON portfolio_allocations(content_hash)"
+        )
+        rows = self._conn.execute(
+            "SELECT pa.id, pa.objective, pa.weights_json, pr.symbol, "
+            "pr.start_date, pr.end_date "
+            "FROM portfolio_allocations pa "
+            "JOIN portfolio_runs pr ON pr.id = pa.run_id"
+        ).fetchall()
+        for r in rows:
+            h = self._allocation_hash(
+                r["objective"], r["symbol"],
+                r["start_date"], r["end_date"], r["weights_json"],
+            )
+            self._conn.execute(
+                "UPDATE portfolio_allocations SET content_hash=? WHERE id=?",
+                (h, r["id"]),
+            )
+        self._purge_duplicates()
+        self._conn.commit()
+        logger.info("portfolio_content_hash_migrated", rows=len(rows))
+
+    def _migrate_cost_columns(self) -> None:
+        """Add slippage/commission columns to portfolio_runs if missing."""
+        cols = {
+            r[1]
+            for r in self._conn.execute("PRAGMA table_info(portfolio_runs)")
+        }
+        added = []
+        for col in ("slippage_bps", "commission_bps", "commission_fixed_per_contract"):
+            if col not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE portfolio_runs ADD COLUMN {col} REAL NOT NULL DEFAULT 0.0"
+                )
+                added.append(col)
+        if added:
+            self._conn.commit()
+            logger.info("portfolio_cost_columns_migrated", added=added)
+
+    @staticmethod
+    def _allocation_hash(
+        objective: str, symbol: str, start: str, end: str, weights_json: str,
+    ) -> str:
+        """Stable hash for deduplication based on meaningful fields."""
+        canonical = json.dumps(
+            json.loads(weights_json), sort_keys=True, separators=(",", ":"),
+        )
+        payload = f"{objective}|{symbol}|{start}|{end}|{canonical}"
+        return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+    def _purge_duplicates(self) -> None:
+        """Remove duplicate allocations, keeping the earliest (lowest id)."""
+        dupes = self._conn.execute(
+            "SELECT content_hash, MIN(id) AS keep_id, COUNT(*) AS cnt "
+            "FROM portfolio_allocations "
+            "WHERE content_hash IS NOT NULL "
+            "GROUP BY content_hash HAVING cnt > 1"
+        ).fetchall()
+        removed = 0
+        for d in dupes:
+            cur = self._conn.execute(
+                "DELETE FROM portfolio_allocations "
+                "WHERE content_hash=? AND id != ?",
+                (d["content_hash"], d["keep_id"]),
+            )
+            removed += cur.rowcount
+        if removed:
+            logger.info("portfolio_duplicates_purged", removed=removed)
+        orphans = self._conn.execute(
+            "DELETE FROM portfolio_runs WHERE id NOT IN "
+            "(SELECT DISTINCT run_id FROM portfolio_allocations)"
+        )
+        if orphans.rowcount:
+            logger.info("portfolio_orphan_runs_purged", removed=orphans.rowcount)
 
     def close(self) -> None:
         self._conn.close()
@@ -132,38 +222,61 @@ class PortfolioStore:
         initial_capital: float,
         min_weight: float,
         notes: str | None = None,
+        slippage_bps: float = 0.0,
+        commission_bps: float = 0.0,
+        commission_fixed_per_contract: float = 0.0,
     ) -> int:
-        """Save a full optimization result. Returns the run_id."""
+        """Save a full optimization result. Returns the run_id.
+
+        Skips individual allocations that already exist (same hash).
+        """
         now = datetime.now(_TAIPEI_TZ).isoformat()
         slugs = result["strategy_slugs"]
         cur = self._conn.execute(
             """INSERT INTO portfolio_runs
                (run_at, symbol, start_date, end_date, initial_capital, min_weight,
-                n_strategies, strategy_slugs, n_days, correlation_json, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                n_strategies, strategy_slugs, n_days, correlation_json, notes,
+                slippage_bps, commission_bps, commission_fixed_per_contract)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 now, symbol, start, end, initial_capital, min_weight,
                 len(slugs), json.dumps(slugs), result["n_days"],
                 json.dumps(result["correlation_matrix"]), notes,
+                slippage_bps, commission_bps, commission_fixed_per_contract,
             ),
         )
         run_id = cur.lastrowid
+        saved = 0
+        skipped = 0
         for obj_key in ["max_sharpe", "max_return", "min_drawdown", "risk_parity", "equal_weight"]:
             alloc = result[obj_key]
+            wj = json.dumps(alloc["weights"])
+            h = self._allocation_hash(alloc["objective"], symbol, start, end, wj)
+            existing = self._conn.execute(
+                "SELECT id FROM portfolio_allocations WHERE content_hash=?", (h,),
+            ).fetchone()
+            if existing:
+                skipped += 1
+                continue
             self._conn.execute(
                 """INSERT INTO portfolio_allocations
                    (run_id, objective, weights_json, sharpe, total_return,
-                    annual_return, max_drawdown_pct, sortino, calmar, annual_vol)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    annual_return, max_drawdown_pct, sortino, calmar, annual_vol,
+                    content_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    run_id, alloc["objective"], json.dumps(alloc["weights"]),
+                    run_id, alloc["objective"], wj,
                     alloc["sharpe"], alloc["total_return"], alloc["annual_return"],
                     alloc["max_drawdown_pct"], alloc["sortino"], alloc["calmar"],
-                    alloc["annual_vol"],
+                    alloc["annual_vol"], h,
                 ),
             )
+            saved += 1
         self._conn.commit()
-        logger.info("portfolio_optimization_saved", run_id=run_id, n_strategies=len(slugs))
+        logger.info(
+            "portfolio_optimization_saved",
+            run_id=run_id, n_strategies=len(slugs), saved=saved, skipped=skipped,
+        )
         return run_id
 
     def save_stress_test(
@@ -350,6 +463,33 @@ class PortfolioStore:
         d = dict(row)
         d["weights"] = json.loads(d.pop("weights_json"))
         return d
+
+    def get_active_seed_config(self) -> list[dict[str, Any]] | None:
+        """Return the seeder config from the most recently selected allocation.
+
+        Looks for any allocation with ``is_selected=1``, ordered by most
+        recently selected. Returns a list of dicts with keys
+        ``slug``, ``weight``, ``symbol``, suitable for the warroom seeder.
+        Returns ``None`` when no allocation has been selected.
+        """
+        row = self._conn.execute(
+            """
+            SELECT pa.weights_json, pr.symbol, pr.strategy_slugs
+            FROM portfolio_allocations pa
+            JOIN portfolio_runs pr ON pr.id = pa.run_id
+            WHERE pa.is_selected = 1
+            ORDER BY pa.selected_at DESC
+            LIMIT 1
+            """,
+        ).fetchone()
+        if not row:
+            return None
+        weights = json.loads(row["weights_json"])
+        symbol = row["symbol"]
+        return [
+            {"slug": slug, "weight": w, "symbol": symbol}
+            for slug, w in weights.items()
+        ]
 
     def list_runs(self, symbol: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
         if symbol:
