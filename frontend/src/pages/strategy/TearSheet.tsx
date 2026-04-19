@@ -4,6 +4,7 @@ import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
 import { DrawdownChart } from "@/components/charts/DrawdownChart";
 import { DistributionChart } from "@/components/charts/DistributionChart";
 import { OHLCVChart, type OHLCVChartHandle, type IndicatorOverlay } from "@/components/charts/OHLCVChart";
+import { SpreadPanels } from "@/components/charts/SpreadPanels";
 import { SubIndicatorChart, type SubIndicatorSeries } from "@/components/charts/SubIndicatorChart";
 import { StatCard, StatRow } from "@/components/StatCard";
 import { ChartErrorBoundary } from "@/components/ErrorBoundary";
@@ -434,9 +435,15 @@ export function TearSheet() {
       setBaseTfMin(tfMin);
       const chartTf = pickChartTf(r.bars_count ?? 0, tfMin);
       setOverviewTfMin(chartTf);
-      fetchOHLCV(runSymbol, runStart, runEnd, chartTf)
-        .then((d) => setOhlcvBars(d.bars))
-        .catch(() => setOhlcvBars([]));
+      // Spread strategies ship aligned R1/R2/spread bars in the result payload;
+      // skip the per-symbol OHLCV fetch so <SpreadPanels> is the sole price view.
+      if (r.spread_legs) {
+        setOhlcvBars([]);
+      } else {
+        fetchOHLCV(runSymbol, runStart, runEnd, chartTf)
+          .then((d) => setOhlcvBars(d.bars))
+          .catch(() => setOhlcvBars([]));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -503,11 +510,6 @@ export function TearSheet() {
           {error}
         </div>
       )}
-      {paramSource?.code_changed === true && (
-        <div className="rounded-[5px] p-3 mb-2.5 text-[11px]" style={{ border: `1px solid ${colors.orange}`, color: colors.orange, fontFamily: "var(--font-mono)", background: "rgba(255,165,0,0.1)" }}>
-          Active parameters were optimized against a different version of this strategy. Re-run optimization.
-        </div>
-      )}
       {!result && !loading && (
         <div className="text-[11px] py-5" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
           Configure parameters in the sidebar and click Run Backtest.
@@ -542,7 +544,37 @@ export function TearSheet() {
               <EquityCurveChart equity={equity} bnhEquity={result.bnh_equity} startDate={startDate} timeframeMinutes={result.timeframe_minutes ?? (params.bar_agg ?? 1)} timestamps={result.equity_timestamps} />
             </ChartCard>
           </ChartErrorBoundary>
-          {ohlcvBars.length > 0 && (
+          {result.spread_legs && result.spread_bars && result.spread_r1_bars && result.spread_r2_bars ? (
+            <ChartErrorBoundary fallbackLabel="Spread Panels">
+              <ChartCard
+                title={
+                  <div className="flex items-center justify-between">
+                    <span>
+                      {result.spread_legs[0]}/{result.spread_legs[1]} SPREAD · TRADE SIGNALS
+                      {stableSignals.length > 0 && (
+                        <span style={{ color: colors.muted, fontSize: 11 }}>
+                          {" "}({stableSignals.filter(s => s.side === "buy").length} buys, {stableSignals.filter(s => s.side === "sell").length} sells)
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                }
+              >
+                <div style={{ height: 560 }}>
+                  <SpreadPanels
+                    r1Bars={result.spread_r1_bars}
+                    r2Bars={result.spread_r2_bars}
+                    spreadBars={result.spread_bars}
+                    spreadOffset={result.spread_offset ?? 0}
+                    legs={result.spread_legs}
+                    symbol={symbol}
+                    timeframeMinutes={result.timeframe_minutes ?? (params.bar_agg ?? 1)}
+                    signals={stableSignals}
+                  />
+                </div>
+              </ChartCard>
+            </ChartErrorBoundary>
+          ) : ohlcvBars.length > 0 && (
             <ChartErrorBoundary fallbackLabel="Price Chart">
               <ChartCard
                 title={
@@ -694,7 +726,7 @@ export function TearSheet() {
               <table className="w-full text-[11px]" style={{ fontFamily: "var(--font-mono)", borderCollapse: "collapse", minWidth: 1080 }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid var(--color-qe-card-border)" }}>
-                    <th className="text-left py-1 pr-2" style={{ color: colors.dim, width: 40 }}>Run#</th>
+                    <th className="text-left py-1 pr-2" style={{ color: colors.dim, width: 64 }}>Run#</th>
                     <SortHeader label="Date" field="run_at" align="left" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
                     <SortHeader label="Symbol" field="symbol" align="left" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
                     <th className="text-left py-1 pr-2" style={{ color: colors.dim }}>Period</th>
@@ -744,10 +776,14 @@ export function TearSheet() {
                         onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
                         onMouseLeave={(e) => { e.currentTarget.style.background = isSelected ? "rgba(90,138,242,0.08)" : "transparent"; }}
                       >
-                        <td className="py-1 pr-2" style={{ color: colors.dim, width: 40, whiteSpace: "nowrap" }}>
+                        <td className="py-1 pr-2" style={{ color: colors.dim, width: 64, whiteSpace: "nowrap" }}>
+                          <span style={{ display: "inline-block", width: 10, textAlign: "center" }}>
+                            {isSelected && <span title="Loaded" style={{ color: "#4ade80", fontSize: 11 }}>●</span>}
+                          </span>
+                          <span style={{ display: "inline-block", width: 10, textAlign: "center", marginRight: 2 }}>
+                            {isActive && <span title="Active params" style={{ color: colors.green, fontSize: 11 }}>★</span>}
+                          </span>
                           <span style={{ color: colors.muted }}>{run.run_id}</span>
-                          {isSelected && <span title="Loaded" style={{ color: "#4ade80", fontSize: 11, marginLeft: 3 }}>●</span>}
-                          {isActive && <span title="Active params" style={{ color: colors.green, fontSize: 11, marginLeft: isSelected ? 1 : 3 }}>★</span>}
                         </td>
                         <td className="py-1 pr-2" style={{ color: colors.text }}>{run.run_at ? run.run_at.slice(5, 16).replace("T", " ") : "—"}</td>
                         <td className="py-1 pr-2" style={{ color: colors.muted }}>{run.symbol ?? "—"}</td>
