@@ -14,8 +14,11 @@ import { test, expect } from "@playwright/test";
 test.describe("War Room Playback", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/war-room");
-    // Wait for the page to be hydrated before interacting with it.
-    await page.waitForLoadState("networkidle");
+    // Wait for the account strip to render — 'networkidle' is unreliable here
+    // because the war-room page polls /api/war-room every 15s.
+    await page.waitForSelector('[data-testid="account-mock-dev"]', {
+      timeout: 30_000,
+    });
   });
 
   test("playback bar is visible only for mock-dev account", async ({ page }) => {
@@ -28,8 +31,8 @@ test.describe("War Room Playback", () => {
     await page.click('[data-testid="account-mock-dev"]');
     await page.waitForSelector('[data-testid="playback-bar"]');
 
-    // Enable playback mode
-    await page.check('input[type="checkbox"]');
+    // Enable playback mode — the toggle is a button (not a native checkbox)
+    await page.getByRole("button", { name: "PLAYBACK" }).click();
     await page.waitForSelector('[data-testid="playback-time"]');
 
     // Capture the clock label before starting playback.
@@ -53,8 +56,8 @@ test.describe("War Room Playback", () => {
     await page.click('[data-testid="account-mock-dev"]');
     await page.waitForSelector('[data-testid="playback-bar"]');
 
-    // Enable playback mode
-    await page.check('input[type="checkbox"]');
+    // Enable playback mode — the toggle is a button (not a native checkbox)
+    await page.getByRole("button", { name: "PLAYBACK" }).click();
     await page.waitForSelector('[data-testid="playback-play"]');
 
     await page.click('[data-testid="playback-play"]');
@@ -78,22 +81,24 @@ test.describe("War Room Playback", () => {
     await page.click('[data-testid="account-mock-dev"]');
     await page.waitForSelector('[data-testid="playback-bar"]');
 
-    // Enable playback first
-    await page.check('input[type="checkbox"]');
+    // Enable playback — the toggle is a button (not a native checkbox)
+    await page.getByRole("button", { name: "PLAYBACK" }).click();
 
-    // Switch to 5x speed using selectOption.
-    await page.selectOption('[data-testid="playback-speed"]', "5");
+    // Speed control is a <input type="range">. fill() sets the value and
+    // dispatches change events so React's onChange re-renders the badge.
+    const slider = page.locator('[data-testid="playback-speed"]');
+    await slider.fill("300");
 
     const speedBadge = page.locator('[data-testid="playback-speed-indicator"]');
-    await expect(speedBadge).toHaveText("5×");
+    await expect(speedBadge).toHaveText("300×");
   });
 
   test("scrubber jumps to selected position", async ({ page }) => {
     await page.click('[data-testid="account-mock-dev"]');
     await page.waitForSelector('[data-testid="playback-bar"]');
 
-    // Enable playback mode
-    await page.check('input[type="checkbox"]');
+    // Enable playback mode — the toggle is a button (not a native checkbox)
+    await page.getByRole("button", { name: "PLAYBACK" }).click();
     await page.waitForSelector('[data-testid="playback-scrubber"]');
 
     const scrubber = page.locator('[data-testid="playback-scrubber"]');
@@ -117,8 +122,8 @@ test.describe("War Room Playback", () => {
     await page.click('[data-testid="account-mock-dev"]');
     await page.waitForSelector('[data-testid="playback-bar"]');
 
-    // Enable playback mode
-    await page.check('input[type="checkbox"]');
+    // Enable playback mode — the toggle is a button (not a native checkbox)
+    await page.getByRole("button", { name: "PLAYBACK" }).click();
     await page.waitForSelector('[data-testid="playback-time"]');
 
     // Wait for the range to load and time to stabilize

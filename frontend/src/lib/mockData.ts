@@ -77,6 +77,7 @@ export function getMockWarRoomData(config: MockConfig = DEFAULT_CONFIG): WarRoom
     symbol: config.symbol,
     status: "active",
     equity_share: 1.0,
+    portfolio_id: null,
     deployed_candidate_id: 1,
     deployed_params: { ema_fast: 12, ema_slow: 26 },
     backtest_metrics: {

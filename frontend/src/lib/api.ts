@@ -3,7 +3,11 @@
 const BASE = "";
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${url}`, init);
+  // cache: "no-store" prevents the browser HTTP cache from serving stale
+  // list/detail responses after a mutation (e.g. DELETE → reload bringing
+  // the deleted row back). FastAPI does not emit Cache-Control on these
+  // endpoints, so heuristic caching would otherwise kick in.
+  const res = await fetch(`${BASE}${url}`, { cache: "no-store", ...init });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(body.detail ?? `HTTP ${res.status}`);
@@ -50,6 +54,18 @@ export interface TradeSignal {
   price: number;
   lots: number;
   reason: string;
+  /** Originating strategy slug — used to render legend chips when multiple
+   * strategies emit signals onto the same chart. */
+  strategy_slug?: string;
+  /** Underlying symbol the fill executed against; lets the spread chart
+   * route per-leg fills to the correct R1 / R2 panel even when `spread_role`
+   * is missing. */
+  symbol?: string;
+  /** Per-panel routing tag emitted by the war-room API:
+   *   - "r1" / "r2" for the two legs of a spread strategy
+   *   - "single" for non-spread strategies (rendered on whichever chart matches their symbol)
+   */
+  spread_role?: "r1" | "r2" | "single";
 }
 
 export interface BacktestResult {
@@ -70,6 +86,11 @@ export interface BacktestResult {
   intraday?: boolean;
   indicator_series?: Record<string, (number | null)[]>;
   indicator_meta?: Record<string, { panel: string; color: string; label: string }>;
+  spread_bars?: OHLCVBar[];
+  spread_r1_bars?: OHLCVBar[];
+  spread_r2_bars?: OHLCVBar[];
+  spread_offset?: number;
+  spread_legs?: [string, string];
 }
 
 export interface MCSimulationResult {
@@ -405,6 +426,7 @@ export interface WarRoomSession {
   symbol: string;
   status: "active" | "paused" | "stopped" | "halted" | "flattening";
   equity_share: number;
+  portfolio_id: string | null;
   deployed_candidate_id: number | null;
   deployed_params: Record<string, number> | null;
   backtest_metrics: Record<string, number> | null;
@@ -448,6 +470,13 @@ export interface AccountFill {
   quantity: number;
   fee: number;
   strategy_slug?: string;
+  signal_reason?: string;
+  is_session_close?: boolean;
+  triggered?: boolean;
+  /** Backend tags spread strategies' fills as "r1" / "r2" so the spread chart
+   * can route per-leg signals to the correct panel without symbol-equality
+   * heuristics on the frontend. "single" for non-spread strategies. */
+  spread_role?: "r1" | "r2" | "single";
 }
 
 export interface SettlementInfo {
@@ -504,6 +533,41 @@ export async function fetchWarRoomTyped(opts?: { asOf?: string }): Promise<WarRo
 
 export async function fetchWarRoomMockRange(): Promise<{ min_ts: string | null; max_ts: string | null }> {
   return fetchJSON("/api/war-room/mock-range");
+}
+
+export interface PlaybackStrategy {
+  slug: string;
+  symbol: string;
+  weight: number;
+  intraday: boolean;
+}
+
+export interface PlaybackInitResponse {
+  status: string;
+  report: Record<string, { bars?: number; trades?: number; error?: string }>;
+  time_range: {
+    min_epoch: number | null;
+    max_epoch: number | null;
+    min_ts: string | null;
+    max_ts: string | null;
+  };
+}
+
+export async function initPlaybackEngine(body: {
+  strategies: PlaybackStrategy[];
+  start: string;
+  end: string;
+  initial_equity?: number;
+}): Promise<PlaybackInitResponse> {
+  return fetchJSON("/api/war-room/playback/init", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function stopPlaybackEngine(): Promise<{ status: string }> {
+  return fetchJSON("/api/war-room/playback", { method: "DELETE" });
 }
 
 export async function deployToAccount(
@@ -572,6 +636,9 @@ export interface PortfolioIndividual {
   weight: number;
   metrics: Record<string, number>;
   equity_curve: number[];
+  trade_signals?: TradeSignal[];
+  equity_timestamps?: number[];
+  timeframe_minutes?: number;
 }
 
 export interface PortfolioBacktestResult {
@@ -581,6 +648,8 @@ export interface PortfolioBacktestResult {
   merged_metrics: Record<string, number>;
   correlation_matrix: number[][];
   strategy_slugs: string[];
+  equity_timestamps?: number[];
+  timeframe_minutes?: number;
 }
 
 export async function runPortfolioBacktest(params: {
@@ -637,6 +706,9 @@ export interface SavedPortfolio {
   strategy_slugs: string[];
   n_strategies: number;
   run_at: string;
+  slippage_bps: number;
+  commission_bps: number;
+  commission_fixed_per_contract: number;
 }
 
 export interface SavedPortfoliosResponse {
@@ -661,4 +733,87 @@ export async function configureTelegram(botToken: string, chatId: string): Promi
 
 export async function testTelegram(): Promise<{ status: string; message: string }> {
   return fetchJSON("/api/paper-trade/test-telegram", { method: "POST" });
+}
+
+export interface ResetPaperEquityResponse {
+  status: string;
+  account_id: string;
+  new_equity: number;
+  margin_used: number;
+  runners_reset: number;
+  timestamp: string;
+}
+
+export async function resetPaperEquity(accountId: string): Promise<ResetPaperEquityResponse> {
+  return fetchJSON(
+    `/api/paper-trade/reset-equity?account_id=${encodeURIComponent(accountId)}`,
+    { method: "POST" },
+  );
+}
+
+// --- LivePortfolio (portfolio-level master control) ---
+
+export interface LivePortfolioMember {
+  session_id: string;
+  strategy_slug: string;
+  symbol: string;
+  status: string;
+  equity_share: number;
+}
+
+export interface LivePortfolio {
+  portfolio_id: string;
+  name: string;
+  account_id: string;
+  mode: "paper" | "live";
+  created_at: string;
+  updated_at: string;
+  members?: LivePortfolioMember[];
+  member_count?: number;
+}
+
+export async function fetchLivePortfolios(accountId?: string): Promise<LivePortfolio[]> {
+  const url = accountId
+    ? `/api/live-portfolios?account_id=${encodeURIComponent(accountId)}`
+    : "/api/live-portfolios";
+  return fetchJSON(url);
+}
+
+export async function createLivePortfolio(
+  name: string,
+  accountId: string,
+  mode: "paper" | "live" = "paper",
+): Promise<LivePortfolio> {
+  return fetchJSON("/api/live-portfolios", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, account_id: accountId, mode }),
+  });
+}
+
+export async function attachMemberToPortfolio(
+  portfolioId: string,
+  sessionId: string,
+): Promise<{ portfolio_id: string; session_id: string; status: string }> {
+  return fetchJSON(`/api/live-portfolios/${encodeURIComponent(portfolioId)}/members`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+}
+
+export async function detachMemberFromPortfolio(
+  portfolioId: string,
+  sessionId: string,
+): Promise<{ portfolio_id: string; session_id: string; status: string }> {
+  return fetchJSON(
+    `/api/live-portfolios/${encodeURIComponent(portfolioId)}/members/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function deleteLivePortfolio(portfolioId: string): Promise<{ portfolio_id: string; status: string }> {
+  return fetchJSON(`/api/live-portfolios/${encodeURIComponent(portfolioId)}`, {
+    method: "DELETE",
+  });
 }
