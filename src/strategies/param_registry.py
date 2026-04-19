@@ -172,12 +172,20 @@ class ParamRegistry:
             self._conn.commit()
 
     def _migrate_add_code_hash(self) -> None:
-        """Add strategy_hash and strategy_code columns if missing (idempotent)."""
+        """Add strategy_hash, strategy_code, strategy_meta_json columns if missing.
+
+        ``strategy_meta_json`` snapshots the module-level ``STRATEGY_META`` dict at
+        optimization time so spread-leg routing (and other META-driven behavior)
+        stays consistent with the pinned code, even if the current file's META
+        has drifted.
+        """
         cols = [r[1] for r in self._conn.execute("PRAGMA table_info(param_runs)").fetchall()]
         if "strategy_hash" not in cols:
             self._conn.execute("ALTER TABLE param_runs ADD COLUMN strategy_hash TEXT")
         if "strategy_code" not in cols:
             self._conn.execute("ALTER TABLE param_runs ADD COLUMN strategy_code TEXT")
+        if "strategy_meta_json" not in cols:
+            self._conn.execute("ALTER TABLE param_runs ADD COLUMN strategy_meta_json TEXT")
         self._conn.commit()
 
     def _migrate_add_alpha(self) -> None:
@@ -253,6 +261,7 @@ class ParamRegistry:
         initial_capital: float = 2_000_000.0,
         strategy_hash: str | None = None,
         strategy_code: str | None = None,
+        strategy_meta_json: str | None = None,
         objective: str = "sortino",
         result_json: str | None = None,
     ) -> int:
@@ -290,8 +299,9 @@ class ParamRegistry:
                 """INSERT INTO param_runs
                    (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
                     objective, is_fraction, n_trials, search_type, source, tag, notes,
-                    initial_capital, strategy_hash, strategy_code, result_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'single', ?, ?, ?, ?, ?, ?, ?)""",
+                    initial_capital, strategy_hash, strategy_code, strategy_meta_json,
+                    result_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'single', ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     now,
                     strategy,
@@ -308,6 +318,7 @@ class ParamRegistry:
                     initial_capital,
                     strategy_hash,
                     strategy_code,
+                    strategy_meta_json,
                     result_json,
                 ),
             )
@@ -404,6 +415,7 @@ class ParamRegistry:
         initial_capital: float = 2_000_000.0,
         strategy_hash: str | None = None,
         strategy_code: str | None = None,
+        strategy_meta_json: str | None = None,
         base_params: dict[str, Any] | None = None,
     ) -> int:
         """Persist a full OptimizerResult. Returns the run_id.
@@ -423,9 +435,10 @@ class ParamRegistry:
             """INSERT INTO param_runs
                (run_at, strategy, symbol, train_start, train_end, test_start, test_end,
                 objective, is_fraction, n_trials, search_type, source, tag, notes,
-                initial_capital, strategy_hash, strategy_code, objective_direction, mode,
+                initial_capital, strategy_hash, strategy_code, strategy_meta_json,
+                objective_direction, mode,
                 disqualified_trials, gate_results_json, gate_details_json, promotable)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 now,
                 strategy,
@@ -444,6 +457,7 @@ class ParamRegistry:
                 initial_capital,
                 strategy_hash,
                 strategy_code,
+                strategy_meta_json,
                 result.objective_direction,
                 result.mode,
                 result.disqualified_trials,
@@ -697,11 +711,16 @@ class ParamRegistry:
         return json.loads(row["params"])
 
     def get_active_detail(self, strategy: str) -> dict[str, Any] | None:
-        """Return the active candidate with full metadata."""
+        """Return the active candidate with full metadata.
+
+        Includes ``strategy_code`` and parsed ``strategy_meta`` so callers can
+        pin execution to the active candidate without a second round-trip.
+        """
         row = self._conn.execute(
             """SELECT c.id, c.run_id, c.params, c.label, c.regime,
                       c.activated_at, c.notes,
-                      r.objective, r.tag, r.run_at, r.symbol, r.strategy_hash
+                      r.objective, r.tag, r.run_at, r.symbol, r.strategy_hash,
+                      r.strategy_code, r.strategy_meta_json
                FROM param_candidates c
                JOIN param_runs r ON r.id = c.run_id
                WHERE c.strategy = ? AND c.is_active = 1""",
@@ -709,6 +728,13 @@ class ParamRegistry:
         ).fetchone()
         if row is None:
             return None
+        strategy_meta = None
+        meta_raw = row["strategy_meta_json"]
+        if meta_raw:
+            try:
+                strategy_meta = json.loads(meta_raw)
+            except (ValueError, TypeError):
+                strategy_meta = None
         return {
             "candidate_id": row["id"],
             "run_id": row["run_id"],
@@ -722,6 +748,8 @@ class ParamRegistry:
             "run_at": row["run_at"],
             "symbol": row["symbol"],
             "strategy_hash": row["strategy_hash"],
+            "strategy_code": row["strategy_code"],
+            "strategy_meta": strategy_meta,
         }
 
     # -- deactivate_stale_candidates -------------------------------------
@@ -764,6 +792,36 @@ class ParamRegistry:
         if stored_hash is None:
             return None
         return stored_hash == current_hash
+
+    def get_code_by_hash(
+        self, strategy: str, strategy_hash: str,
+    ) -> tuple[str | None, dict | None]:
+        """Return ``(strategy_code, strategy_meta)`` for a specific hash.
+
+        Used when a caller wants to reproduce a historical run by hash rather
+        than via the active candidate. Returns ``(None, None)`` if no row with
+        the given hash has non-null ``strategy_code``.
+        """
+        row = self._conn.execute(
+            """SELECT strategy_code, strategy_meta_json
+               FROM param_runs
+               WHERE strategy = ?
+                 AND strategy_hash = ?
+                 AND strategy_code IS NOT NULL
+                 AND strategy_code != ''
+               ORDER BY run_at DESC, id DESC
+               LIMIT 1""",
+            (strategy, strategy_hash),
+        ).fetchone()
+        if row is None:
+            return None, None
+        meta: dict | None = None
+        if row["strategy_meta_json"]:
+            try:
+                meta = json.loads(row["strategy_meta_json"])
+            except (ValueError, TypeError):
+                meta = None
+        return row["strategy_code"], meta
 
     # -- Pareto frontier --------------------------------------------------
 
