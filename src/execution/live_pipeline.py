@@ -221,7 +221,7 @@ class LivePipelineManager:
                 try:
                     effective_eq = self._sm.get_effective_equity(sid)
                     if effective_eq is None or effective_eq <= 0:
-                        effective_eq = session.equity_share * 1_000_000
+                        effective_eq = session.virtual_equity or session.equity_share * 1_000_000
                     runner = LiveStrategyRunner(
                         session_id=sid,
                         account_id=session.account_id,
