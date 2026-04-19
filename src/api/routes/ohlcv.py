@@ -88,7 +88,7 @@ async def get_spread_bars(
     offset_override = live_buffer.get_session_offset() if live_buffer.warmup_complete else None
 
     leg2_sym = f"{symbol}_R2"
-    bars, err = _build_spread_bars(
+    result = _build_spread_bars(
         db=db,
         leg1_sym=symbol,
         leg2_sym=leg2_sym,
@@ -98,11 +98,11 @@ async def get_spread_bars(
         offset_override=offset_override,
     )
 
-    if err:
-        raise HTTPException(status_code=400, detail=err)
+    if result.error:
+        raise HTTPException(status_code=400, detail=result.error)
 
-    if not bars:
-        return {"bars": [], "count": 0, "offset": offset_override or 100.0}
+    if not result.spread_bars:
+        return {"bars": [], "count": 0, "offset": result.offset}
 
     # Convert bars to dict format matching frontend expectations
     bar_dicts = [
@@ -114,11 +114,11 @@ async def get_spread_bars(
             "close": b.close,
             "volume": b.volume,
         }
-        for b in bars
+        for b in result.spread_bars
     ]
 
     return {
         "bars": bar_dicts,
         "count": len(bar_dicts),
-        "offset": offset_override if offset_override is not None else 100.0,
+        "offset": result.offset,
     }

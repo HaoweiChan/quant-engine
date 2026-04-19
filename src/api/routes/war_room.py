@@ -3,33 +3,136 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 _TAIPEI_TZ = timezone(timedelta(hours=8))
 
 from collections import deque
 
 from fastapi import APIRouter, Query
+from pydantic import BaseModel
 
 from src.api.helpers import get_war_room_data
+from src.api.routes.playback_engine import PlaybackEngine, StrategySpec
 from src.trading_session.store import FillStore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["trading"])
 
 
-# 30-second TTL cache so the dashboard's 5s poll doesn't hammer SQLite.
-_WARROOM_CACHE: dict = {"data": None, "ts": 0.0}
-_WARROOM_CACHE_TTL = 30.0
+# Cache disabled. The previous 30-second TTL cache served stale equity into
+# fresh playback sessions and survived seeder refactors that change the
+# meaning of persisted snapshots, both producing values that disagreed with
+# the MCP reference. SQLite reads on the mock tables are sub-millisecond, so
+# the dashboard's 5s poll cadence does not need a cache. The
+# `invalidate_warroom_cache` hook is retained as a no-op so the admin reseed
+# endpoint and other callers continue to compile.
 _MOCK_ACCOUNT_ID = "mock-dev"
 
 
 def invalidate_warroom_cache() -> None:
-    """Drop the cached response. Called by the admin reseed endpoint."""
-    _WARROOM_CACHE["data"] = None
-    _WARROOM_CACHE["ts"] = 0.0
+    """No-op placeholder kept for API compatibility (cache was removed)."""
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Direct-backtest playback engine (bypasses mock DB)
+# ---------------------------------------------------------------------------
+_playback_engine: PlaybackEngine | None = None
+
+
+class _PlaybackStrategyBody(BaseModel):
+    slug: str
+    symbol: str
+    weight: float
+    intraday: bool = False
+
+
+class _PlaybackInitBody(BaseModel):
+    strategies: list[_PlaybackStrategyBody]
+    start: str
+    end: str
+    initial_equity: float = 2_000_000.0
+
+
+@router.post("/war-room/playback/init")
+async def init_playback(body: _PlaybackInitBody) -> dict:
+    """Run backtests via the MCP facade and cache results for playback.
+
+    Uses the exact same ``run_backtest_realdata_for_mcp`` function the
+    MCP tools call, so equity values are guaranteed identical.
+    """
+    global _playback_engine
+    specs = [
+        StrategySpec(
+            slug=s.slug,
+            symbol=s.symbol,
+            weight=s.weight,
+            intraday=s.intraday,
+        )
+        for s in body.strategies
+    ]
+    engine = PlaybackEngine(
+        strategies=specs,
+        initial_equity=body.initial_equity,
+        start=body.start,
+        end=body.end,
+    )
+    report = engine.run_backtests()
+    _playback_engine = engine
+    tr = engine.time_range()
+    logger.info(
+        "playback.init strategies=%d range=%s report=%s",
+        len(specs),
+        tr,
+        report,
+    )
+    return {
+        "status": "ok",
+        "report": report,
+        "time_range": {
+            "min_epoch": tr[0] if tr else None,
+            "max_epoch": tr[1] if tr else None,
+            "min_ts": _epoch_to_iso(tr[0]) if tr else None,
+            "max_ts": _epoch_to_iso(tr[1]) if tr else None,
+        },
+    }
+
+
+@router.delete("/war-room/playback")
+async def stop_playback() -> dict:
+    """Clear the in-memory playback cache."""
+    global _playback_engine
+    _playback_engine = None
+    logger.info("playback.stopped")
+    return {"status": "ok"}
+
+
+@router.get("/war-room/playback/status")
+async def playback_status() -> dict:
+    """Check whether the direct-backtest playback engine is active."""
+    if _playback_engine is None or not _playback_engine.ready:
+        return {"active": False}
+    tr = _playback_engine.time_range()
+    return {
+        "active": True,
+        "strategies": [s.slug for s in _playback_engine.strategies],
+        "time_range": {
+            "min_ts": _epoch_to_iso(tr[0]) if tr else None,
+            "max_ts": _epoch_to_iso(tr[1]) if tr else None,
+        },
+    }
+
+
+def _epoch_to_iso(epoch: int | None) -> str | None:
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=_TAIPEI_TZ).isoformat()
 
 
 def _mock_db_path() -> Path:
@@ -38,6 +141,54 @@ def _mock_db_path() -> Path:
 
 def _strategy_label(slug: str) -> str:
     return slug.split("/")[-1] if "/" in slug else slug
+
+
+# Cache of slug → spread_legs metadata so each war-room request avoids
+# re-importing the strategy module to look up STRATEGY_META.
+_SPREAD_LEGS_CACHE: dict[str, list[str] | None] = {}
+
+
+def _spread_legs_for_slug(slug: str) -> list[str] | None:
+    """Return the 2-element spread_legs list for a spread strategy slug, or
+    None for single-leg strategies. Result is memoised in-process.
+    """
+    if slug in _SPREAD_LEGS_CACHE:
+        return _SPREAD_LEGS_CACHE[slug]
+    legs: list[str] | None = None
+    try:
+        from src.strategies.registry import get_info
+
+        info = get_info(slug)
+        meta_legs = (info.meta or {}).get("spread_legs") if info else None
+        if isinstance(meta_legs, (list, tuple)) and len(meta_legs) == 2:
+            legs = [str(meta_legs[0]), str(meta_legs[1])]
+    except Exception:
+        legs = None
+    _SPREAD_LEGS_CACHE[slug] = legs
+    return legs
+
+
+def _spread_role_for_fill(slug: str, symbol: str) -> str:
+    """Tag a fill as 'r1', 'r2', or 'single' for per-panel signal filtering.
+
+    Spread strategies in the seeder use account-relative legs (e.g. MTX/MTX_R2)
+    rather than the strategy's META default (TX/TX_R2). To match both, we
+    accept the fill's symbol when it equals either the META leg or shares the
+    suffix convention (`{leg}_R2` for the second leg, anything else for the
+    first). Returns 'single' when the strategy has no spread metadata.
+    """
+    legs = _spread_legs_for_slug(slug)
+    if not legs:
+        return "single"
+    # Direct META match first.
+    if symbol == legs[0]:
+        return "r1"
+    if symbol == legs[1]:
+        return "r2"
+    # Account-override fallback: leg2 is conventionally "{symbol}_R2".
+    if symbol.endswith("_R2"):
+        return "r2"
+    return "r1"
 
 
 def _get_mock_db_connection() -> sqlite3.Connection:
@@ -254,7 +405,20 @@ def _load_mock_as_of(account_id: str, as_of: str) -> dict:
         ts_equity[ts] = sum(strat_eq.values())
     equity_curve = sorted(ts_equity.items())
 
-    # Recent fills: last 200 in descending order for display.
+    # Recent fills: take the most-recent slice per strategy, then combine.
+    # Using a global "last 200" cap starved bursty strategies (e.g.
+    # spread_reversion, which stops trading mid-year) of representation in
+    # the blotter and chart markers once other strategies crowded the tail.
+    # 500 per strategy × 4 strategies ≈ a bounded payload that still shows
+    # every strategy's signal history.
+    fills_by_slug: dict[str, list] = {}
+    for row in all_fill_rows:
+        fills_by_slug.setdefault(row["strategy_slug"], []).append(row)
+    per_strategy_cap = 500
+    picked: list = []
+    for slug_fills in fills_by_slug.values():
+        picked.extend(slug_fills[-per_strategy_cap:])
+    picked.sort(key=lambda r: r["timestamp"], reverse=True)
     recent_fills = [
         {
             "timestamp": r["timestamp"],
@@ -267,8 +431,11 @@ def _load_mock_as_of(account_id: str, as_of: str) -> dict:
             "is_session_close": bool(r["is_session_close"]),
             "signal_reason": r["signal_reason"] or "",
             "triggered": bool(r["triggered"]),
+            # Per-panel filter key for spread chart rendering. "r1" / "r2" for
+            # the two legs of a spread strategy, "single" for non-spread.
+            "spread_role": _spread_role_for_fill(r["strategy_slug"], r["symbol"]),
         }
-        for r in reversed(all_fill_rows[-200:])
+        for r in picked
     ]
 
     positions = _reconstruct_positions_from_fills(list(all_fill_rows), as_of)
@@ -321,11 +488,16 @@ def _load_mock_warroom_state(account_id: str) -> dict | None:
             """
             SELECT timestamp, account_id, session_id, strategy_slug, symbol,
                    side, price, quantity, fee, pnl_realized, is_session_close,
-                   signal_reason, triggered
-            FROM mock_fills
-            WHERE account_id = ?
+                   signal_reason, triggered, rn
+            FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY strategy_slug ORDER BY timestamp DESC
+                ) AS rn
+                FROM mock_fills
+                WHERE account_id = ?
+            )
+            WHERE rn <= 500
             ORDER BY timestamp DESC
-            LIMIT 200
             """,
             (account_id,),
         ).fetchall()
@@ -472,6 +644,7 @@ def _load_mock_warroom_state(account_id: str) -> dict | None:
             "is_session_close": bool(r["is_session_close"]),
             "signal_reason": r["signal_reason"] or "",
             "triggered": bool(r["triggered"]),
+            "spread_role": _spread_role_for_fill(r["strategy_slug"], r["symbol"]),
         }
         for r in fill_rows
     ]
@@ -628,25 +801,42 @@ async def mock_range() -> dict:
 
 @router.get("/war-room")
 async def war_room(as_of: str | None = Query(None)) -> dict:
-    # When as_of is set, bypass cache entirely and return time-filtered state.
-    if as_of is not None:
+    # Direct-backtest playback: when the PlaybackEngine is active and an
+    # as_of timestamp is provided, serve from the cached raw MCP results
+    # instead of the mock DB. This guarantees bit-exact equity with MCP.
+    use_engine = as_of is not None and _playback_engine is not None and _playback_engine.ready
+    engine_state: dict | None = None
+    engine_strat_states: dict[str, dict] = {}
+    if use_engine:
+        try:
+            as_of_epoch = int(datetime.fromisoformat(
+                as_of.replace("Z", "+00:00"),
+            ).timestamp())
+            engine_state = _playback_engine.get_account_state(as_of_epoch)
+            for spec in _playback_engine.strategies:
+                ss = _playback_engine.get_strategy_state(spec.slug, as_of_epoch)
+                if ss is not None:
+                    engine_strat_states[spec.slug] = ss
+        except Exception:
+            logger.warning("playback_engine.get_state_failed", exc_info=True)
+            use_engine = False
+
+    # Fallback: mock DB path (used when engine is not active or for
+    # non-playback requests).
+    if as_of is not None and not use_engine:
         mock_state: dict | None = None
         try:
             mock_state = _load_mock_as_of(_MOCK_ACCOUNT_ID, as_of)
         except Exception:
             mock_state = None
-    else:
-        # Serve cached response when fresh (absorbs the 5s dashboard poll).
-        now_ts = time.time()
-        cached = _WARROOM_CACHE.get("data")
-        if cached is not None and (now_ts - _WARROOM_CACHE.get("ts", 0.0)) < _WARROOM_CACHE_TTL:
-            return cached
-
+    elif not use_engine:
         mock_state = None
         try:
             mock_state = _load_mock_current(_MOCK_ACCOUNT_ID)
         except Exception:
             mock_state = None
+    else:
+        mock_state = None
 
     fetched_at = datetime.now(_TAIPEI_TZ).isoformat()
     try:
@@ -726,8 +916,13 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
             {"timestamp": t.isoformat(), "equity": e} for t, e in equity_curve
         ]
 
-        # Overlay real-backtest mock state for mock_dev when available.
-        if acct_id == _MOCK_ACCOUNT_ID and mock_state is not None:
+        # Direct-backtest engine takes priority over mock DB for mock-dev.
+        if acct_id == _MOCK_ACCOUNT_ID and use_engine and engine_state is not None:
+            equity_val = float(engine_state["equity"]) or equity_val
+            positions_block = engine_state["positions"]
+            recent_fills_block = engine_state["recent_fills"]
+            equity_curve_block = engine_state["equity_curve"]
+        elif acct_id == _MOCK_ACCOUNT_ID and mock_state is not None:
             equity_val = float(mock_state["equity"]) or equity_val
             positions_block = mock_state["positions"]
             recent_fills_block = mock_state["recent_fills"]
@@ -804,7 +999,23 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
         deploy_info = _resolve_deployment_info(s)
         mock_trade_count = None
         mock_strategy_snap = None
+        # Direct-backtest engine: per-strategy state
         if (
+            use_engine
+            and s.account_id == _MOCK_ACCOUNT_ID
+            and s.strategy_slug
+        ):
+            eng_snap = engine_strat_states.get(s.strategy_slug)
+            if eng_snap is None and s.strategy_slug:
+                short = s.strategy_slug.split("/")[-1]
+                for full_slug, ss in engine_strat_states.items():
+                    if full_slug.split("/")[-1] == short:
+                        eng_snap = ss
+                        break
+            if eng_snap is not None:
+                mock_strategy_snap = eng_snap
+                mock_trade_count = eng_snap.get("trade_count")
+        elif (
             mock_state is not None
             and s.account_id == _MOCK_ACCOUNT_ID
             and s.strategy_slug
@@ -813,7 +1024,6 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
             mock_trade_count = mock_state["trade_counts_by_session"].get(mock_session_id)
             psl = mock_state.get("per_strategy_latest", {})
             mock_strategy_snap = psl.get(s.strategy_slug)
-            # Fallback: short slug → find matching full slug (e.g. "night_session_long" → "short_term/.../night_session_long")
             if mock_strategy_snap is None:
                 short = s.strategy_slug.split("/")[-1]
                 for full_slug in psl:
@@ -829,6 +1039,11 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
         snapshot_block: dict | None = None
         is_playback_mock = as_of and s.account_id == _MOCK_ACCOUNT_ID
         if mock_strategy_snap is not None:
+            positions_source = (
+                (engine_state.get("positions") if engine_state else None)
+                or (mock_state.get("positions") if mock_state else None)
+                or []
+            )
             snapshot_block = {
                 "equity": mock_strategy_snap["equity"],
                 "unrealized_pnl": mock_strategy_snap["unrealized_pnl"],
@@ -836,7 +1051,7 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
                 "drawdown_pct": mock_strategy_snap["drawdown_pct"],
                 "trade_count": mock_trade_count if mock_trade_count is not None else mock_strategy_snap["trade_count"],
                 "positions": [
-                    p for p in (mock_state.get("positions") or [])
+                    p for p in positions_source
                     if p.get("strategy_slug") == s.strategy_slug
                 ],
             }
@@ -884,6 +1099,7 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
                 "symbol": s.symbol,
                 "status": s.status,
                 "equity_share": getattr(s, "equity_share", 1.0),
+                "portfolio_id": getattr(s, "portfolio_id", None),
                 **deploy_info,
                 "snapshot": snapshot_block,
                 "equity_curve": session_equity_curves.get(s.session_id, []),
@@ -897,8 +1113,4 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
         "settlement": settlement_block,
         "fetched_at": fetched_at,
     }
-    # Only populate the cache on the non-time-travel path.
-    if as_of is None:
-        _WARROOM_CACHE["data"] = response
-        _WARROOM_CACHE["ts"] = now_ts
     return response

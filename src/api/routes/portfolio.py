@@ -30,6 +30,7 @@ class PortfolioBacktestRequest(BaseModel):
     initial_capital: float = 2_000_000.0
     slippage_bps: float = 0.0
     commission_bps: float = 0.0
+    commission_fixed_per_contract: float = 0.0
 
 
 class PortfolioStressRequest(BaseModel):
@@ -40,6 +41,7 @@ class PortfolioStressRequest(BaseModel):
     initial_capital: float = 2_000_000.0
     slippage_bps: float = 0.0
     commission_bps: float = 0.0
+    commission_fixed_per_contract: float = 0.0
     n_paths: int = Field(500, ge=10, le=5000)
     n_days: int = Field(252, ge=20, le=1000)
     method: Literal["stationary", "circular", "garch"] = "stationary"
@@ -54,6 +56,9 @@ class PortfolioOptimizeRequest(BaseModel):
     end: str = "2026-03-14"
     initial_capital: float = 2_000_000.0
     min_weight: float = Field(0.10, ge=0.0, le=0.5, description="Minimum allocation per strategy")
+    slippage_bps: float = 0.0
+    commission_bps: float = 0.0
+    commission_fixed_per_contract: float = 0.0
 
 
 def _validate_strategies(strategies: list[StrategyEntry]) -> None:
@@ -76,6 +81,7 @@ def _run_individual_backtests(
                 strategy_params=entry.params,
                 slippage_bps=req.slippage_bps,
                 commission_bps=req.commission_bps,
+                commission_fixed_per_contract=req.commission_fixed_per_contract,
             )
         except ValueError as exc:
             raise HTTPException(404, f"Strategy '{entry.slug}': {exc}")
@@ -114,11 +120,23 @@ async def run_portfolio_backtest(req: PortfolioBacktestRequest) -> dict:
             metrics.setdefault("annual_return", annual_ret)
             metrics.setdefault("annual_vol", annual_vol)
             metrics.setdefault("n_days", n_days)
+        # Normalise trade_signals to plain dicts for JSON serialisation
+        raw_signals = bt.get("trade_signals", [])
+        signals = [
+            dict(s) if not isinstance(s, dict) else s
+            for s in (raw_signals if raw_signals else [])
+        ]
+        eq_ts = bt.get("equity_timestamps", [])
+        if hasattr(eq_ts, "tolist"):
+            eq_ts = eq_ts.tolist()
         individual_summaries.append({
             "slug": entry.slug,
             "weight": entry.weight,
             "metrics": metrics,
             "equity_curve": bt.get("equity_curve", []),
+            "trade_signals": signals,
+            "equity_timestamps": eq_ts,
+            "timeframe_minutes": bt.get("timeframe_minutes", 1),
         })
 
     merger = PortfolioMerger(initial_capital=req.initial_capital)
@@ -132,6 +150,11 @@ async def run_portfolio_backtest(req: PortfolioBacktestRequest) -> dict:
         n_strategies=len(req.strategies),
         n_days=merged.metrics.get("n_days", 0),
     )
+    # Derive top-level timestamps/tf from the first strategy (shared bar grid)
+    first_bt = bt_results[0] if bt_results else {}
+    top_eq_ts = first_bt.get("equity_timestamps", [])
+    if hasattr(top_eq_ts, "tolist"):
+        top_eq_ts = top_eq_ts.tolist()
     return {
         "individual": individual_summaries,
         "merged_equity_curve": merged.merged_equity_curve,
@@ -139,6 +162,8 @@ async def run_portfolio_backtest(req: PortfolioBacktestRequest) -> dict:
         "merged_metrics": merged.metrics,
         "correlation_matrix": merged.correlation_matrix,
         "strategy_slugs": [e.slug for e in req.strategies],
+        "equity_timestamps": top_eq_ts,
+        "timeframe_minutes": first_bt.get("timeframe_minutes", 1),
     }
 
 
@@ -221,7 +246,6 @@ async def run_portfolio_optimize(req: PortfolioOptimizeRequest) -> dict:
     """
     _validate_strategies(req.strategies)
     from src.core.portfolio_optimizer import PortfolioOptimizer
-    # Run individual backtests
     daily_returns: dict[str, np.ndarray] = {}
     for entry in req.strategies:
         try:
@@ -232,6 +256,9 @@ async def run_portfolio_optimize(req: PortfolioOptimizeRequest) -> dict:
                 end_str=req.end,
                 initial_equity=req.initial_capital,
                 strategy_params=entry.params,
+                slippage_bps=req.slippage_bps,
+                commission_bps=req.commission_bps,
+                commission_fixed_per_contract=req.commission_fixed_per_contract,
             )
         except ValueError as exc:
             raise HTTPException(404, f"Strategy '{entry.slug}': {exc}")
@@ -269,6 +296,9 @@ async def run_portfolio_optimize(req: PortfolioOptimizeRequest) -> dict:
         run_id = store.save_optimization(
             result=output, symbol=req.symbol, start=req.start, end=req.end,
             initial_capital=req.initial_capital, min_weight=req.min_weight,
+            slippage_bps=req.slippage_bps,
+            commission_bps=req.commission_bps,
+            commission_fixed_per_contract=req.commission_fixed_per_contract,
         )
         store.close()
         output["run_id"] = run_id
@@ -319,6 +349,9 @@ async def list_saved_portfolios(symbol: str | None = None, limit: int = 10) -> d
                 "strategy_slugs": run["strategy_slugs"],
                 "n_strategies": run["n_strategies"],
                 "run_at": run["run_at"],
+                "slippage_bps": run.get("slippage_bps", 0.0),
+                "commission_bps": run.get("commission_bps", 0.0),
+                "commission_fixed_per_contract": run.get("commission_fixed_per_contract", 0.0),
             })
 
     logger.info("portfolio_list_returned", count=len(portfolios))

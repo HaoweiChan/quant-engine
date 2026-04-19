@@ -181,6 +181,102 @@ async def configure_telegram(req: TelegramConfigRequest):
     return {"status": "ok" if ok else "error", "message": "Configured and test sent" if ok else "Stored but test message failed"}
 
 
+@router.post("/reset-equity")
+def reset_paper_equity(account_id: str = Query(...)):
+    """Rebase paper-trading equity for an account to the broker's real value.
+
+    Typical use: the sinopac account has been running in paper mode for days;
+    paper equity has drifted far from the real broker equity. This endpoint
+    re-anchors the paper equity curve (and each live runner's internal budget)
+    to the account's current real balance.
+
+    Steps:
+      1. Query the broker gateway for the current real ``AccountSnapshot``.
+      2. Wipe ``account_equity_history`` rows for this account.
+      3. Write one fresh row at the real equity value.
+      4. For each running ``LiveStrategyRunner`` bound to this account, reset
+         ``_equity_budget`` to its share of the real equity and zero out its
+         realized PnL, so the next recorded snapshot reflects the reset.
+    """
+    from fastapi import HTTPException
+    import src.api.helpers as h
+
+    registry = h._gateway_registry
+    if registry is None:
+        raise HTTPException(status_code=503, detail="Gateway registry not initialized")
+    gateway = registry.get_gateway(account_id)
+    if gateway is None:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
+
+    try:
+        snapshot = gateway.get_account_snapshot()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Broker snapshot failed: {exc}",
+        ) from None
+    if not getattr(snapshot, "connected", True):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Broker '{account_id}' is disconnected; refusing to reset paper "
+                "equity to a disconnected snapshot. Reconnect and retry."
+            ),
+        )
+    real_equity = float(snapshot.equity)
+    if real_equity <= 0:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Broker reported equity={real_equity}; refusing to reset paper "
+                "history to a zero value. Check broker credentials / margin endpoint."
+            ),
+        )
+
+    # 2 + 3: rewrite equity history
+    now_iso = datetime.now(timezone(timedelta(hours=8))).isoformat()
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "DELETE FROM account_equity_history WHERE account_id = ?",
+            (account_id,),
+        )
+        conn.execute(
+            "INSERT INTO account_equity_history "
+            "(account_id, timestamp, equity, margin_used) VALUES (?, ?, ?, ?)",
+            (account_id, now_iso, real_equity, float(snapshot.margin_used or 0.0)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Evict the in-memory throttle so the next record() goes through.
+    if h._account_equity_store is not None:
+        h._account_equity_store._last_write.pop(account_id, None)
+
+    # 4: reset runner in-memory budgets
+    runners_reset = 0
+    pipeline = h._live_pipeline
+    if pipeline is not None:
+        runners = [
+            r for _sid, r in pipeline.iter_runners() if r.account_id == account_id
+        ]
+        for r in runners:
+            share = float(getattr(r, "_equity_share", 1.0 / max(len(runners), 1)))
+            r._equity_budget = real_equity * share
+            r._realized_pnl = 0.0
+            runners_reset += 1
+
+    return {
+        "status": "ok",
+        "account_id": account_id,
+        "new_equity": real_equity,
+        "margin_used": float(snapshot.margin_used or 0.0),
+        "runners_reset": runners_reset,
+        "timestamp": now_iso,
+    }
+
+
 @router.post("/test-telegram")
 async def test_telegram():
     """Send a test message to verify Telegram notification setup."""
