@@ -58,7 +58,7 @@ export function WarRoomLayout() {
   const [sidebarWidth, setSidebarWidth] = useState(280);
   const [mainSplitPercent, setMainSplitPercent] = useState(75); // chart+equity vs bottom bar
   const [chartSplitPercent, setChartSplitPercent] = useState(60); // chart vs equity+positions
-  const [equitySplitPercent, setEquitySplitPercent] = useState(50); // equity vs positions
+  const [equitySplitPercent, setEquitySplitPercent] = useState(67); // equity vs positions
 
   const playbackEnabled = usePlaybackStore((s) => s.enabled);
   const playbackIsPlaying = usePlaybackStore((s) => s.isPlaying);
@@ -453,16 +453,19 @@ export function WarRoomLayout() {
     return bindings;
   }, [sessions]);
 
-  const equityCurve = useMemo(() => {
-    return (activeAccountData?.equity_curve ?? []).map((p: { equity: number }) => p.equity);
+  const _nonZeroEquityCurve = useMemo(() => {
+    return (activeAccountData?.equity_curve ?? []).filter((p: { equity: number }) => p.equity > 0);
   }, [activeAccountData?.equity_curve]);
 
+  const equityCurve = useMemo(() => {
+    return _nonZeroEquityCurve.map((p: { equity: number }) => p.equity);
+  }, [_nonZeroEquityCurve]);
+
   const equityTimestamps = useMemo(() => {
-    // Use shared parser for consistent timestamp handling across all charts
-    return (activeAccountData?.equity_curve ?? []).map((p: { timestamp: string }) =>
+    return _nonZeroEquityCurve.map((p: { timestamp: string }) =>
       parseTimestampSec(p.timestamp)
     );
-  }, [activeAccountData?.equity_curve]);
+  }, [_nonZeroEquityCurve]);
 
   // Progressive bar reveal during playback: show warmup bars (before range start)
   // plus bars up to the virtual clock. This mimics a live market feed.

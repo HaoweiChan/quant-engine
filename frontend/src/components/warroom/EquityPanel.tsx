@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { EquityCurveChart, type EquityCurveChartHandle } from "@/components/charts/EquityCurveChart";
 import { colors } from "@/lib/theme";
 import type { WarRoomSession } from "@/lib/api";
@@ -69,7 +69,17 @@ export function EquityPanel({ equityCurve, equityTimestamps, sessions, accountLa
   void _accountLabel;
   const activeSessions = sessions.filter((s) => s.status === "active" || s.status === "paused");
   const chartRef = useRef<EquityCurveChartHandle>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [chartHeight, setChartHeight] = useState(120);
   const metrics = useMemo(() => computeEquityMetrics(equityCurve, equityTimestamps), [equityCurve, equityTimestamps]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setChartHeight(el.clientHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   return (
     <div className="h-full flex flex-col rounded" style={{ background: colors.card, border: `1px solid ${colors.cardBorder}` }}>
@@ -107,13 +117,13 @@ export function EquityPanel({ equityCurve, equityTimestamps, sessions, accountLa
           </svg>
         </button>
       </div>
-      <div className="p-2 flex-1 min-h-0">
+      <div ref={containerRef} className="p-2 flex-1 min-h-0">
         {equityCurve.length > 0 ? (
           <EquityCurveChart
             ref={chartRef}
             equity={equityCurve}
             timestamps={equityTimestamps}
-            height={120}
+            height={chartHeight}
             visibleRange={visibleRange}
             playbackActive={playbackActive}
           />
