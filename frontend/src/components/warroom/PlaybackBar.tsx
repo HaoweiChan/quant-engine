@@ -31,9 +31,10 @@ function datetimeLocalToMs(val: string): number | null {
 
 interface PlaybackBarProps {
   isMockAccount: boolean;
+  initializing?: boolean;
 }
 
-export function PlaybackBar({ isMockAccount }: PlaybackBarProps) {
+export function PlaybackBar({ isMockAccount, initializing }: PlaybackBarProps) {
   const {
     enabled,
     isPlaying,
@@ -113,7 +114,13 @@ export function PlaybackBar({ isMockAccount }: PlaybackBarProps) {
         </span>
       </button>
 
-      {enabled && (
+      {enabled && initializing && (
+        <span className="text-[11px] animate-pulse" style={{ color: colors.gold }}>
+          Initializing backtests…
+        </span>
+      )}
+
+      {enabled && !initializing && (
         <>
           {/* Play / Pause */}
           <button

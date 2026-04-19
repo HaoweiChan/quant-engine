@@ -58,10 +58,17 @@ interface PlaybackState {
   virtualClockMs: number | null;
   rangeStartMs: number | null;
   rangeEndMs: number | null;
+  /** Hard bounds from the mock data source (min/max ts of mock_session_snapshots).
+   * When set, user-supplied ranges are clamped so playback never falls outside
+   * the seeded window (prevents "no trades" confusion at out-of-bounds times). */
+  dataMinMs: number | null;
+  dataMaxMs: number | null;
 
   // Actions
   setEnabled: (v: boolean) => void;
   setRange: (startMs: number, endMs: number) => void;
+  /** Register the authoritative data range; clamps the current range into it. */
+  setDataBounds: (minMs: number, maxMs: number) => void;
   jumpTo: (ms: number) => void;
   play: () => void;
   pause: () => void;
@@ -77,15 +84,40 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   virtualClockMs: null,
   rangeStartMs: null,
   rangeEndMs: null,
+  dataMinMs: null,
+  dataMaxMs: null,
 
   setEnabled: (v) => set({ enabled: v, virtualClockMs: v ? get().rangeStartMs : null }),
 
-  setRange: (startMs, endMs) =>
+  setRange: (startMs, endMs) => {
+    const { dataMinMs, dataMaxMs } = get();
+    const clampedStart = dataMinMs !== null ? Math.max(startMs, dataMinMs) : startMs;
+    const clampedEnd = dataMaxMs !== null ? Math.min(endMs, dataMaxMs) : endMs;
+    // Guard against an inverted range (end earlier than start) — keep the
+    // start anchor and collapse to at least a 1-minute window.
+    const finalEnd = Math.max(clampedEnd, clampedStart + 60_000);
     set({
-      rangeStartMs: startMs,
-      rangeEndMs: endMs,
-      virtualClockMs: startMs,
-    }),
+      rangeStartMs: clampedStart,
+      rangeEndMs: finalEnd,
+      virtualClockMs: clampedStart,
+    });
+  },
+
+  setDataBounds: (minMs, maxMs) => {
+    const { rangeStartMs, rangeEndMs } = get();
+    set({
+      dataMinMs: minMs,
+      dataMaxMs: maxMs,
+      rangeStartMs:
+        rangeStartMs !== null
+          ? Math.min(Math.max(rangeStartMs, minMs), maxMs)
+          : minMs,
+      rangeEndMs:
+        rangeEndMs !== null
+          ? Math.min(Math.max(rangeEndMs, minMs), maxMs)
+          : maxMs,
+    });
+  },
 
   jumpTo: (ms) => {
     const { rangeStartMs, rangeEndMs } = get();
@@ -119,5 +151,7 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       enabled: false,
       isPlaying: false,
       virtualClockMs: null,
+      dataMinMs: null,
+      dataMaxMs: null,
     }),
 }));

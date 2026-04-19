@@ -77,6 +77,7 @@ export const EquityCurveChart = React.memo(forwardRef<EquityCurveChartHandle, Eq
   const stratSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const bnhSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const initializedRef = useRef(false);
+  const lastSetDataLenRef = useRef(0);
 
   useImperativeHandle(ref, () => ({
     fitContent: () => chartRef.current?.timeScale().fitContent(),
@@ -143,21 +144,31 @@ export const EquityCurveChart = React.memo(forwardRef<EquityCurveChartHandle, Eq
       stratSeriesRef.current = null;
       bnhSeriesRef.current = null;
       initializedRef.current = false;
+      lastSetDataLenRef.current = 0;
     };
   }, [height]);
 
-  // Effect 2: Update data (deps: [equity, bnhEquity, timestamps, startDate, timeframeMinutes])
+  // Effect 2: Update data — always uses setData() with downsampling for a clean
+  // curve. During playback, skips re-renders when equity length hasn't grown
+  // enough to matter (avoids chart flicker from polls that return the same data).
   useEffect(() => {
     if (!chartRef.current || !stratSeriesRef.current || equity.length === 0) return;
+
+    const prevSetLen = lastSetDataLenRef.current;
+    // During playback, skip if data hasn't grown meaningfully since last render.
+    // This throttles chart redraws to ~1/sec instead of every 500ms poll.
+    if (playbackActive && prevSetLen > 0 && equity.length > 0) {
+      const growth = equity.length - prevSetLen;
+      if (growth >= 0 && growth < 3) return;
+    }
 
     const tfMin = timeframeMinutes ?? 1;
     const baseDate = startDate ? new Date(startDate) : new Date("2025-01-01");
 
-    // Update strategy series
     const ds = downsample(equity, MAX_CHART_POINTS);
     stratSeriesRef.current.setData(toChartData(ds, timestamps, baseDate, tfMin));
+    lastSetDataLenRef.current = equity.length;
 
-    // Handle bnhEquity add/remove
     if (bnhEquity && bnhEquity.length > 0) {
       if (!bnhSeriesRef.current && chartRef.current) {
         bnhSeriesRef.current = chartRef.current.addSeries(LineSeries, {

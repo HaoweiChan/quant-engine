@@ -81,13 +81,14 @@ function signalsToMarkers(signals: TradeSignal[], bars: OHLCVBar[], seqTimes: nu
         if (barEpochs[i] > sigTime && diff > bestDiff) break;
       }
       const isBuy = s.side === "buy";
+      const qty = s.lots > 0 ? s.lots : 1;
       return {
         time: seqTimes[bestIdx] as any,
         position: isBuy ? "belowBar" as const : "aboveBar" as const,
         color: isBuy ? "#26a69a" : "#ef5350",
-        shape: isBuy ? "arrowUp" as const : "arrowDown" as const,
-        size: 0.5,
-        text: "",
+        shape: "square" as const,
+        size: 2,
+        text: `${isBuy ? "B" : "S"}${qty}`,
       };
     })
     .sort((a, b) => (a.time as number) - (b.time as number));

@@ -156,7 +156,7 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
     if (!containerRef.current) return;
     const chart = createChart(containerRef.current, {
       autoSize: true,
-      width: containerRef.current.clientWidth,
+      width: containerRef.current.clientWidth || 500,
       height,
       layout: {
         background: { color: colors.card },
@@ -251,15 +251,51 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
       volSeriesRef.current = null;
       extraSeriesRef.current = [];
     };
-  }, [height, !!candles, !!volume, showTimeScale, timeframeMinutes, handleVisibleRangeChange]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!candles, !!volume, showTimeScale, timeframeMinutes, handleVisibleRangeChange]);
 
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
     try {
       const candleLen = candles?.length ?? 0;
-      const wasPrepended = candleLen > prevCandleLengthRef.current && prevCandleLengthRef.current > 0;
-      const prependedCount = wasPrepended ? candleLen - prevCandleLengthRef.current : 0;
+      const prevLen = prevCandleLengthRef.current;
+      const isFirstLoad = prevLen === 0 && candleLen > 0;
+      const isAppend = candleLen > prevLen && prevLen > 0;
+      const appendCount = isAppend ? candleLen - prevLen : 0;
+
+      // Fast path: small append (playback reveals 1-few bars at a time).
+      // Use update() for the new candles to avoid expensive full setData().
+      if (isAppend && appendCount <= 20 && candleSeriesRef.current && candles) {
+        for (let i = prevLen; i < candleLen; i++) {
+          try { candleSeriesRef.current.update(candles[i] as any); } catch { /* ok */ }
+        }
+        if (volSeriesRef.current && volume) {
+          for (let i = prevLen; i < candleLen; i++) {
+            if (volume[i]) {
+              try { volSeriesRef.current.update(volume[i] as any); } catch { /* ok */ }
+            }
+          }
+        }
+        for (let si = 0; si < series.length && si < extraSeriesRef.current.length; si++) {
+          const so = series[si];
+          const extra = extraSeriesRef.current[si];
+          for (let i = prevLen; i < Math.min(candleLen, so.data.length); i++) {
+            const d = so.data[i];
+            if (Number.isFinite(d.value)) {
+              try { extra.update(d as any); } catch { /* ok */ }
+            }
+          }
+        }
+        markersRef.current = markers ?? [];
+        recalcOverlayPositions();
+        prevCandleLengthRef.current = candleLen;
+        return;
+      }
+
+      // Full setData path: first load, prepend (load-older), or large data change.
+      const wasPrepended = isAppend && appendCount > 20;
+      const prependedCount = wasPrepended ? appendCount : 0;
       const savedRange = wasPrepended ? chart.timeScale().getVisibleLogicalRange() : null;
 
       if (candleSeriesRef.current && candles && candles.length > 0) {
@@ -293,7 +329,6 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
       }
       markersRef.current = markers ?? [];
       recalcOverlayPositions();
-      const isFirstLoad = prevCandleLengthRef.current === 0 && candleLen > 0;
       prevCandleLengthRef.current = candleLen;
       if (savedRange && prependedCount > 0) {
         chart.timeScale().setVisibleLogicalRange({
@@ -301,28 +336,25 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
           to: savedRange.to + prependedCount,
         });
       } else if (isFirstLoad) {
-        // First load: auto-fit then unlock for free vertical pan
-        // Use the series' own priceScale() to avoid LWC v5 pane-index errors
         const priceSeries = candleSeriesRef.current ?? extraSeriesRef.current[0];
         try { priceSeries?.priceScale().applyOptions({ autoScale: true }); } catch { /* ok */ }
-        const showBars = Math.min(candleLen, 200);
+        const targetBars = Math.max(60, Math.min(candleLen, 200));
         chart.timeScale().setVisibleLogicalRange({
-          from: candleLen - showBars - 1,
+          from: candleLen - targetBars - 1,
           to: candleLen + 5,
         });
         requestAnimationFrame(() => {
           try { priceSeries?.priceScale().applyOptions({ autoScale: false }); } catch { /* ok */ }
         });
       }
-      // On subsequent refreshes: don't touch the visible range (preserve user zoom/pan)
     } catch {
       /* lightweight-charts assertion errors are non-fatal here */
     }
   }, [candles, volume, series, markers, tickMarkFormatter]);
 
   return (
-    <div style={{ position: "relative" }}>
-      <div ref={containerRef} />
+    <div style={{ position: "relative", overflow: "hidden" }}>
+      <div ref={containerRef} style={{ height }} />
       {overlayMarkers.map((m, i) => (
         <div
           key={i}

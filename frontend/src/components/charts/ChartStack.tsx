@@ -60,11 +60,19 @@ interface ChartStackProps {
   viewModeLabel?: string;
   /** Callback when view-mode toggle button is clicked */
   onViewModeToggle?: () => void;
+  /** When true, re-fit the chart to the latest ~120 bars every time the bar
+   * count grows (playback / streaming). Off by default so static / backtest
+   * renderings don't fight the user's pan/zoom. Mirrors SpreadPanels's
+   * same-named prop so the single-view playback chart gets the same
+   * follow-latest behaviour that the spread view has. */
+  followLatest?: boolean;
 }
 
 export interface ChartStackHandle {
   fit: () => void;
   toggleSecondary: () => void;
+  /** Scroll the primary + secondary time scales so the last bar is flush-right. */
+  scrollToRealTime: () => void;
 }
 
 export const ChartStack = forwardRef<ChartStackHandle, ChartStackProps>(function ChartStack({
@@ -83,6 +91,7 @@ export const ChartStack = forwardRef<ChartStackHandle, ChartStackProps>(function
   syncRange,
   viewModeLabel,
   onViewModeToggle,
+  followLatest = false,
 }, ref) {
   const chartCardRef = useRef<HTMLDivElement | null>(null);
   const primaryRef = useRef<ChartPaneHandle>(null);
@@ -138,8 +147,18 @@ export const ChartStack = forwardRef<ChartStackHandle, ChartStackProps>(function
     setSecondaryParams(defaults);
   }, [secondaryDef]);
 
-  // Reset visible window when the underlying data changes
-  useEffect(() => { setVisibleCount(INITIAL_VISIBLE); }, [bars]);
+  // Reset visible window when the underlying data changes substantially
+  // (e.g., symbol or timeframe switch), but NOT when playback progressively
+  // reveals bars — that would kill performance by thrashing the chart.
+  const prevBarsLenRef = useRef(bars.length);
+  useEffect(() => {
+    const prev = prevBarsLenRef.current;
+    prevBarsLenRef.current = bars.length;
+    // Only reset if data shrank or jumped by >50% (indicates a full reload)
+    if (bars.length < prev || bars.length > prev * 1.5 || prev === 0) {
+      setVisibleCount(INITIAL_VISIBLE);
+    }
+  }, [bars.length]);
 
   // Merge liveTick into bars before computing sessionBars.
   // This ensures the live bar is part of the rendered data, eliminating
@@ -202,7 +221,7 @@ export const ChartStack = forwardRef<ChartStackHandle, ChartStackProps>(function
 
   const signalLegend: { slug: string; label: string; color: string }[] = useMemo(() => {
     if (!signals || signals.length === 0) return [];
-    const slugs = [...new Set(signals.map((s) => s.reason).filter(Boolean))];
+    const slugs = [...new Set(signals.map((s) => s.strategy_slug).filter(Boolean))] as string[];
     return slugs.map((slug, i) => ({
       slug,
       label: slug.split("/").pop() ?? slug,
@@ -212,7 +231,7 @@ export const ChartStack = forwardRef<ChartStackHandle, ChartStackProps>(function
 
   const signalMarkers: MarkerData[] = useMemo(() => {
     if (!signals || signals.length === 0 || ds.length === 0) return [];
-    const slugs = [...new Set(signals.map((s) => s.reason).filter(Boolean))];
+    const slugs = [...new Set(signals.map((s) => s.strategy_slug).filter(Boolean))] as string[];
     const slugColorMap = new Map(slugs.map((slug, i) => [slug, STRATEGY_COLORS[i % STRATEGY_COLORS.length]]));
     const barEpochs = ds.map((b) => {
       const n = b.timestamp.includes("T") ? b.timestamp : b.timestamp.replace(" ", "T");
@@ -240,8 +259,8 @@ export const ChartStack = forwardRef<ChartStackHandle, ChartStackProps>(function
           shape: "square" as const,
           size: 2,
           text: `${isBuy ? "B" : "S"}${qty}`,
-          strategyColor: slugColorMap.get(s.reason),
-          _slug: s.reason,
+          strategyColor: slugColorMap.get(s.strategy_slug ?? ""),
+          _slug: s.strategy_slug,
         };
       })
       .sort((a, b) => a.time - b.time);
@@ -462,10 +481,30 @@ export const ChartStack = forwardRef<ChartStackHandle, ChartStackProps>(function
     }
   };
 
+  const handleScrollToRealTime = useCallback(() => {
+    try { primaryRef.current?.chart()?.timeScale().scrollToRealTime(); } catch { /* ok */ }
+    try { secondaryRef.current?.chart()?.timeScale().scrollToRealTime(); } catch { /* ok */ }
+  }, []);
+
+  // Follow-latest: during playback / live streaming, call handleFit() on
+  // every bar growth so the visible-window width stays at ~120 bars. Bare
+  // scrollToRealTime preserved whatever width the first render set, which
+  // during playback was 2-8 slots (the "every chart squeezed into 2 bars"
+  // user complaint).
+  const prevFollowLenRef = useRef(0);
+  useEffect(() => {
+    const len = candles.length;
+    if (followLatest && len > prevFollowLenRef.current && len > 0) {
+      handleFit();
+    }
+    prevFollowLenRef.current = len;
+  }, [followLatest, candles.length, handleFit]);
+
   useImperativeHandle(ref, () => ({
     fit: handleFit,
     toggleSecondary: () => setSecondaryVisible((v) => !v),
-  }), [handleFit]);
+    scrollToRealTime: handleScrollToRealTime,
+  }), [handleFit, handleScrollToRealTime]);
 
   const showHeader = headerLabel || onTimeframeChange || expandable || viewModeLabel;
   const noBars = bars.length === 0;
