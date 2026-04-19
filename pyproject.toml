@@ -8,7 +8,7 @@ dependencies = [
     "polars>=1.0",
     "pyarrow>=17.0",
     "pandas>=2.2",
-    "pandas-ta>=0.3",
+    "pandas-ta",
     "scipy>=1.13",
     "sqlalchemy>=2.0",
     "lightgbm>=4.0",
@@ -26,6 +26,8 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "websockets>=14.0",
+    "matplotlib>=3.8",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
