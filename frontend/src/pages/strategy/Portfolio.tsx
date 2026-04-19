@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChartCard } from "@/components/ChartCard";
 import { EquityCurveChart } from "@/components/charts/EquityCurveChart";
@@ -15,14 +15,6 @@ import { fetchSavedPortfolios, fetchOHLCV, runPortfolioBacktest, runPortfolioStr
 import type { MCSimulationResult, OHLCVBar, PortfolioBacktestResult, PortfolioStrategyEntry, SavedPortfolio, TradeSignal } from "@/lib/api";
 import { colors, pnlColor } from "@/lib/theme";
 
-
-const OBJECTIVE_COLORS: Record<string, string> = {
-  max_sharpe: colors.green,
-  max_return: colors.blue,
-  min_drawdown: colors.gold,
-  risk_parity: colors.cyan,
-  equal_weight: colors.muted,
-};
 
 const OBJECTIVE_LABELS: Record<string, { label: string; color: string }> = {
   max_sharpe: { label: "Max Sharpe", color: colors.green },
@@ -324,7 +316,6 @@ export function Portfolio() {
   const [loading, setLoading] = useState(false);
   const [stressLoading, setStressLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loadedPortfolioId, setLoadedPortfolioId] = useState<number | null>(null);
 
   const runBacktestWith = useCallback(async (
     slotsToRun: StrategySlot[],
@@ -372,7 +363,6 @@ export function Portfolio() {
     setSlots(newSlots);
     setSymbol(portfolio.symbol);
     setDates(portfolio.start_date, portfolio.end_date);
-    setLoadedPortfolioId(portfolio.id);
     runBacktestWith(newSlots, portfolio.symbol, portfolio.start_date, portfolio.end_date, {
       slippage_bps: portfolio.slippage_bps ?? 0,
       commission_bps: portfolio.commission_bps ?? 0,
