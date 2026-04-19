@@ -382,16 +382,23 @@ class SessionManager:
         logger.warning("global_halt_activated", sessions_halted=len(self._sessions))
 
     def flatten(self) -> None:
-        """Send market-close orders for all positions and halt."""
+        """Mark every active/halted session as `flattening` and set the
+        global halt flag.
+
+        The previous implementation attempted to call
+        ``gw.close_all_positions(session.symbol)`` on the broker gateway,
+        but no such method exists on `BrokerGateway` (read-only ABC) or its
+        SinopacGateway impl, so the call raised AttributeError silently
+        on every kill-switch FLATTEN press. Order emission has moved into
+        the kill-switch route handler, which iterates the live pipeline's
+        runners and submits flatten orders through each runner's executor
+        (paper or live). This method now just transitions session state
+        so the dashboard reflects the action; the route handler is
+        responsible for the actual market-close orders.
+        """
         self.halt_active = True
         for session in self._sessions.values():
             if session.status in ("active", "halted"):
-                gw = self._registry.get_gateway(session.account_id)
-                if gw:
-                    try:
-                        gw.close_all_positions(session.symbol)
-                    except Exception:
-                        logger.exception("flatten_failed", session_id=session.session_id)
                 session.status = "flattening"
                 if self._session_db:
                     self._session_db.update_status(session.session_id, "flattening")
