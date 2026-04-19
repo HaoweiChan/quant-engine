@@ -5,17 +5,41 @@ All functions accept flat dicts and return JSON-serializable dicts.
 
 from __future__ import annotations
 
+import collections
+import dataclasses
 import importlib
 import json
 import os
 from typing import Any
 
+import structlog
+
 from src.simulator.types import PRESETS, PathConfig
+
+_facade_log = structlog.get_logger(__name__)
 
 # Factory cache: avoids importlib.reload() on every MC worker / sweep trial.
 # Code-hash change detection auto-invalidates; env QUANT_RELOAD_STRATEGY=1 forces reload.
 _factory_cache: dict[str, Any] = {}
 _factory_hashes: dict[str, str] = {}
+
+# Pinned-code cache keyed by (slug, hash). Bounded LRU — strategies change source
+# rarely, so 64 entries covers 16 strategies with up to 4 historical versions each.
+_PIN_CACHE_MAX = int(os.environ.get("QUANT_PIN_CACHE_SIZE", "64"))
+_factory_cache_by_hash: "collections.OrderedDict[tuple[str, str], Any]" = collections.OrderedDict()
+
+# One-shot set so the "pin differs from current file" warning fires exactly once
+# per (slug, reason) per process.
+_warned_drift_slugs: set[str] = set()
+_warned_fallback_slugs: set[tuple[str, str]] = set()
+
+
+class StrategyHashNotFound(LookupError):
+    """Raised when an explicit strategy_hash has no matching stored code."""
+
+
+class PinnedExecutionError(RuntimeError):
+    """Raised when pinned strategy code is present but cannot be compiled/loaded."""
 
 
 def _should_reload_strategy(slug: str) -> bool:
@@ -127,6 +151,205 @@ def resolve_factory(strategy: str) -> Any:
     except Exception:
         pass
     return result
+
+
+def _snapshot_meta_json(slug: str) -> str | None:
+    """Return the module-level ``STRATEGY_META`` for ``slug`` as a JSON string.
+
+    Values that are not JSON-native (enums, tuples) are coerced. Returns
+    ``None`` when the strategy cannot be resolved or has no META.
+    """
+    try:
+        from src.strategies.registry import get_info
+        from src.strategies.pinned_loader import _coerce_meta
+
+        meta = get_info(slug).meta
+    except Exception:
+        return None
+    if not meta:
+        return None
+    return json.dumps(_coerce_meta(meta))
+
+
+def _pin_enabled() -> bool:
+    """Return True when pinned execution is active.
+
+    Defaults to ``"1"`` (on). Set ``QUANT_PINNED_EXECUTION=0`` as an
+    emergency escape hatch that reverts to resolving strategies from
+    ``src/strategies/<slug>.py`` on disk.
+    """
+    return os.environ.get("QUANT_PINNED_EXECUTION", "1") == "1"
+
+
+def _lru_get(key: tuple[str, str]):
+    entry = _factory_cache_by_hash.get(key)
+    if entry is not None:
+        _factory_cache_by_hash.move_to_end(key)
+    return entry
+
+
+def _lru_put(key: tuple[str, str], value) -> None:
+    _factory_cache_by_hash[key] = value
+    _factory_cache_by_hash.move_to_end(key)
+    while len(_factory_cache_by_hash) > _PIN_CACHE_MAX:
+        _factory_cache_by_hash.popitem(last=False)
+
+
+def _log_fallback_once(slug: str, reason: str) -> None:
+    key = (slug, reason)
+    if key in _warned_fallback_slugs:
+        return
+    _warned_fallback_slugs.add(key)
+    _facade_log.info("pinned_fallback", slug=slug, reason=reason)
+
+
+def _log_drift_once(slug: str, pinned_hash: str, file_hash: str | None) -> None:
+    if slug in _warned_drift_slugs:
+        return
+    _warned_drift_slugs.add(slug)
+    _facade_log.info(
+        "pinned_strategy_drift",
+        slug=slug,
+        pinned_hash=pinned_hash[:12] if pinned_hash else None,
+        file_hash=(file_hash or "")[:12] or None,
+    )
+
+
+def resolve_factory_by_hash(
+    slug: str,
+    strategy_hash: str | None = None,
+    strategy_code: str | None = None,
+    force_current_file: bool = False,
+) -> tuple[Any, dict]:
+    """Return ``(factory, meta)`` pinned to a specific source version.
+
+    Resolution ladder (first match wins):
+        1. Flag ``QUANT_PINNED_EXECUTION`` off → current-file fallback.
+        2. ``force_current_file=True`` → pin to the current file's source.
+           Used by ``run_parameter_sweep`` where the optimizer is creating the
+           *next* pin and must execute against current code, not a stale pin.
+        3. ``(slug, strategy_hash)`` in the LRU cache → cached factory.
+        4. Explicit ``strategy_code`` argument → compile + cache.
+        5. Explicit ``strategy_hash`` only → look up code via
+           :meth:`ParamRegistry.get_code_by_hash`; raise
+           :class:`StrategyHashNotFound` if absent.
+        6. Neither provided → consult the active candidate for ``slug``. If it
+           has a pinned hash + code, use those.
+        7. Otherwise → current-file fallback via :func:`resolve_factory`.
+
+    ``meta`` is the JSON-safe ``STRATEGY_META`` dict of whichever source was
+    chosen. Callers use it for spread-leg routing and other META-driven
+    behavior so the dispatch stays hash-aware.
+    """
+    if not _pin_enabled():
+        factory = resolve_factory(slug)
+        from src.strategies.registry import get_info
+        return factory, dict(get_info(slug).meta or {})
+
+    # Force pinning to the current file — compile it through the pinned loader
+    # so workers still receive a picklable factory, but the source is taken from
+    # disk rather than a stored candidate.
+    if force_current_file:
+        file_hash, file_code = _compute_code_hash(slug)
+        if file_hash and file_code:
+            cached = _lru_get((slug, file_hash))
+            if cached is not None:
+                return cached.factory, dict(cached.meta)
+            return _compile_and_cache(slug, file_hash, file_code)
+        factory = resolve_factory(slug)
+        from src.strategies.registry import get_info
+        return factory, dict(get_info(slug).meta or {})
+
+    # Short-circuit on cache hit for the exact (slug, hash).
+    if strategy_hash:
+        cached = _lru_get((slug, strategy_hash))
+        if cached is not None:
+            pinned = cached
+            return pinned.factory, dict(pinned.meta)
+
+    # Explicit code provided → compile directly.
+    if strategy_code is not None and strategy_hash is not None:
+        return _compile_and_cache(slug, strategy_hash, strategy_code)
+
+    # Hash only → look up code from registry.
+    if strategy_hash is not None:
+        code, meta = _fetch_code_by_hash(slug, strategy_hash)
+        if code is None:
+            raise StrategyHashNotFound(
+                f"No stored strategy_code for slug={slug} hash={strategy_hash[:12]}"
+            )
+        return _compile_and_cache(slug, strategy_hash, code, stored_meta=meta)
+
+    # Nothing provided → consult the active candidate.
+    active_hash, active_code, active_meta = _fetch_active_pin(slug)
+    if active_hash and active_code:
+        _maybe_warn_drift(slug, active_hash)
+        return _compile_and_cache(slug, active_hash, active_code, stored_meta=active_meta)
+
+    # No pin available anywhere → fall back to the current file.
+    _log_fallback_once(slug, "no_active_pin" if active_hash is None else "no_active_code")
+    factory = resolve_factory(slug)
+    from src.strategies.registry import get_info
+    return factory, dict(get_info(slug).meta or {})
+
+
+def _compile_and_cache(
+    slug: str,
+    strategy_hash: str,
+    strategy_code: str,
+    stored_meta: dict | None = None,
+) -> tuple[Any, dict]:
+    """Compile the pinned source, cache the result, return factory + meta."""
+    from src.strategies.pinned_loader import load_pinned_strategy
+
+    try:
+        pinned = load_pinned_strategy(slug, strategy_code, expected_hash=strategy_hash)
+    except Exception as exc:
+        raise PinnedExecutionError(
+            f"Failed to compile pinned code for {slug}@{strategy_hash[:12]}: {exc}"
+        ) from exc
+    _lru_put((slug, strategy_hash), pinned)
+    # Prefer the stored meta snapshot (JSON-safe) when available; fall back to
+    # the meta extracted from the compiled module so older rows without
+    # strategy_meta_json still work.
+    meta = dict(stored_meta) if stored_meta else dict(pinned.meta)
+    return pinned.factory, meta
+
+
+def _fetch_code_by_hash(
+    slug: str, strategy_hash: str,
+) -> tuple[str | None, dict | None]:
+    from src.strategies.param_registry import ParamRegistry
+
+    reg = ParamRegistry()
+    try:
+        return reg.get_code_by_hash(slug, strategy_hash)
+    finally:
+        reg.close()
+
+
+def _fetch_active_pin(slug: str) -> tuple[str | None, str | None, dict | None]:
+    """Return ``(hash, code, meta)`` for the active candidate, or all ``None``."""
+    from src.strategies.param_registry import ParamRegistry
+
+    reg = ParamRegistry()
+    try:
+        detail = reg.get_active_detail(slug)
+    finally:
+        reg.close()
+    if not detail:
+        return None, None, None
+    return (
+        detail.get("strategy_hash"),
+        detail.get("strategy_code"),
+        detail.get("strategy_meta"),
+    )
+
+
+def _maybe_warn_drift(slug: str, pinned_hash: str) -> None:
+    file_hash, _ = _compute_code_hash(slug)
+    if file_hash and file_hash != pinned_hash:
+        _log_drift_once(slug, pinned_hash, file_hash)
 
 
 def resolve_strategy_slug(strategy: str) -> str:
@@ -345,8 +568,20 @@ def _aggregate_bars(raw, bar_agg: int):
     return aggregated
 
 
-def _get_spread_meta(strategy_slug: str) -> dict | None:
-    """Return spread_legs metadata if strategy is a spread strategy, else None."""
+def _get_spread_meta(
+    strategy_slug: str, pinned_meta: dict | None = None,
+) -> dict | None:
+    """Return ``spread_legs`` metadata if the strategy is a spread strategy.
+
+    When ``pinned_meta`` is supplied (e.g. from :func:`resolve_factory_by_hash`
+    during a pinned backtest), it takes precedence over the current-file
+    ``STRATEGY_META`` so spread-leg routing stays consistent with whatever
+    source the engine is actually executing.
+    """
+    if pinned_meta:
+        legs = pinned_meta.get("spread_legs")
+        if legs and len(legs) == 2:
+            return pinned_meta
     try:
         from src.strategies.registry import get_info
         info = get_info(strategy_slug)
@@ -358,6 +593,21 @@ def _get_spread_meta(strategy_slug: str) -> dict | None:
     return None
 
 
+@dataclasses.dataclass
+class SpreadBarsResult:
+    """Output of _build_spread_bars.
+
+    Carries synthetic spread bars plus the inner-joined R1/R2 source bars and
+    the offset applied, so callers (backtest serialization, live chart) can
+    render all three aligned series without re-loading legs.
+    """
+    spread_bars: list
+    r1_aligned: list
+    r2_aligned: list
+    offset: float
+    error: str | None
+
+
 def _build_spread_bars(
     db,
     leg1_sym: str,
@@ -366,7 +616,7 @@ def _build_spread_bars(
     end,
     bar_agg: int = 1,
     offset_override: float | None = None,
-):
+) -> SpreadBarsResult:
     """Construct synthetic spread bars: price = leg1 - leg2 + offset.
 
     The spread (R1-R2) can be negative, but MarketSnapshot requires price>0.
@@ -377,12 +627,19 @@ def _build_spread_bars(
         offset_override: If provided, use this offset instead of computing
             from historical min. Used by live spread visualization to maintain
             z-score continuity with the live session offset.
+
+    Returns:
+        SpreadBarsResult with spread_bars + aligned R1/R2 source bars + offset.
+        On failure, error is populated and the bar lists are empty.
     """
     from src.data.db import OHLCVBar
     r1_raw = _load_bars_for_tf(db, leg1_sym, start, end, bar_agg)
     r2_raw = _load_bars_for_tf(db, leg2_sym, start, end, bar_agg)
     if not r1_raw or not r2_raw:
-        return None, f"Missing data: {leg1_sym}={len(r1_raw or [])} bars, {leg2_sym}={len(r2_raw or [])} bars"
+        return SpreadBarsResult(
+            [], [], [], 0.0,
+            f"Missing data: {leg1_sym}={len(r1_raw or [])} bars, {leg2_sym}={len(r2_raw or [])} bars",
+        )
     r2_map = {b.timestamp: b for b in r2_raw}
     # First pass: find min spread to determine offset (unless overridden)
     raw_closes = []
@@ -391,13 +648,15 @@ def _build_spread_bars(
         if b2 is not None:
             raw_closes.append(b1.close - b2.close)
     if not raw_closes:
-        return None, "No overlapping timestamps between legs"
+        return SpreadBarsResult([], [], [], 0.0, "No overlapping timestamps between legs")
     if offset_override is not None and offset_override >= 0:
         offset = offset_override
     else:
         offset = max(-min(raw_closes) + 100.0, 0.0)
-    # Second pass: build bars with offset applied
+    # Second pass: build bars with offset applied, collecting aligned source bars
     spread_bars = []
+    r1_aligned = []
+    r2_aligned = []
     for b1 in r1_raw:
         b2 = r2_map.get(b1.timestamp)
         if b2 is None:
@@ -412,7 +671,9 @@ def _build_spread_bars(
             close=sc,
             volume=min(b1.volume, b2.volume),
         ))
-    return spread_bars, None
+        r1_aligned.append(b1)
+        r2_aligned.append(b2)
+    return SpreadBarsResult(spread_bars, r1_aligned, r2_aligned, offset, None)
 
 
 def _build_runner(
@@ -423,14 +684,29 @@ def _build_runner(
     initial_equity: float = 2_000_000.0,
     instrument: str | None = None,
     spread_meta: dict | None = None,
+    strategy_hash: str | None = None,
+    strategy_code: str | None = None,
+    force_current_file: bool = False,
 ):
-    """Build a BacktestRunner for any strategy. Single source of truth."""
+    """Build a BacktestRunner for any strategy. Single source of truth.
+
+    When ``QUANT_PINNED_EXECUTION`` is enabled, the factory is resolved via
+    :func:`resolve_factory_by_hash` so the engine executes the pinned source
+    recorded in ``param_runs.strategy_code``. ``force_current_file=True``
+    bypasses pinning and reads the current ``src/strategies/<slug>.py`` — used
+    by the optimization sweep where the user is creating the next pin.
+    """
     from src.simulator.backtester import BacktestRunner
     from src.core.types import ImpactParams, get_instrument_cost_config
     from src.simulator.fill_model import MarketImpactFillModel
 
     cost_config = get_instrument_cost_config(instrument or "")
-    factory = resolve_factory(strategy)
+    factory, _pinned_meta = resolve_factory_by_hash(
+        strategy,
+        strategy_hash=strategy_hash,
+        strategy_code=strategy_code,
+        force_current_file=force_current_file,
+    )
     adapter = _get_adapter()
     merged = dict(strategy_params or {})
     # Use instrument defaults when caller doesn't provide explicit cost params
@@ -609,6 +885,7 @@ def run_backtest_for_mcp(
             initial_capital=initial_equity,
             strategy_hash=strategy_hash,
             strategy_code=strategy_code,
+            strategy_meta_json=_snapshot_meta_json(resolved_slug),
         )
         registry.close()
         if run_id > 0:
@@ -636,8 +913,17 @@ def _build_cache_key(
     strategy_params: dict[str, Any] | None = None,
     intraday: bool = False,
     symbol: str = "",
+    initial_equity: float | None = None,
 ) -> _CacheKey:
-    """Compute cache key components for a real-data backtest."""
+    """Compute cache key components for a real-data backtest.
+
+    ``initial_equity`` is hashed into the key because the persisted
+    equity_curve is denominated in NT dollars at the requested capital;
+    omitting it lets a cached run done with one initial_equity be served
+    back to a caller asking for a different initial_equity, producing
+    silently wrong PnL. The same applies to the equity ratios, drawdown
+    pct, and lot sizing emitted by the simulator.
+    """
     import hashlib
     from src.core.types import get_instrument_cost_config
 
@@ -662,6 +948,14 @@ def _build_cache_key(
     _p_str = _normalize_params_for_hash(_sp)
     _p_hash = hashlib.md5(_p_str.encode()).hexdigest()[:8]
     cost_note = f"p={_p_hash}|{cost_note}"
+    # Equity is folded into the cost_note prefix so it gets persisted
+    # alongside other cost-relevant metadata when `save_backtest_run`
+    # later appends `; tf=...`. This keeps the save-side and lookup-side
+    # combined notes byte-identical:
+    #   save:    "p=...; sbps=...; cfix=...; eq=N" + "; tf=..."
+    #   lookup:  "p=...; sbps=...; cfix=...; eq=N; tf=..."
+    if initial_equity is not None:
+        cost_note = f"{cost_note}; eq={int(initial_equity)}"
     timeframe_str = f"{bar_agg}min{'|intraday' if intraday else ''}"
     _tf_notes = f"tf={timeframe_str}"
     combined_notes = "; ".join(filter(None, [cost_note, _tf_notes]))
@@ -675,13 +969,17 @@ def lookup_backtest_cache(
     strategy: str,
     strategy_params: dict[str, Any] | None = None,
     intraday: bool = False,
+    initial_equity: float | None = None,
 ) -> dict[str, Any] | None:
     """Return cached backtest result if available, else None.
 
     Runs the same cache key computation as run_backtest_realdata_for_mcp
     without loading bars or running simulation. Fast (~10ms).
+
+    ``initial_equity`` participates in the cache key so a result computed
+    at a different starting capital is not silently served back.
     """
-    ck = _build_cache_key(strategy, strategy_params, intraday, symbol)
+    ck = _build_cache_key(strategy, strategy_params, intraday, symbol, initial_equity)
     if not ck.strategy_hash:
         return None
 
@@ -708,6 +1006,8 @@ def run_backtest_realdata_for_mcp(
     strategy_params: dict[str, Any] | None = None,
     initial_equity: float = 2_000_000.0,
     intraday: bool = False,
+    force_current_file: bool = False,
+    spread_legs_override: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run a backtest on real historical data from the DB.
 
@@ -754,7 +1054,12 @@ def run_backtest_realdata_for_mcp(
     bar_agg = int((strategy_params or {}).get("bar_agg", meta_bar_agg))
 
     # -- Cache key + lookup (reuses _build_cache_key) --
-    _ck = _build_cache_key(strategy, strategy_params, intraday, symbol)
+    # initial_equity participates in the key now; previously the cache only
+    # checked when equity exactly equalled 2_000_000.0, AND the key omitted
+    # equity entirely, which let cached results from one capital level
+    # silently leak to callers asking for another (the bug that made the
+    # War Room playback diverge from MCP by ~70%).
+    _ck = _build_cache_key(strategy, strategy_params, intraday, symbol, initial_equity)
     strategy_hash = _ck.strategy_hash
     _cost_note = _ck.cost_note
     _timeframe_str = _ck.timeframe_str
@@ -763,18 +1068,52 @@ def run_backtest_realdata_for_mcp(
     if strategy_hash:
         _, strategy_code = _compute_code_hash(resolved_slug)
 
-    if initial_equity == 2_000_000.0:
-        cached = lookup_backtest_cache(symbol, start, end, strategy, strategy_params, intraday)
-        if cached is not None:
-            return cached
+    cached = lookup_backtest_cache(
+        symbol, start, end, strategy, strategy_params, intraday, initial_equity,
+    )
+    if cached is not None:
+        return cached
 
-    # Spread strategies: construct synthetic bars from two legs
-    spread_meta = _get_spread_meta(resolved_slug)
+    # Pin-aware META: when QUANT_PINNED_EXECUTION is on, consult the active
+    # candidate for the pinned source and reuse its META for spread-leg
+    # routing so both the bar construction and the engine run against the
+    # same source version. ``strategy_hash`` / ``strategy_code`` local vars
+    # above refer to the CURRENT file (for the save_run payload), not the
+    # pinned candidate, so we query the active pin explicitly here.
+    _pin_hash: str | None = None
+    _pin_code: str | None = None
+    _pinned_meta: dict | None = None
+    if _pin_enabled() and not force_current_file:
+        _active_hash, _active_code, _active_meta = _fetch_active_pin(resolved_slug)
+        if _active_hash and _active_code:
+            _maybe_warn_drift(resolved_slug, _active_hash)
+            _pin_hash = _active_hash
+            _pin_code = _active_code
+            try:
+                _, _pinned_meta = resolve_factory_by_hash(
+                    resolved_slug,
+                    strategy_hash=_pin_hash,
+                    strategy_code=_pin_code,
+                )
+            except (StrategyHashNotFound, PinnedExecutionError):
+                _pinned_meta = _active_meta
+
+    # Spread strategies: construct synthetic bars from two legs. The META's
+    # declared legs (e.g. ['TX','TX_R2']) are the default, but callers may
+    # override them for an account that deploys the same strategy on a
+    # different underlying (e.g. MTX/MTX_R2). When overridden, shallow-clone
+    # the meta so downstream components (cost model, leg serialization) see
+    # the substituted symbols.
+    spread_meta = _get_spread_meta(resolved_slug, pinned_meta=_pinned_meta)
+    if spread_meta and spread_legs_override and len(spread_legs_override) == 2:
+        spread_meta = {**spread_meta, "spread_legs": list(spread_legs_override)}
+    spread_result: SpreadBarsResult | None = None
     if spread_meta:
         legs = spread_meta["spread_legs"]
-        raw, err = _build_spread_bars(db, legs[0], legs[1], start_dt, end_dt, bar_agg)
-        if err:
-            return {"error": f"Spread bar construction failed: {err}"}
+        spread_result = _build_spread_bars(db, legs[0], legs[1], start_dt, end_dt, bar_agg)
+        if spread_result.error:
+            return {"error": f"Spread bar construction failed: {spread_result.error}"}
+        raw = spread_result.spread_bars
     else:
         raw = _load_bars_for_tf(db, symbol, start_dt, end_dt, bar_agg)
     if not raw:
@@ -802,6 +1141,9 @@ def run_backtest_realdata_for_mcp(
         initial_equity=initial_equity,
         instrument=symbol,
         spread_meta=spread_meta,
+        strategy_hash=_pin_hash,
+        strategy_code=_pin_code,
+        force_current_file=force_current_file,
     )
 
     bars = [
@@ -939,6 +1281,24 @@ def run_backtest_realdata_for_mcp(
     base["intraday"] = intraday
     if strategy_hash is not None:
         base["strategy_hash"] = strategy_hash
+
+    # Spread strategies: expose aligned R1/R2/spread bars + offset + legs so the
+    # backtest page can render the same 3-panel view the live War Room uses.
+    if spread_meta and spread_result is not None:
+        def _bar_to_dict(b) -> dict:
+            return {
+                "timestamp": str(b.timestamp),
+                "open": float(b.open),
+                "high": float(b.high),
+                "low": float(b.low),
+                "close": float(b.close),
+                "volume": float(b.volume),
+            }
+        base["spread_bars"] = [_bar_to_dict(b) for b in spread_result.spread_bars]
+        base["spread_r1_bars"] = [_bar_to_dict(b) for b in spread_result.r1_aligned]
+        base["spread_r2_bars"] = [_bar_to_dict(b) for b in spread_result.r2_aligned]
+        base["spread_offset"] = float(spread_result.offset)
+        base["spread_legs"] = list(spread_meta["spread_legs"])
     try:
         from src.strategies.param_registry import ParamRegistry
 
@@ -973,6 +1333,7 @@ def run_backtest_realdata_for_mcp(
             initial_capital=initial_equity,
             strategy_hash=strategy_hash,
             strategy_code=strategy_code,
+            strategy_meta_json=_snapshot_meta_json(resolved_slug),
             result_json=_result_json_str,
         )
         registry.close()
@@ -1072,8 +1433,18 @@ def _mc_single_path(args: tuple) -> tuple[float, float, float]:
     Accepts a seed index instead of a pre-generated path array so that each
     worker generates its own path — avoids serializing large numpy arrays
     through the multiprocessing boundary.
+
+    Supports three arg-tuple shapes for backward compatibility:
+    - 5-tuple: (name, params, seed_idx, path_config, timeframe)
+    - 6-tuple: + bar_agg
+    - 8-tuple: + strategy_hash, strategy_code (pin-aware)
     """
-    if len(args) == 6:
+    strategy_hash: str | None = None
+    strategy_code: str | None = None
+    if len(args) == 8:
+        (strategy_name, strategy_params, seed_idx, path_config, timeframe,
+         bar_agg, strategy_hash, strategy_code) = args
+    elif len(args) == 6:
         strategy_name, strategy_params, seed_idx, path_config, timeframe, bar_agg = args
     else:
         strategy_name, strategy_params, seed_idx, path_config, timeframe = args
@@ -1094,7 +1465,13 @@ def _mc_single_path(args: tuple) -> tuple[float, float, float]:
     )
     path_array = generate_path(per_path_config)
 
-    factory = resolve_factory(strategy_name)
+    # Pin-aware factory resolution. When strategy_hash/strategy_code come through
+    # from the parent process, the worker compiles the pinned source locally (or
+    # hits its per-process LRU cache on subsequent trials). Falls back to the
+    # current file when no pin is present or the flag is off.
+    factory, _ = resolve_factory_by_hash(
+        strategy_name, strategy_hash=strategy_hash, strategy_code=strategy_code,
+    )
     engine_factory = lambda: factory(**strategy_params)  # noqa: E731
     adapter = _get_adapter()
     runner = BacktestRunner(engine_factory, adapter)
@@ -1263,10 +1640,25 @@ def _run_mc_with_runner(
     # on tiny runs where each path takes < 1 ms.
     use_mp = n_paths >= 20 and _MAX_MC_WORKERS > 1
     workers_used = 1
+
+    # Pin-aware: resolve the active-candidate hash + code once in the parent so
+    # every worker gets the same source version. ``resolve_factory_by_hash``
+    # honours ``QUANT_PINNED_EXECUTION`` and falls through to the current file
+    # when no pin is available.
+    _mc_pin_hash: str | None = None
+    _mc_pin_code: str | None = None
+    if _pin_enabled():
+        _mc_active_hash, _mc_active_code, _ = _fetch_active_pin(strategy_name)
+        if _mc_active_hash and _mc_active_code:
+            _maybe_warn_drift(strategy_name, _mc_active_hash)
+            _mc_pin_hash = _mc_active_hash
+            _mc_pin_code = _mc_active_code
+
     if use_mp:
         workers_used = min(n_paths, _MAX_MC_WORKERS)
         work_items = [
-            (strategy_name, strategy_params, i, path_config, timeframe, bar_agg)
+            (strategy_name, strategy_params, i, path_config, timeframe, bar_agg,
+             _mc_pin_hash, _mc_pin_code)
             for i in range(n_paths)
         ]
         pool = _get_worker_pool()
@@ -1275,7 +1667,11 @@ def _run_mc_with_runner(
         from src.simulator.backtester import BacktestRunner
         from src.simulator.metrics import max_drawdown_pct, sharpe_ratio
 
-        factory = resolve_factory(strategy_name)
+        factory, _ = resolve_factory_by_hash(
+            strategy_name,
+            strategy_hash=_mc_pin_hash,
+            strategy_code=_mc_pin_code,
+        )
         engine_factory = lambda: factory(**strategy_params)  # noqa: E731
         adapter = _get_adapter()
         runner = BacktestRunner(engine_factory, adapter)
@@ -1423,9 +1819,10 @@ def run_sweep_for_mcp(
         sweep_spread_meta = _get_spread_meta(resolved_slug)
         if sweep_spread_meta:
             legs = sweep_spread_meta["spread_legs"]
-            raw, err = _build_spread_bars(db, legs[0], legs[1], start_dt, end_dt, sweep_bar_agg)
-            if err:
-                return {"error": f"Spread bar construction failed: {err}"}
+            _sweep_spread = _build_spread_bars(db, legs[0], legs[1], start_dt, end_dt, sweep_bar_agg)
+            if _sweep_spread.error:
+                return {"error": f"Spread bar construction failed: {_sweep_spread.error}"}
+            raw = _sweep_spread.spread_bars
         else:
             raw = _load_bars_for_tf(db, symbol, start_dt, end_dt, sweep_bar_agg)
         if not raw:
@@ -1470,7 +1867,14 @@ def run_sweep_for_mcp(
         sweep_force_flat = _compute_force_flat_indices(timestamps)
 
     adapter = _get_adapter()
-    factory = resolve_factory(resolved_slug)
+    # Sweep writes a NEW pin with hash == current file hash. If we pinned to an
+    # old candidate's code, the best params would be tuned against stale logic
+    # and then saved referencing the current file. force_current_file=True makes
+    # the optimizer execute the edited source while still producing a picklable
+    # factory for forkserver workers (compiled via the pinned loader).
+    factory, _sweep_pinned_meta = resolve_factory_by_hash(
+        resolved_slug, force_current_file=True,
+    )
     # Use spread-aware fill model when applicable
     sweep_fill_model = None
     if sweep_spread_meta:
@@ -1603,6 +2007,7 @@ def run_sweep_for_mcp(
             initial_capital=2_000_000.0,
             strategy_hash=strategy_hash,
             strategy_code=strategy_code,
+            strategy_meta_json=_snapshot_meta_json(resolved_slug),
             base_params=clamped_base,
         )
         pareto = registry.get_pareto_frontier(run_id)
@@ -1630,6 +2035,7 @@ def run_sweep_for_mcp(
                 periods_per_year=_fp_ppy,
                 instrument=symbol,
                 spread_meta=sweep_spread_meta,
+                force_current_file=True,
             )
             full_result = full_runner.run(
                 bars, timestamps=timestamps, force_flat_indices=sweep_force_flat,
@@ -1756,7 +2162,8 @@ def run_stress_for_mcp(
         scenario_obj = all_scenarios[name]()
         from src.simulator.backtester import BacktestRunner
 
-        factory = resolve_factory(resolved_slug)
+        # Stress test mirrors what is (or would be) live-trading, so auto-pin.
+        factory, _ = resolve_factory_by_hash(resolved_slug)
         merged = dict(clamped_params)
         if "max_loss" not in merged:
             merged["max_loss"] = 500_000
@@ -1964,13 +2371,36 @@ def run_walk_forward_for_mcp(
     meta_bar_agg = get_bar_agg(resolved_slug)
     bar_agg = int((strategy_params or {}).get("bar_agg", meta_bar_agg))
 
-    # Spread-aware bar loading
-    wf_spread_meta = _get_spread_meta(resolved_slug)
+    # Pin-aware resolution: resolve the active candidate's hash + code once
+    # so every fold's runner executes the same pinned source. Falls through
+    # to current-file behavior when QUANT_PINNED_EXECUTION is off or no pin
+    # exists.
+    _wf_pin_hash: str | None = None
+    _wf_pin_code: str | None = None
+    _wf_pinned_meta: dict | None = None
+    if _pin_enabled():
+        _wf_active_hash, _wf_active_code, _wf_active_meta = _fetch_active_pin(resolved_slug)
+        if _wf_active_hash and _wf_active_code:
+            _maybe_warn_drift(resolved_slug, _wf_active_hash)
+            _wf_pin_hash = _wf_active_hash
+            _wf_pin_code = _wf_active_code
+            try:
+                _, _wf_pinned_meta = resolve_factory_by_hash(
+                    resolved_slug,
+                    strategy_hash=_wf_pin_hash,
+                    strategy_code=_wf_pin_code,
+                )
+            except (StrategyHashNotFound, PinnedExecutionError):
+                _wf_pinned_meta = _wf_active_meta
+
+    # Spread-aware bar loading (prefer pinned META so legs stay consistent).
+    wf_spread_meta = _get_spread_meta(resolved_slug, pinned_meta=_wf_pinned_meta)
     if wf_spread_meta:
         legs = wf_spread_meta["spread_legs"]
-        raw, err = _build_spread_bars(db, legs[0], legs[1], start_dt, end_dt, bar_agg)
-        if err:
-            return {"error": f"Spread bar construction failed: {err}"}
+        _wf_spread = _build_spread_bars(db, legs[0], legs[1], start_dt, end_dt, bar_agg)
+        if _wf_spread.error:
+            return {"error": f"Spread bar construction failed: {_wf_spread.error}"}
+        raw = _wf_spread.spread_bars
     else:
         raw = _load_bars_for_tf(db, symbol, start_dt, end_dt, bar_agg)
     if not raw:
@@ -2031,6 +2461,8 @@ def run_walk_forward_for_mcp(
             resolved_slug, strategy_params, periods_per_year=ppy,
             initial_equity=initial_equity, instrument=symbol,
             spread_meta=wf_spread_meta,
+            strategy_hash=_wf_pin_hash,
+            strategy_code=_wf_pin_code,
         )
         is_force_flat: set[int] | None = None
         if is_intraday:
@@ -2043,6 +2475,8 @@ def run_walk_forward_for_mcp(
             resolved_slug, strategy_params, periods_per_year=ppy,
             initial_equity=initial_equity, instrument=symbol,
             spread_meta=wf_spread_meta,
+            strategy_hash=_wf_pin_hash,
+            strategy_code=_wf_pin_code,
         )
         oos_force_flat: set[int] | None = None
         if is_intraday:
@@ -2474,6 +2908,9 @@ def run_portfolio_optimization_for_mcp(
     end: str = "2026-03-14",
     initial_equity: float = 2_000_000.0,
     min_weight: float = 0.10,
+    slippage_bps: float = 0.0,
+    commission_bps: float = 0.0,
+    commission_fixed_per_contract: float = 0.0,
 ) -> dict[str, Any]:
     """Run portfolio weight optimization across multiple strategies.
 
@@ -2489,11 +2926,21 @@ def run_portfolio_optimization_for_mcp(
     if len(strategies) > 5:
         return {"error": "Maximum 5 strategies supported"}
 
+    cost_params: dict[str, Any] = {}
+    if slippage_bps:
+        cost_params["slippage_bps"] = slippage_bps
+    if commission_bps:
+        cost_params["commission_bps"] = commission_bps
+    if commission_fixed_per_contract:
+        cost_params["commission_fixed_per_contract"] = commission_fixed_per_contract
+
     daily_returns: dict[str, Any] = {}
     bt_errors: list[str] = []
     for entry in strategies:
         slug = entry["slug"]
         params = entry.get("params")
+        merged_params = dict(params or {})
+        merged_params.update(cost_params)
         resolved = resolve_strategy_slug(slug)
         try:
             bt = run_backtest_realdata_for_mcp(
@@ -2501,7 +2948,7 @@ def run_portfolio_optimization_for_mcp(
                 start=start,
                 end=end,
                 strategy=resolved,
-                strategy_params=params,
+                strategy_params=merged_params if merged_params else params,
                 initial_equity=initial_equity,
             )
         except Exception as exc:
@@ -2555,6 +3002,9 @@ def run_portfolio_optimization_for_mcp(
         run_id = store.save_optimization(
             result=output, symbol=symbol, start=start, end=end,
             initial_capital=initial_equity, min_weight=min_weight,
+            slippage_bps=slippage_bps,
+            commission_bps=commission_bps,
+            commission_fixed_per_contract=commission_fixed_per_contract,
         )
         store.close()
         output["run_id"] = run_id

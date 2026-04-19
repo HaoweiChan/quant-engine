@@ -1015,6 +1015,21 @@ TOOLS: list[Tool] = [
                     "description": "Minimum allocation per strategy (0.0-0.5). Default 0.10 = 10%",
                     "default": 0.10,
                 },
+                "slippage_bps": {
+                    "type": "number",
+                    "description": "Slippage in basis points applied to each trade. Default 0 = no slippage",
+                    "default": 0.0,
+                },
+                "commission_bps": {
+                    "type": "number",
+                    "description": "Commission in basis points per trade. Default 0 = no commission",
+                    "default": 0.0,
+                },
+                "commission_fixed_per_contract": {
+                    "type": "number",
+                    "description": "Fixed commission per contract in NTD. Default 0 = no fixed commission",
+                    "default": 0.0,
+                },
             },
             "required": ["strategies"],
         },
@@ -1534,6 +1549,9 @@ def register_tools(app: Server) -> None:
                     end=arguments.get("end", "2026-03-14"),
                     initial_equity=arguments.get("initial_equity", 2_000_000.0),
                     min_weight=arguments.get("min_weight", 0.10),
+                    slippage_bps=arguments.get("slippage_bps", 0.0),
+                    commission_bps=arguments.get("commission_bps", 0.0),
+                    commission_fixed_per_contract=arguments.get("commission_fixed_per_contract", 0.0),
                 )
                 return _json_response(result)
 
