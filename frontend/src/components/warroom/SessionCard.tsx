@@ -204,9 +204,11 @@ export function SessionCard({ session, allBindings, accountId, onAction }: Sessi
         <button
           onClick={handleToggle}
           disabled={loading}
-          className="flex-1 text-[11px] font-semibold py-1.5 rounded text-white cursor-pointer border-none"
+          className="flex-1 text-[11px] font-semibold py-1 rounded text-white cursor-pointer border-none"
           style={{
-            background: isRunning ? colors.red : isStuck ? colors.orange : colors.green,
+            // Muted action palette — deliberately darker than raw theme colors
+            // so the CTA reads as a control, not live data.
+            background: isRunning ? "#8c3333" : isStuck ? "#a8552e" : "#2a7a4a",
             letterSpacing: "0.5px",
             opacity: loading ? 0.6 : 1,
           }}
@@ -216,7 +218,7 @@ export function SessionCard({ session, allBindings, accountId, onAction }: Sessi
         </button>
         <button
           onClick={handleParams}
-          className="flex-1 text-[11px] font-semibold py-1.5 rounded cursor-pointer border-none"
+          className="flex-1 text-[11px] font-semibold py-1 rounded cursor-pointer border-none"
           style={{
             background: hasParams ? "rgba(90,138,242,0.25)" : "rgba(90,138,242,0.1)",
             color: hasParams ? "#fff" : colors.blue,

@@ -4,7 +4,7 @@ import { useTradingStore } from "@/stores/tradingStore";
 import { useWarRoomStore } from "@/stores/warRoomStore";
 import { createMarketDataStore, type MarketDataStore } from "@/stores/marketDataStore";
 import { useLiveFeed } from "@/hooks/useLiveFeed";
-import { fetchWarRoomTyped, fetchOHLCV, fetchDeployHistory, startCrawl, fetchCrawlStatus, fetchWarRoomMockRange } from "@/lib/api";
+import { fetchWarRoomTyped, fetchOHLCV, fetchDeployHistory, startCrawl, fetchCrawlStatus, fetchWarRoomMockRange, initPlaybackEngine, stopPlaybackEngine } from "@/lib/api";
 import type { WarRoomData, DeployLogEntry, TradeSignal } from "@/lib/api";
 import { colors } from "@/lib/theme";
 import { parseTimestampMs, parseTimestampSec } from "@/lib/time";
@@ -13,7 +13,7 @@ import { KillSwitchBar } from "@/components/KillSwitchBar";
 import { OrderBlotterPane } from "@/components/OrderBlotterPane";
 import { ChartStack } from "@/components/charts/ChartStack";
 import { SpreadView } from "./SpreadView";
-import { PanelHeader } from "./PanelHeader";
+import { PanelHeader } from "@/components/charts/PanelHeader";
 
 import { usePlaybackStore } from "@/stores/playbackStore";
 import { PlaybackBar } from "./PlaybackBar";
@@ -65,8 +65,10 @@ export function WarRoomLayout() {
   const virtualClockMs = usePlaybackStore((s) => s.virtualClockMs);
   const playbackRangeStartMs = usePlaybackStore((s) => s.rangeStartMs);
   const setPlaybackRange = usePlaybackStore((s) => s.setRange);
+  const setPlaybackDataBounds = usePlaybackStore((s) => s.setDataBounds);
   const playbackTick = usePlaybackStore((s) => s.tick);
   const playbackReset = usePlaybackStore((s) => s.reset);
+  const [playbackInitializing, setPlaybackInitializing] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef<string | null>(null);
@@ -83,7 +85,6 @@ export function WarRoomLayout() {
   const [tfMinutes, setTf] = useState(60);
   const [chartSymbolOverride, setChartSymbolOverride] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"single" | "spread">("single");
-  const prevSplitRef = useRef<number | null>(null);
   const [crawling, setCrawling] = useState(false);
   const [barError, setBarError] = useState<string | null>(null);
   const [fallbackSymbol, setFallbackSymbol] = useState<string | null>(null);
@@ -255,18 +256,14 @@ export function WarRoomLayout() {
 
   useEffect(() => { return () => { if (crawlPollRef.current) clearInterval(crawlPollRef.current); }; }, []);
 
-  // Auto-expand chart pane in spread mode so all 3 panels fit without overlapping equity.
-  // Restores user's previous split when returning to single mode.
-  useEffect(() => {
-    if (viewMode === "spread") {
-      if (prevSplitRef.current === null) prevSplitRef.current = chartSplitPercent;
-      setChartSplitPercent(92);
-    } else if (prevSplitRef.current !== null) {
-      setChartSplitPercent(prevSplitRef.current);
-      prevSplitRef.current = null;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewMode]);
+  // Spread view extends the page vertically (three-panel stack needs ~720px)
+  // instead of squeezing the equity / positions panes. The outer container
+  // switches from viewport-height to min-height + auto-scroll, and the chart
+  // area uses a pixel min-height rather than a percentage split.
+  const isSpreadView = viewMode === "spread";
+  const SPREAD_CHART_MIN_PX = 1080;
+  const SPREAD_EQUITY_MIN_PX = 480;
+  const SPREAD_BOTTOM_MIN_PX = 390;
 
   const handleTfChange = (tf: number) => {
     setTf(tf);
@@ -274,8 +271,10 @@ export function WarRoomLayout() {
     loadBars(tf, chartSymbol);
   };
 
-  // Full load on symbol or timeframe change; incremental refresh every 15s
-  useEffect(() => { loadBars(tfMinutes, chartSymbol, false); }, [chartSymbol, tfMinutes, loadBars]);
+  // Full load on symbol, timeframe, playback, or loadBars identity change.
+  // loadBars identity changes when playbackRangeStartMs changes, ensuring
+  // bars are re-fetched from the correct start date for playback.
+  useEffect(() => { loadBars(tfMinutes, chartSymbol, false); }, [chartSymbol, tfMinutes, loadBars, playbackEnabled]);
   useEffect(() => {
     if (playbackEnabled) return;
     const timer = setInterval(() => {
@@ -297,20 +296,65 @@ export function WarRoomLayout() {
   const activeAccountData = activeAccountId ? accounts[activeAccountId] : null;
   const isMockAccount = activeAccountId === "mock-dev";
 
-  // Fetch mock-range when mock account selected
+  // Fetch mock-range when mock account selected (fallback for data bounds)
   useEffect(() => {
     if (isMockAccount) {
       fetchWarRoomMockRange().then((range) => {
         if (range.min_ts && range.max_ts) {
           const startMs = new Date(range.min_ts).getTime();
           const endMs = new Date(range.max_ts).getTime();
+          setPlaybackDataBounds(startMs, endMs);
           setPlaybackRange(startMs, endMs);
         }
       }).catch(() => {});
     } else {
       playbackReset();
     }
-  }, [isMockAccount, setPlaybackRange, playbackReset]);
+  }, [isMockAccount, setPlaybackRange, setPlaybackDataBounds, playbackReset]);
+
+  // Initialize / tear down the direct-backtest PlaybackEngine.
+  // Runs backtests via the same MCP facade so results are bit-exact.
+  useEffect(() => {
+    if (!playbackEnabled || !isMockAccount) {
+      if (!playbackEnabled) {
+        stopPlaybackEngine().catch(() => {});
+      }
+      return;
+    }
+    const mockSessions = (data?.all_sessions ?? []).filter(
+      (s) => s.account_id === "mock-dev" && s.strategy_slug,
+    );
+    if (mockSessions.length === 0) return;
+
+    const strategies = mockSessions.map((s) => ({
+      slug: s.strategy_slug,
+      symbol: s.symbol || "MTX",
+      weight: s.equity_share ?? 1.0,
+      intraday: false,
+    }));
+    const now = new Date();
+    const oneYearAgo = new Date(now);
+    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+    const start = oneYearAgo.toISOString().slice(0, 10);
+    const end = now.toISOString().slice(0, 10);
+
+    setPlaybackInitializing(true);
+    initPlaybackEngine({ strategies, start, end })
+      .then((res) => {
+        if (res.time_range.min_ts && res.time_range.max_ts) {
+          const minMs = new Date(res.time_range.min_ts).getTime();
+          const maxMs = new Date(res.time_range.max_ts).getTime();
+          setPlaybackDataBounds(minMs, maxMs);
+          setPlaybackRange(minMs, maxMs);
+        }
+      })
+      .catch((err) => console.error("Playback engine init failed:", err))
+      .finally(() => setPlaybackInitializing(false));
+
+    return () => {
+      stopPlaybackEngine().catch(() => {});
+    };
+  }, [playbackEnabled, isMockAccount]);
 
   // Playback ticker
   const lastTickRef = useRef(performance.now());
@@ -422,31 +466,74 @@ export function WarRoomLayout() {
 
   // Progressive bar reveal during playback: show warmup bars (before range start)
   // plus bars up to the virtual clock. This mimics a live market feed.
+  // Uses a count-based approach so the array reference only changes when new
+  // bars enter the visible window, not on every playback tick.
   const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
-  const visibleBars = useMemo(() => {
-    if (!playbackEnabled || virtualClockMs === null) return marketBars;
-    return marketBars.filter((bar) => {
+  const visibleBarCount = useMemo(() => {
+    if (!playbackEnabled || virtualClockMs === null) return marketBars.length;
+    let count = 0;
+    for (const bar of marketBars) {
       const barMs = parseTimestampMs(bar.timestamp) - TAIPEI_OFFSET_MS;
-      return barMs <= virtualClockMs;
-    });
+      if (barMs > virtualClockMs) break;
+      count++;
+    }
+    // If count is 0 but bars exist, the loaded bars don't overlap the
+    // playback clock yet (e.g. recent bars while clock is in the past,
+    // pending a full-range reload). Show all bars rather than "Loading...".
+    return count > 0 ? count : marketBars.length;
   }, [marketBars, playbackEnabled, virtualClockMs]);
+  const visibleBars = useMemo(
+    () => visibleBarCount === marketBars.length ? marketBars : marketBars.slice(0, visibleBarCount),
+    [marketBars, visibleBarCount],
+  );
 
   const positions = activeAccountData?.positions ?? [];
   const fills = activeAccountData?.recent_fills ?? [];
 
+  const boundSlugs = useMemo(
+    () => new Set(accountBindings.map((b) => b.slug)),
+    [accountBindings],
+  );
+
   const chartSignals: TradeSignal[] = useMemo(() => {
     if (!fills || fills.length === 0) return [];
-    return fills.map((f) => ({
-      timestamp: f.timestamp,
-      side: f.side === "Buy" || f.side === "buy" ? "buy" as const : "sell" as const,
-      price: f.price,
-      lots: f.quantity,
-      reason: f.strategy_slug ?? "",
-    }));
-  }, [fills]);
+    return fills
+      .filter((f) => f.strategy_slug && boundSlugs.has(f.strategy_slug))
+      .map((f) => ({
+        timestamp: f.timestamp,
+        side: f.side === "Buy" || f.side === "buy" ? "buy" as const : "sell" as const,
+        price: f.price,
+        lots: f.quantity,
+        reason: f.signal_reason ?? f.strategy_slug ?? "",
+        strategy_slug: f.strategy_slug,
+        symbol: f.symbol,
+        spread_role: f.spread_role,
+      }));
+  }, [fills, boundSlugs]);
+
+  // Single view: only single-contract strategy signals (exclude spread legs)
+  const singleViewSignals: TradeSignal[] = useMemo(
+    () => chartSignals.filter((s) => s.spread_role !== "r1" && s.spread_role !== "r2"),
+    [chartSignals],
+  );
+
+  // SpreadView receives the FULL fill payload for currently-bound strategies;
+  // per-panel routing is handled inside SpreadPanels using the `spread_role`
+  // tag emitted by /api/war-room. We no longer hardcode the spread strategy
+  // slug or symbol here so adding a second spread strategy to a portfolio
+  // works without frontend changes.
+  const spreadSignals: TradeSignal[] = chartSignals;
 
   return (
-    <div ref={containerRef} className="flex flex-col" style={{ height: "calc(100vh - 36px)", background: colors.bg }}>
+    <div
+      ref={containerRef}
+      className="flex flex-col overflow-y-auto"
+      style={{
+        height: isSpreadView ? undefined : "150vh",
+        minHeight: "calc(100vh - 36px)",
+        background: colors.bg,
+      }}
+    >
       {/* Row 1: Account selection with equity + latency */}
       <AccountStrip accounts={accounts} />
 
@@ -502,10 +589,13 @@ export function WarRoomLayout() {
       </div>
 
       {/* Playback controls - only for mock accounts */}
-      <PlaybackBar isMockAccount={isMockAccount} />
+      <PlaybackBar isMockAccount={isMockAccount} initializing={playbackInitializing} />
 
       {/* Main content: resizable layout */}
-      <div className="flex flex-1 min-h-0">
+      <div
+        className={`flex flex-1 ${isSpreadView ? "" : "min-h-0"}`}
+        style={isSpreadView ? { flex: "1 0 auto" } : undefined}
+      >
         {/* LEFT SIDEBAR - fixed pixel width, resizable */}
         <div
           className="flex flex-col shrink-0"
@@ -550,9 +640,23 @@ export function WarRoomLayout() {
           {activeAccountId && activeAccountData ? (
             <>
               {/* Upper section: Chart + Equity/Positions */}
-              <div className="flex flex-col min-h-0" style={{ height: `${mainSplitPercent}%` }}>
+              <div
+                className={`flex flex-col ${isSpreadView ? "" : "min-h-0"}`}
+                style={
+                  isSpreadView
+                    ? { flex: "0 0 auto" }
+                    : { height: `${mainSplitPercent}%` }
+                }
+              >
                 {/* Chart area */}
-                <div className="overflow-hidden flex flex-col" style={{ height: `${chartSplitPercent}%` }}>
+                <div
+                  className={`${isSpreadView ? "" : "overflow-hidden"} flex flex-col`}
+                  style={
+                    isSpreadView
+                      ? { minHeight: SPREAD_CHART_MIN_PX, flex: "0 0 auto" }
+                      : { height: `${chartSplitPercent}%` }
+                  }
+                >
                   {/* Symbol selector bar */}
                   <div className="flex items-center gap-1.5 px-2 py-1 shrink-0" style={{ borderBottom: `1px solid ${colors.cardBorder}`, background: colors.card }}>
                     <span className="text-[11px] font-semibold tracking-wider" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
@@ -586,6 +690,7 @@ export function WarRoomLayout() {
                         onTimeframeChange={handleTfChange}
                         timeframeOptions={TF_OPTIONS}
                         onSwitchToSingle={() => setViewMode("single")}
+                        signals={spreadSignals.length > 0 ? spreadSignals : undefined}
                       />
                     ) : (
                       <>
@@ -604,13 +709,14 @@ export function WarRoomLayout() {
                             timeframeMinutes={tfMinutes}
                             showVolume={true}
                             liveTick={lastLiveTick}
-                            signals={chartSignals.length > 0 ? chartSignals : undefined}
+                            signals={singleViewSignals.length > 0 ? singleViewSignals : undefined}
                             onTimeframeChange={handleTfChange}
                             timeframeOptions={TF_OPTIONS}
                             showOverlayControls={true}
                             onVisibleRangeChange={handleVisibleRangeChange}
                             viewModeLabel="single"
                             onViewModeToggle={() => setViewMode("spread")}
+                            followLatest={playbackEnabled}
                           />
                         </div>
                       </>
@@ -626,7 +732,14 @@ export function WarRoomLayout() {
                 />
 
                 {/* Equity + Positions area */}
-                <div className="flex flex-col min-h-0" style={{ height: `${100 - chartSplitPercent}%` }}>
+                <div
+                  className={`flex flex-col ${isSpreadView ? "" : "min-h-0"}`}
+                  style={
+                    isSpreadView
+                      ? { minHeight: SPREAD_EQUITY_MIN_PX, flex: "0 0 auto" }
+                      : { height: `${100 - chartSplitPercent}%` }
+                  }
+                >
                   {/* Equity panel */}
                   <div className="overflow-auto" style={{ height: `${equitySplitPercent}%` }}>
                     <EquityPanel
@@ -661,7 +774,14 @@ export function WarRoomLayout() {
               />
 
               {/* BOTTOM BAR */}
-              <div className="flex flex-col min-h-0" style={{ height: `${100 - mainSplitPercent}%`, background: colors.sidebar }}>
+              <div
+                className={`flex flex-col ${isSpreadView ? "" : "min-h-0"}`}
+                style={
+                  isSpreadView
+                    ? { minHeight: SPREAD_BOTTOM_MIN_PX, flex: "0 0 auto", background: colors.sidebar }
+                    : { height: `${100 - mainSplitPercent}%`, background: colors.sidebar }
+                }
+              >
                 {/* Tab headers */}
                 <div className="flex items-center gap-0 border-b shrink-0" style={{ borderColor: colors.cardBorder }}>
                   {(["blotter", "trades", "activity"] as BottomTab[]).map((tab) => (
@@ -683,7 +803,7 @@ export function WarRoomLayout() {
                 </div>
                 {/* Tab content */}
                 <div className="overflow-y-auto flex-1 min-h-0">
-                  {bottomTab === "blotter" && <OrderBlotterPane playbackFills={playbackEnabled ? fills : undefined} />}
+                  {bottomTab === "blotter" && <OrderBlotterPane playbackFills={isMockAccount ? fills : playbackEnabled ? fills : undefined} />}
                   {bottomTab === "trades" && (
                     <TradesTable fills={fills} />
                   )}
