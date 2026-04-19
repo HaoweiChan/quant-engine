@@ -1,19 +1,16 @@
 /**
- * SpreadView - 3-panel spread visualization for R1/R2 calendar spread strategies.
+ * SpreadView - live War Room wrapper around the shared <SpreadPanels>.
  *
- * Layout:
- * - Shared top toolbar: TF + Fit + Sub Chart + view-mode toggle
- * - R1 panel: near-month candlesticks with collapsible PanelHeader
- * - R2 panel: next-month candlesticks with collapsible PanelHeader
- * - Spread panel: spread (R1-R2) chart with prominent value + z-score badge
- *
- * X-axis is bidirectionally synced across all 3 charts via syncRange.
+ * Owns the live concerns (historical fetch, WebSocket feed, liveSnap tick merge,
+ * stale-indicator detection, toolbar) and delegates the 3-panel rendering to
+ * <SpreadPanels>, which is also used by the backtest TearSheet.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChartStack, type ChartStackHandle } from "@/components/charts/ChartStack";
-import { PanelHeader } from "@/components/warroom/PanelHeader";
+import { SpreadPanels, type SpreadPanelsHandle } from "@/components/charts/SpreadPanels";
+import { usePlaybackStore } from "@/stores/playbackStore";
+import { parseTimestampMs } from "@/lib/time";
 import { colors } from "@/lib/theme";
-import type { OHLCVBar } from "@/lib/api";
+import type { OHLCVBar, TradeSignal } from "@/lib/api";
 
 interface TimeframeOption {
   label: string;
@@ -26,6 +23,9 @@ interface SpreadViewProps {
   onTimeframeChange?: (tf: number) => void;
   timeframeOptions?: TimeframeOption[];
   onSwitchToSingle?: () => void;
+  /** Trade entry/exit markers for the spread panel — already filtered to the
+   * spread strategy's leg-1 fills so we don't double-render on both legs. */
+  signals?: TradeSignal[];
 }
 
 interface SpreadFeedMessage {
@@ -46,42 +46,13 @@ interface LiveSnapshot {
   ts: string;
 }
 
-const ENTRY_Z = 2.0;
-const EXIT_Z = 0.3;
-const Z_LOOKBACK = 60;
-
-function computeZScore(bars: OHLCVBar[], offset: number): number | null {
-  if (bars.length < Z_LOOKBACK) return null;
-  const spreads = bars.slice(-Z_LOOKBACK).map((b) => b.close - offset);
-  const mean = spreads.reduce((a, b) => a + b, 0) / spreads.length;
-  const variance = spreads.reduce((a, b) => a + (b - mean) ** 2, 0) / spreads.length;
-  const std = Math.sqrt(variance);
-  if (std < 0.1) return null;
-  return (spreads[spreads.length - 1] - mean) / std;
-}
-
-function zoneColor(z: number | null): string {
-  if (z === null) return colors.muted;
-  const a = Math.abs(z);
-  if (a >= ENTRY_Z) return colors.red;
-  if (a >= EXIT_Z) return colors.gold;
-  return colors.green;
-}
-
-function zoneLabel(z: number | null): string {
-  if (z === null) return "WARMING UP";
-  const a = Math.abs(z);
-  if (a >= ENTRY_Z) return "ENTRY ZONE";
-  if (a >= EXIT_Z) return "NEUTRAL";
-  return "EXIT ZONE";
-}
-
 export function SpreadView({
   symbol,
   tfMinutes,
   onTimeframeChange,
   timeframeOptions,
   onSwitchToSingle,
+  signals,
 }: SpreadViewProps) {
   const [r1Bars, setR1Bars] = useState<OHLCVBar[]>([]);
   const [r2Bars, setR2Bars] = useState<OHLCVBar[]>([]);
@@ -91,16 +62,22 @@ export function SpreadView({
   const [error, setError] = useState<string | null>(null);
   const [staleStatus, setStaleStatus] = useState<string | null>(null);
   const [liveSnap, setLiveSnap] = useState<LiveSnapshot | null>(null);
-  const [visibleRange, setVisibleRange] = useState<{ fromTs: string; toTs: string } | null>(null);
-  const [collapsed, setCollapsed] = useState({ r1: false, r2: false, spread: false });
   const [subVisible, setSubVisible] = useState(false);
-  const r1Ref = useRef<ChartStackHandle>(null);
-  const r2Ref = useRef<ChartStackHandle>(null);
-  const spreadRef = useRef<ChartStackHandle>(null);
+  const panelsRef = useRef<SpreadPanelsHandle>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Fetch historical bars
+  // Playback state — match the single-view semantics in WarRoomLayout so the
+  // spread panels progressively reveal bars up to the virtual clock.
+  const playbackEnabled = usePlaybackStore((s) => s.enabled);
+  const virtualClockMs = usePlaybackStore((s) => s.virtualClockMs);
+  const playbackRangeStartMs = usePlaybackStore((s) => s.rangeStartMs);
+  const playbackRangeEndMs = usePlaybackStore((s) => s.rangeEndMs);
+
+  // Fetch historical bars. During playback, widen the window so the range
+  // covers the full playback period plus a small warmup lookback, matching
+  // the single-view behaviour in WarRoomLayout (otherwise a 7-day default
+  // window would hide bars older than today).
   useEffect(() => {
     const fetchBars = async () => {
       setLoading(true);
@@ -111,6 +88,16 @@ export function SpreadView({
         const end = new Date();
         const start = new Date();
         start.setDate(start.getDate() - 7);
+
+        if (playbackEnabled && playbackRangeStartMs !== null) {
+          const WARMUP_MS = 2 * 86_400_000; // 2 days of warmup context
+          const pbStart = new Date(playbackRangeStartMs - WARMUP_MS);
+          if (pbStart < start) start.setTime(pbStart.getTime());
+          if (playbackRangeEndMs !== null) {
+            const pbEnd = new Date(playbackRangeEndMs);
+            if (pbEnd > end) end.setTime(pbEnd.getTime());
+          }
+        }
 
         const startStr = start.toISOString().split("T")[0];
         const endStr = end.toISOString().split("T")[0];
@@ -143,7 +130,34 @@ export function SpreadView({
     };
 
     fetchBars();
-  }, [symbol, tfMinutes]);
+  }, [symbol, tfMinutes, playbackEnabled, playbackRangeStartMs, playbackRangeEndMs]);
+
+  // During playback, reveal only bars up to the virtual clock — mirrors
+  // WarRoomLayout.visibleBars so both panes stay in sync. DB timestamps are
+  // naive Taipei local; convert to UTC ms by subtracting the +08:00 offset.
+  const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
+  const filterByClock = useCallback(
+    (bars: OHLCVBar[]): OHLCVBar[] => {
+      if (!playbackEnabled || virtualClockMs === null) return bars;
+      return bars.filter(
+        (bar) => parseTimestampMs(bar.timestamp) - TAIPEI_OFFSET_MS <= virtualClockMs,
+      );
+    },
+    [TAIPEI_OFFSET_MS, playbackEnabled, virtualClockMs],
+  );
+  const visibleR1 = useMemo(() => filterByClock(r1Bars), [r1Bars, filterByClock]);
+  const visibleR2 = useMemo(() => filterByClock(r2Bars), [r2Bars, filterByClock]);
+  const visibleSpread = useMemo(
+    () => filterByClock(spreadBars),
+    [spreadBars, filterByClock],
+  );
+  const visibleSignals = useMemo(() => {
+    if (!signals || signals.length === 0) return undefined;
+    if (!playbackEnabled || virtualClockMs === null) return signals;
+    return signals.filter(
+      (s) => parseTimestampMs(s.timestamp) - TAIPEI_OFFSET_MS <= virtualClockMs,
+    );
+  }, [signals, playbackEnabled, virtualClockMs, TAIPEI_OFFSET_MS]);
 
   // WebSocket connection for live spread feed
   useEffect(() => {
@@ -204,46 +218,12 @@ export function SpreadView({
     };
   }, [symbol]);
 
-  const handleVisibleRangeChange = useCallback(
-    (range: { fromTs: string; toTs: string } | null) => setVisibleRange(range),
-    []
-  );
-
-  // Align all 3 charts to a shared timestamp set so logical-range sync = real-time sync.
-  const { alignedR1, alignedR2, alignedSpread } = useMemo(() => {
-    const r2Map = new Map(r2Bars.map((b) => [b.timestamp, b]));
-    const spreadMap = new Map(spreadBars.map((b) => [b.timestamp, b]));
-    const alignedR1: OHLCVBar[] = [];
-    const alignedR2: OHLCVBar[] = [];
-    const alignedSpread: OHLCVBar[] = [];
-    for (const r1 of r1Bars) {
-      const r2 = r2Map.get(r1.timestamp);
-      const sp = spreadMap.get(r1.timestamp);
-      if (r2 && sp) {
-        alignedR1.push(r1);
-        alignedR2.push(r2);
-        alignedSpread.push(sp);
-      }
-    }
-    return { alignedR1, alignedR2, alignedSpread };
-  }, [r1Bars, r2Bars, spreadBars]);
-
-  const lastSpreadBar = alignedSpread[alignedSpread.length - 1];
-  const currentSpread = liveSnap?.spread ?? (lastSpreadBar ? lastSpreadBar.close - spreadOffset : null);
-  const currentZ = useMemo(() => computeZScore(alignedSpread, spreadOffset), [alignedSpread, spreadOffset]);
-  const zColor = zoneColor(currentZ);
-  const zLabel = zoneLabel(currentZ);
-
   const fitAll = useCallback(() => {
-    r1Ref.current?.fit();
-    r2Ref.current?.fit();
-    spreadRef.current?.fit();
+    panelsRef.current?.fit();
   }, []);
 
   const toggleSubAll = useCallback(() => {
-    r1Ref.current?.toggleSecondary();
-    r2Ref.current?.toggleSecondary();
-    spreadRef.current?.toggleSecondary();
+    panelsRef.current?.toggleSecondary();
     setSubVisible((v) => !v);
   }, []);
 
@@ -267,29 +247,6 @@ export function SpreadView({
       </div>
     );
   }
-
-  const spreadRightBadge = (
-    <div className="flex items-center gap-2">
-      {staleStatus && (
-        <span
-          className="px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wider"
-          style={{ background: "rgba(255,82,82,0.2)", color: colors.red }}
-        >
-          {staleStatus} STALE
-        </span>
-      )}
-      <span className="text-[10px]" style={{ color: colors.muted }}>OFFSET</span>
-      <span className="text-[11px]" style={{ color: colors.text }}>{spreadOffset.toFixed(0)}</span>
-      <span className="text-[10px]" style={{ color: colors.muted, marginLeft: 8 }}>Z</span>
-      <span
-        className="px-1.5 py-0.5 rounded text-[11px] font-bold"
-        style={{ background: `${zColor}22`, color: zColor }}
-      >
-        {currentZ === null ? "—" : currentZ.toFixed(2)}
-      </span>
-      <span className="text-[10px] font-semibold tracking-wider" style={{ color: zColor }}>{zLabel}</span>
-    </div>
-  );
 
   // Shared top toolbar
   const topToolbar = (
@@ -345,125 +302,28 @@ export function SpreadView({
     </div>
   );
 
-  // Header ~32px, chart needs at least ~140px for time axis + minimal candles.
-  const PANEL_HEADER_PX = 32;
-  const CHART_MIN_PX = 130;
-
-  const expandedPanelStyle = (extra = false) => ({
-    minHeight: PANEL_HEADER_PX + CHART_MIN_PX,
-    flex: extra ? "1.3 1 0" : "1 1 0",
-  });
-
-  const collapsedPanelStyle = {
-    minHeight: PANEL_HEADER_PX,
-    flex: "0 0 auto",
-  };
-
   return (
     <div className="h-full flex flex-col">
       {topToolbar}
-
-      {/* R1 panel */}
-      <div
-        className="flex flex-col overflow-hidden"
-        style={collapsed.r1 ? collapsedPanelStyle : expandedPanelStyle()}
-      >
-        <PanelHeader
-          chip="R1"
-          chipColor={colors.cyan}
-          symbol={`${symbol} Near Month`}
-          bars={alignedR1}
-          liveValue={liveSnap?.r1}
-          collapsed={collapsed.r1}
-          onToggleCollapse={() => setCollapsed((s) => ({ ...s, r1: !s.r1 }))}
+      <div className="flex-1 min-h-0">
+        <SpreadPanels
+          ref={panelsRef}
+          r1Bars={visibleR1}
+          r2Bars={visibleR2}
+          spreadBars={visibleSpread}
+          spreadOffset={spreadOffset}
+          legs={[symbol, `${symbol}_R2`]}
+          symbol={symbol}
+          timeframeMinutes={tfMinutes}
+          signals={visibleSignals}
+          liveValue={
+            playbackEnabled || !liveSnap
+              ? undefined
+              : { r1: liveSnap.r1, r2: liveSnap.r2, spread: liveSnap.spread }
+          }
+          staleStatus={playbackEnabled ? null : staleStatus}
+          followLatest={playbackEnabled}
         />
-        {!collapsed.r1 && (
-          <div className="flex-1 min-h-0">
-            <ChartStack
-              ref={r1Ref}
-              key={`r1-${symbol}-${tfMinutes}`}
-              bars={alignedR1}
-              activeIndicators={[]}
-              timeframeMinutes={tfMinutes}
-              showVolume={false}
-              onVisibleRangeChange={handleVisibleRangeChange}
-              syncRange={visibleRange}
-              expandable={false}
-              showOverlayControls={false}
-            />
-          </div>
-        )}
-      </div>
-
-      {/* R2 panel */}
-      <div
-        className="flex flex-col overflow-hidden"
-        style={{
-          ...(collapsed.r2 ? collapsedPanelStyle : expandedPanelStyle()),
-          borderTop: `1px solid ${colors.cardBorder}`,
-        }}
-      >
-        <PanelHeader
-          chip="R2"
-          chipColor={colors.purple}
-          symbol={`${symbol} Next Month`}
-          bars={alignedR2}
-          liveValue={liveSnap?.r2}
-          collapsed={collapsed.r2}
-          onToggleCollapse={() => setCollapsed((s) => ({ ...s, r2: !s.r2 }))}
-        />
-        {!collapsed.r2 && (
-          <div className="flex-1 min-h-0">
-            <ChartStack
-              ref={r2Ref}
-              key={`r2-${symbol}-${tfMinutes}`}
-              bars={alignedR2}
-              activeIndicators={[]}
-              timeframeMinutes={tfMinutes}
-              showVolume={false}
-              onVisibleRangeChange={handleVisibleRangeChange}
-              syncRange={visibleRange}
-              expandable={false}
-              showOverlayControls={false}
-            />
-          </div>
-        )}
-      </div>
-
-      {/* Spread panel */}
-      <div
-        className="flex flex-col overflow-hidden"
-        style={{
-          ...(collapsed.spread ? collapsedPanelStyle : expandedPanelStyle(true)),
-          borderTop: `1px solid ${colors.cardBorder}`,
-        }}
-      >
-        <PanelHeader
-          chip="SPREAD"
-          chipColor={colors.gold}
-          symbol={`${symbol} R1−R2`}
-          bars={alignedSpread.map((b) => ({ ...b, close: b.close - spreadOffset, open: b.open - spreadOffset, high: b.high - spreadOffset, low: b.low - spreadOffset }))}
-          liveValue={currentSpread ?? undefined}
-          rightBadge={spreadRightBadge}
-          collapsed={collapsed.spread}
-          onToggleCollapse={() => setCollapsed((s) => ({ ...s, spread: !s.spread }))}
-        />
-        {!collapsed.spread && (
-          <div className="flex-1 min-h-0">
-            <ChartStack
-              ref={spreadRef}
-              key={`spread-${symbol}-${tfMinutes}`}
-              bars={alignedSpread}
-              activeIndicators={[]}
-              timeframeMinutes={tfMinutes}
-              showVolume={false}
-              onVisibleRangeChange={handleVisibleRangeChange}
-              syncRange={visibleRange}
-              expandable={false}
-              showOverlayControls={false}
-            />
-          </div>
-        )}
       </div>
     </div>
   );
