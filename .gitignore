@@ -104,3 +104,6 @@ worktrees/
 
 # Claude Code ephemeral state
 .claude/scheduled_tasks.lock
+
+# Experiments (charts, research scripts, scratch docs)
+experiment/
