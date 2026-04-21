@@ -139,6 +139,16 @@ class PositionEngine:
 
         return orders
 
+    def check_stops(self, snapshot: MarketSnapshot) -> list[Order]:
+        """Check stop-loss exits without updating indicator state.
+
+        Called on every 1m bar for timely stop execution, even when the
+        strategy evaluates on a coarser timeframe.
+        """
+        orders = self._check_stops(snapshot)
+        self._update_trailing_stops(snapshot)
+        return orders
+
     def set_mode(self, mode: str) -> None:
         if mode not in ("model_assisted", "rule_only", "halted"):
             raise ValueError(f"Invalid mode: {mode}")

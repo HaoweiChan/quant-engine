@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+from datetime import time as dt_time
 from typing import Any
 
 import structlog
@@ -18,7 +19,8 @@ from src.broker_gateway.live_spread_buffer import LiveSpreadBarBuilder
 from src.core.sizing import PortfolioSizer, SizingConfig
 from src.execution.live_strategy_runner import LiveStrategyRunner
 from src.trading_session.manager import SessionManager
-from src.trading_session.store import AccountEquityStore, FillStore
+from src.trading_session.portfolio_db import LivePortfolioStore
+from src.trading_session.store import AccountEquityStore, FillStore, PortfolioEquityStore
 
 logger = structlog.get_logger(__name__)
 
@@ -56,6 +58,8 @@ class LivePipelineManager:
         notifier: Any = None,
         sizing_config: SizingConfig | None = None,
         portfolio_sizer: PortfolioSizer | None = None,
+        portfolio_equity_store: PortfolioEquityStore | None = None,
+        portfolio_store: LivePortfolioStore | None = None,
     ) -> None:
         self._sm = session_manager
         self._bar_store = bar_store
@@ -63,6 +67,8 @@ class LivePipelineManager:
         self._notifier = notifier
         self._sizing_config = sizing_config or self.DEFAULT_SIZING
         self._portfolio_sizer = portfolio_sizer
+        self._portfolio_equity_store = portfolio_equity_store
+        self._portfolio_store = portfolio_store
         self._runners: dict[str, LiveStrategyRunner] = {}
         # Per-spread-runner synthetic bar builders. When a runner's
         # strategy declares ``spread_legs`` in STRATEGY_META, the
@@ -121,6 +127,54 @@ class LivePipelineManager:
             self._portfolio_sizer.set_open_exposure(self.aggregate_open_exposure())
         except Exception:
             logger.exception("portfolio_exposure_refresh_failed")
+
+    def get_runner_snapshots(self) -> dict[str, dict[str, Any]]:
+        """Return a session_id→snapshot dict with each runner's live state.
+
+        Used by the war-room API to show paper-mode positions, PnL, and equity
+        that the broker gateway cannot see.
+        """
+        snapshots: dict[str, dict[str, Any]] = {}
+        for sid, runner in self.iter_runners():
+            positions = runner.positions
+            current_price = (
+                getattr(runner._executor, "_current_price", None)
+                or runner._last_bar_close
+                or 0.0
+            )
+            try:
+                specs = runner._adapter.get_contract_specs(runner.symbol)
+                point_value = specs.point_value
+            except Exception:
+                point_value = 1.0
+            pos_dicts = []
+            for pos in positions:
+                if pos.direction == "long":
+                    upnl = (current_price - pos.entry_price) * pos.lots * point_value
+                else:
+                    upnl = (pos.entry_price - current_price) * pos.lots * point_value
+                pos_dicts.append({
+                    "symbol": runner.symbol,
+                    "side": pos.direction,
+                    "quantity": int(pos.lots),
+                    "avg_entry_price": pos.entry_price,
+                    "current_price": current_price,
+                    "unrealized_pnl": upnl,
+                    "strategy_slug": runner.strategy_slug,
+                })
+            snapshots[sid] = {
+                "session_id": sid,
+                "account_id": runner.account_id,
+                "strategy_slug": runner.strategy_slug,
+                "symbol": runner.symbol,
+                "equity": runner.equity,
+                "realized_pnl": runner._realized_pnl,
+                "unrealized_pnl": runner._unrealized_pnl,
+                "positions": pos_dicts,
+                "trade_count": len(runner._fill_history),
+                "last_bar_ts": runner._last_bar_ts.isoformat() if runner._last_bar_ts else None,
+            }
+        return snapshots
 
     def iter_runners(self) -> list[tuple[str, LiveStrategyRunner]]:
         """Lock-safe snapshot of (session_id, runner) pairs.
@@ -221,7 +275,13 @@ class LivePipelineManager:
                 try:
                     effective_eq = self._sm.get_effective_equity(sid)
                     if effective_eq is None or effective_eq <= 0:
-                        effective_eq = session.virtual_equity or session.equity_share * 1_000_000
+                        effective_eq = session.virtual_equity
+                    if (effective_eq is None or effective_eq <= 0) and session.portfolio_id:
+                        effective_eq = self._portfolio_share_equity(
+                            session.portfolio_id, session.equity_share or 1.0,
+                        )
+                    if effective_eq is None or effective_eq <= 0:
+                        effective_eq = (session.equity_share or 1.0) * 1_000_000
                     runner = LiveStrategyRunner(
                         session_id=sid,
                         account_id=session.account_id,
@@ -354,7 +414,7 @@ class LivePipelineManager:
                     fills=[r.status for r in results],
                 )
                 await self._notify_fills(runner, results)
-            self._record_account_equity(runner.account_id)
+            self._record_portfolio_equity(runner.session_id)
         except Exception:
             logger.exception(
                 "live_bar_processing_error",
@@ -369,6 +429,12 @@ class LivePipelineManager:
             if result.status != "filled":
                 continue
             fill_timestamp = result.order.metadata.get("timestamp", "")
+            if not fill_timestamp:
+                bar_ts = runner._last_bar_ts
+                fill_timestamp = (
+                    bar_ts.strftime("%Y-%m-%d %H:%M:%S") if bar_ts
+                    else datetime.now(_TAIPEI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                )
             is_session_close = result.order.reason == "session_close"
             pnl_realized = result.metadata.get("realized_pnl", 0.0)
 
@@ -422,11 +488,28 @@ class LivePipelineManager:
         try:
             from src.alerting.formatters import format_trade
             strategy_name = runner.strategy_slug.split("/")[-1]
+            # Look up the runner's portfolio so the message can attribute the
+            # fill to it. Paper portfolios are tagged so a glance at the
+            # message is enough to know "this is sandbox money, not real".
+            portfolio_label = ""
+            try:
+                session = self._sm.get_session(runner.session_id)
+                pid = getattr(session, "portfolio_id", None) if session else None
+                if pid and self._portfolio_store is not None:
+                    p = self._portfolio_store.get(pid)
+                    if p:
+                        mode_tag = " [PAPER]" if p.mode == "paper" else " [LIVE]"
+                        portfolio_label = (
+                            f"<b>Portfolio:</b> {p.name}{mode_tag}\n"
+                        )
+            except Exception:
+                logger.debug("telegram_portfolio_lookup_failed", exc_info=True)
             for result in results:
                 if result.status != "filled":
                     continue
                 msg = (
                     f"<b>Account:</b> {runner.account_id}\n"
+                    f"{portfolio_label}"
                     f"<b>{strategy_name}</b> ({runner.symbol})\n"
                     f"{format_trade(result)}\n"
                     f"Equity: {runner.equity:,.0f}"
@@ -511,16 +594,56 @@ class LivePipelineManager:
                     session_id=sid,
                 )
 
-    def _record_account_equity(self, account_id: str) -> None:
-        """Sum equity (and margin used) across all runners for an account."""
+    def _portfolio_share_equity(
+        self, portfolio_id: str, equity_share: float,
+    ) -> float | None:
+        """Return ``portfolio.initial_equity * equity_share`` if available.
+
+        Used as the runner-init fallback when the session has no explicit
+        ``virtual_equity`` and the session-manager has no effective equity
+        yet. Lets paper portfolios start at the user-chosen seed.
+        """
+        if self._portfolio_store is None:
+            return None
         try:
-            runners = [r for _sid, r in self.iter_runners() if r.account_id == account_id]
-            total_equity = sum(r.equity for r in runners)
-            total_margin = sum(
-                float(getattr(r, "margin_used", 0.0) or 0.0) for r in runners
-            )
-            self._equity_store.record(
-                account_id, total_equity, margin_used=total_margin,
+            portfolio = self._portfolio_store.get(portfolio_id)
+        except Exception:
+            return None
+        if portfolio is None or not portfolio.initial_equity:
+            return None
+        return float(portfolio.initial_equity) * float(equity_share)
+
+    def _record_portfolio_equity(self, session_id: str) -> None:
+        """Record per-portfolio equity for the portfolio that owns ``session_id``.
+
+        Sums equity across every runner whose session belongs to the same
+        portfolio, then writes one point to ``portfolio_equity_history``.
+        Sessions not bound to a portfolio are skipped — the dashboard only
+        renders portfolio-scoped curves and the top account chip uses the
+        broker snapshot directly.
+        """
+        if self._portfolio_equity_store is None:
+            return
+        try:
+            session = self._sm.get_session(session_id)
+        except Exception:
+            return
+        if session is None or not session.portfolio_id:
+            return
+        pid = session.portfolio_id
+        try:
+            total_equity = 0.0
+            total_margin = 0.0
+            for sid, runner in self.iter_runners():
+                s = self._sm.get_session(sid)
+                if s is not None and s.portfolio_id == pid:
+                    total_equity += runner.equity
+                    total_margin += float(getattr(runner, "margin_used", 0.0) or 0.0)
+            self._portfolio_equity_store.record(
+                pid, total_equity, margin_used=total_margin,
             )
         except Exception:
-            pass
+            logger.exception(
+                "live_pipeline_portfolio_equity_record_failed",
+                portfolio_id=pid,
+            )

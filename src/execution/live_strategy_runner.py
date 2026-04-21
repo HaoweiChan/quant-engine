@@ -110,6 +110,12 @@ class LiveStrategyRunner:
         # Cached last observed tick price for unrealized-PnL fallback
         # when running live (LiveExecutor does not hold a _current_price).
         self._last_bar_close: float = 0.0
+        # Bar resampling: strategies may run on 5m/15m bars while
+        # the live pipeline dispatches 1m bars. Accumulate 1m bars
+        # and only evaluate the strategy on the resampled bar.
+        from src.strategies.registry import get_bar_agg
+        self._bar_agg: int = get_bar_agg(strategy_slug)
+        self._bar_buffer: list[MinuteBar] = []
         engine, executor, exec_engine = self._build_components(strategy_params)
         self._engine: PositionEngine = engine
         self._executor: _AnyExecutor = executor
@@ -124,6 +130,7 @@ class LiveStrategyRunner:
             symbol=symbol,
             equity=equity_budget,
             mode=execution_mode,
+            bar_agg=self._bar_agg,
             sizing=self._sizer.config.__dict__,
             shared_sizer=not self._owns_sizer,
         )
@@ -354,28 +361,79 @@ class LiveStrategyRunner:
         return total
 
     async def on_bar_complete(self, symbol: str, bar: MinuteBar) -> list[ExecutionResult]:
-        """Called when a 1m bar completes. Core evaluation loop."""
+        """Called when a 1m bar completes. Core evaluation loop.
+
+        When the strategy's signal_timeframe is coarser than 1m, bars are
+        accumulated and resampled before running the strategy evaluation.
+        Stop-loss checks still run on every 1m bar for timely exits.
+        """
         if not self._matches_symbol(symbol):
             return []
         self._bar_count += 1
         # Session boundary check: force flat if new session started
         if self._last_bar_ts is not None and is_new_session(self._last_bar_ts, bar.timestamp):
+            self._bar_buffer.clear()
             results = await self._force_flat(bar)
             self._last_bar_ts = bar.timestamp
             return results
         self._last_bar_ts = bar.timestamp
         # Check if this is the last bar of the session (force flat at 04:59 / 13:44)
         if self._is_session_close_bar(bar.timestamp):
+            self._bar_buffer.clear()
             return await self._force_flat(bar)
+        # Update last bar close for unrealized PnL calc on every tick
+        self._last_bar_close = bar.close
+        # Check stops on every 1m bar for timely exits
+        results = await self._check_stops_on_tick(bar)
+        # Accumulate 1m bars for resampling
+        self._bar_buffer.append(bar)
+        if len(self._bar_buffer) < self._bar_agg:
+            return results
+        # Build the resampled bar and run strategy evaluation
+        resampled = self._resample_buffer()
+        strategy_results = await self._evaluate_strategy(resampled)
+        results.extend(strategy_results)
+        return results
+
+    def _resample_buffer(self) -> MinuteBar:
+        """Merge accumulated 1m bars into a single resampled bar."""
+        buf = self._bar_buffer
+        resampled = MinuteBar(
+            timestamp=buf[0].timestamp,
+            open=buf[0].open,
+            high=max(b.high for b in buf),
+            low=min(b.low for b in buf),
+            close=buf[-1].close,
+            volume=sum(b.volume for b in buf),
+        )
+        self._bar_buffer.clear()
+        return resampled
+
+    async def _check_stops_on_tick(self, bar: MinuteBar) -> list[ExecutionResult]:
+        """Check stop-loss/trailing-stop exits on every 1m bar."""
+        state = self._engine.get_state()
+        if not state.positions:
+            return []
         snapshot = self._bar_to_snapshot(bar)
-        # Cache margin_per_unit so the public ``margin_used`` property is
-        # accurate for cross-runner aggregation (LivePipelineManager uses
-        # this to push exposure into the shared PortfolioSizer).
+        self._last_margin_per_unit = snapshot.margin_per_unit
+        if hasattr(self._executor, "set_market_state"):
+            self._executor.set_market_state(
+                price=snapshot.price,
+                available_margin=max(self._equity_budget + self._realized_pnl - self._margin_used(snapshot), 0),
+            )
+        orders = self._engine.check_stops(snapshot)
+        if not orders:
+            return []
+        await self._paper_engine.on_bar_open(self.symbol, bar.open)
+        results = await self._paper_engine.execute(orders, snapshot)
+        self._process_fills(results, snapshot)
+        return results
+
+    async def _evaluate_strategy(self, bar: MinuteBar) -> list[ExecutionResult]:
+        """Run the full strategy evaluation on a (resampled) bar."""
+        snapshot = self._bar_to_snapshot(bar)
         self._last_margin_per_unit = snapshot.margin_per_unit
         self._last_bar_close = snapshot.price
-        # ``set_market_state`` is paper-only — LiveExecutor gets price
-        # and margin from the broker. Guard the call so the runner
-        # works uniformly across modes.
         if hasattr(self._executor, "set_market_state"):
             self._executor.set_market_state(
                 price=snapshot.price,
@@ -385,7 +443,6 @@ class LiveStrategyRunner:
         orders = self._engine.on_snapshot(snapshot, signal=None, account=account)
         if not orders:
             return []
-        # Portfolio-level sizing: override strategy lots with centralized sizing
         orders = self._apply_portfolio_sizing(orders, snapshot, account)
         if not orders:
             return []
