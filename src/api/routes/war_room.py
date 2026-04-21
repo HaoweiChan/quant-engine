@@ -16,7 +16,7 @@ from collections import deque
 from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
-from src.api.helpers import get_war_room_data
+from src.api.helpers import get_live_pipeline, get_war_room_data
 from src.api.routes.playback_engine import PlaybackEngine, StrategySpec
 from src.trading_session.store import FillStore
 
@@ -849,21 +849,94 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
             "sessions_by_account": {},
             "fetched_at": fetched_at,
         }
+
+    # Load live runner snapshots (paper-mode positions/PnL not visible to broker)
+    runner_snaps: dict[str, dict] = {}
+    try:
+        pipeline = get_live_pipeline()
+        if pipeline:
+            runner_snaps = pipeline.get_runner_snapshots()
+    except Exception:
+        pass
+
+    # session_id → mode lookup for the "live affects account, paper doesn't"
+    # contract. The mock account branch below uses this to compute
+    # `equity_val = mock_initial + sum(live_runner_pnl)`. Looked up via the
+    # session manager + live portfolio manager so we don't have to thread
+    # portfolio_id through the runner snapshots themselves.
+    def _is_live_portfolio_session(sid: str | None) -> bool:
+        if not sid:
+            return False
+        try:
+            from src.api.helpers import (
+                get_live_portfolio_manager,
+                get_session_manager,
+            )
+            sm = get_session_manager()
+            pm = get_live_portfolio_manager()
+        except Exception:
+            return False
+        if sm is None or pm is None:
+            return False
+        sess = sm.get_session(sid)
+        pid = getattr(sess, "portfolio_id", None) if sess is not None else None
+        if not pid:
+            return False
+        portfolio = pm.get_portfolio(pid)
+        return bool(portfolio and portfolio.mode == "live")
+
     accounts = {}
     for acct_id, info in data.get("accounts", {}).items():
         snap = info.get("snapshot")
         config = info.get("config")
         equity_curve = info.get("equity_curve", [])
-        # In sandbox mode, Sinopac simulation API returns 0 for margin data.
-        # Fall back to last known equity from equity_curve when this happens.
-        equity_val = snap.equity if snap and snap.connected else 0
-        margin_used_val = snap.margin_used if snap and snap.connected else 0
-        margin_avail_val = snap.margin_available if snap and snap.connected else 0
         is_sandbox = bool(config.sandbox_mode) if config else False
-        if is_sandbox and equity_val == 0 and equity_curve:
-            # Use last recorded equity as fallback for display
-            _, last_equity = equity_curve[-1]
-            equity_val = last_equity
+        is_mock = bool(config and config.broker == "mock")
+        # Account chip = the real broker money. Paper portfolios have their
+        # own equity curve via /api/war-room.portfolio_equity_curves and the
+        # PortfolioCard renders that — never sum runner equities into the
+        # account total here, that was the source of the 100k/300k mixing.
+        if is_mock:
+            # Mock account uses fake money but should still demonstrate the
+            # "live affects account, paper doesn't" contract end-to-end:
+            #   mock_equity = mock_initial + sum(live runner P&L)
+            # Paper runner P&L is excluded — those are sandbox bubbles that
+            # only move per-portfolio curves.
+            try:
+                from src.api.helpers import get_gateway_registry
+                _registry = get_gateway_registry()
+                _gw = _registry.get_gateway(acct_id) if _registry else None
+            except Exception:
+                _gw = None
+            mock_initial = float(getattr(_gw, "_initial", 2_000_000.0)) if _gw else 2_000_000.0
+            live_pnl = sum(
+                float(rs.get("realized_pnl", 0.0) or 0.0)
+                + float(rs.get("unrealized_pnl", 0.0) or 0.0)
+                for rs in runner_snaps.values()
+                if rs.get("account_id") == acct_id
+                and _is_live_portfolio_session(rs.get("session_id"))
+            )
+            equity_val = mock_initial + live_pnl
+            margin_used_val = sum(
+                float(rs.get("margin_used", 0.0) or 0.0)
+                for rs in runner_snaps.values()
+                if rs.get("account_id") == acct_id
+                and _is_live_portfolio_session(rs.get("session_id"))
+            )
+            margin_avail_val = max(equity_val - margin_used_val, 0.0)
+        elif snap and snap.connected:
+            equity_val = snap.equity
+            margin_used_val = snap.margin_used
+            margin_avail_val = snap.margin_available
+        else:
+            # Broker disconnected: fall back to the most recent persisted
+            # broker snapshot (account_equity_history) so the chip keeps
+            # showing the last known real equity instead of going blank
+            # during transient disconnects. Margin info is gone with the
+            # snapshot, so those stay at zero.
+            equity_val = equity_curve[-1][1] if equity_curve else None
+            margin_used_val = 0
+            margin_avail_val = 0
         positions_block = [
             {
                 "symbol": p.symbol,
@@ -876,6 +949,11 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
             }
             for p in (snap.positions if snap and snap.connected else [])
         ]
+        # Enrich with paper-mode runner positions (broker can't see these)
+        if not positions_block and acct_id != _MOCK_ACCOUNT_ID and runner_snaps:
+            for rs in runner_snaps.values():
+                if rs["account_id"] == acct_id:
+                    positions_block.extend(rs["positions"])
         # For live accounts, read from persistent FillStore instead of broker API
         # which loses fills on reconnect
         if acct_id != _MOCK_ACCOUNT_ID:
@@ -1091,6 +1169,17 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
                 "trade_count": mock_trade_count,
                 "positions": [],
             }
+        # Enrich session snapshot with live runner data (paper-mode)
+        rs = runner_snaps.get(s.session_id)
+        if rs and s.account_id != _MOCK_ACCOUNT_ID:
+            if snapshot_block is None:
+                snapshot_block = {}
+            snapshot_block["equity"] = rs["equity"]
+            snapshot_block["realized_pnl"] = rs["realized_pnl"]
+            snapshot_block["unrealized_pnl"] = rs["unrealized_pnl"]
+            snapshot_block["positions"] = rs["positions"]
+            if rs["trade_count"] > snapshot_block.get("trade_count", 0):
+                snapshot_block["trade_count"] = rs["trade_count"]
         sessions.append(
             {
                 "session_id": s.session_id,
@@ -1106,10 +1195,17 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
             }
         )
     settlement_block = _build_settlement_block(sessions)
+    portfolio_equity_curves_block: dict[str, list] = {}
+    for pid, curve in (data.get("portfolio_equity_curves") or {}).items():
+        portfolio_equity_curves_block[pid] = [
+            {"timestamp": t.isoformat() if hasattr(t, "isoformat") else str(t), "equity": e}
+            for t, e in curve
+        ]
     response = {
         "accounts": accounts,
         "all_sessions": sessions,
         "sessions_by_account": data.get("sessions_by_account", {}),
+        "portfolio_equity_curves": portfolio_equity_curves_block,
         "settlement": settlement_block,
         "fetched_at": fetched_at,
     }

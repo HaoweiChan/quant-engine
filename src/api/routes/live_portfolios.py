@@ -19,6 +19,7 @@ class PortfolioCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     account_id: str
     mode: str = Field(default="paper", pattern="^(paper|live)$")
+    initial_equity: float | None = Field(default=None, gt=0)
 
 
 class MemberAttachRequest(BaseModel):
@@ -27,6 +28,10 @@ class MemberAttachRequest(BaseModel):
 
 class FlipModeRequest(BaseModel):
     mode: str = Field(..., pattern="^(paper|live)$")
+
+
+class InitialEquityRequest(BaseModel):
+    initial_equity: float = Field(..., gt=0)
 
 
 def _get_manager():
@@ -40,6 +45,7 @@ def _portfolio_to_dict(portfolio, members=None) -> dict:
         "name": portfolio.name,
         "account_id": portfolio.account_id,
         "mode": portfolio.mode,
+        "initial_equity": portfolio.initial_equity,
         "created_at": portfolio.created_at.isoformat(),
         "updated_at": portfolio.updated_at.isoformat(),
     }
@@ -73,7 +79,10 @@ async def create_portfolio(req: PortfolioCreateRequest) -> dict:
     mgr = _get_manager()
     try:
         portfolio = mgr.create_portfolio(
-            name=req.name, account_id=req.account_id, mode=req.mode,  # type: ignore[arg-type]
+            name=req.name,
+            account_id=req.account_id,
+            mode=req.mode,  # type: ignore[arg-type]
+            initial_equity=req.initial_equity,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
@@ -138,6 +147,34 @@ async def detach_member(portfolio_id: str, session_id: str) -> dict:
         "session_id": session_id,
         "status": "detached",
     }
+
+
+@router.patch("/{portfolio_id}/initial-equity")
+async def update_initial_equity(portfolio_id: str, body: InitialEquityRequest) -> dict:
+    """Set or change the paper portfolio's seed equity.
+
+    Idempotent: writes the new value to ``live_portfolios.initial_equity``.
+    Does NOT rebase the running curve — the user must hit RESET on the
+    portfolio card after this if they want to wipe history and re-seed at
+    the new value. Refused for live portfolios.
+    """
+    mgr = _get_manager()
+    portfolio = mgr.get_portfolio(portfolio_id)
+    if portfolio is None:
+        raise HTTPException(
+            status_code=404, detail=f"Portfolio '{portfolio_id}' not found",
+        )
+    if portfolio.mode == "live":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Portfolio '{portfolio_id}' is in live mode; initial_equity "
+                "is only tracked for paper portfolios."
+            ),
+        )
+    portfolio.initial_equity = float(body.initial_equity)
+    mgr._store.save(portfolio)  # type: ignore[attr-defined]
+    return _portfolio_to_dict(portfolio, members=mgr.list_members(portfolio_id))
 
 
 @router.post("/{portfolio_id}/flip-mode")

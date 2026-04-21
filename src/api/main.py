@@ -26,6 +26,7 @@ from src.api.routes import (
     monte_carlo,
     ohlcv,
     optimizer,
+    orders,
     paper_trade,
     params,
     portfolio,
@@ -64,6 +65,19 @@ async def lifespan(app: FastAPI):
             _init_war_room()
         except Exception:
             pass  # non-fatal: dashboard still works, just no live feed until retry
+
+    # Startup gap repair: backfill missing bars from last 3 days
+    if os.getenv("QUANT_SKIP_BROKER_INIT") != "1":
+        async def _bg_gap_repair() -> None:
+            try:
+                from src.data.gap_repair import startup_gap_repair
+                result = await asyncio.to_thread(startup_gap_repair, ["TMF"])
+                if result:
+                    log.info("startup_gap_repair_complete: %s", result)
+            except Exception as exc:
+                log.warning("startup_gap_repair_failed: %s", exc)
+
+        asyncio.create_task(_bg_gap_repair())
 
     # War Room mock seeder (dev-only, gated by QUANT_WARROOM_SEED=1).
     app.state._seed_task = None
@@ -134,6 +148,7 @@ app.include_router(portfolio.router)
 app.include_router(risk_evaluation.router)
 app.include_router(admin_warroom.router)
 app.include_router(paper_trade.router)
+app.include_router(orders.router)
 
 # WebSocket routes
 app.include_router(live_feed.router)

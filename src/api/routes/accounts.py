@@ -20,7 +20,6 @@ class AccountCreateRequest(BaseModel):
     broker: str
     display_name: str | None = None
     sandbox_mode: bool = False
-    demo_trading: bool = False
     guards: dict | None = None
     strategies: list[dict] | None = None
     api_key: str | None = None
@@ -54,7 +53,6 @@ async def list_accounts() -> list[dict]:
             "broker": a.broker,
             "display_name": a.display_name,
             "sandbox_mode": a.sandbox_mode,
-            "demo_trading": a.demo_trading,
             "default_mode": "paper" if a.sandbox_mode else "live",
             "guards": a.guards,
             "strategies": a.strategies,
@@ -75,7 +73,6 @@ async def get_account(account_id: str) -> dict:
         "broker": acct.broker,
         "display_name": acct.display_name,
         "sandbox_mode": acct.sandbox_mode,
-        "demo_trading": acct.demo_trading,
         "default_mode": "paper" if acct.sandbox_mode else "live",
         "guards": acct.guards,
         "strategies": acct.strategies,
@@ -93,7 +90,6 @@ async def create_account(req: AccountCreateRequest) -> dict:
         display_name=req.display_name or f"{req.broker.title()} ({account_id})",
         gateway_class=_GATEWAY_CLASSES.get(req.broker, _GATEWAY_CLASSES["mock"]),
         sandbox_mode=req.sandbox_mode,
-        demo_trading=req.demo_trading,
         guards=req.guards or {
             "max_drawdown_pct": 15,
             "max_margin_pct": 80,

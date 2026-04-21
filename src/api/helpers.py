@@ -411,6 +411,14 @@ def load_ohlcv(symbol: str, start: datetime, end: datetime, tf_minutes: int) -> 
     """
     if not _DB_PATH.exists():
         return pd.DataFrame()
+    # Use space-separated format to match DB timestamps (not ISO T-separator).
+    # If end is midnight (date-only input), extend to end-of-day so all
+    # bars on that date are included.
+    ts_start = start.strftime("%Y-%m-%d %H:%M:%S")
+    if end.hour == 0 and end.minute == 0 and end.second == 0:
+        ts_end = end.strftime("%Y-%m-%d") + " 23:59:59"
+    else:
+        ts_end = end.strftime("%Y-%m-%d %H:%M:%S")
     session_filter_sql = (
         "(time(timestamp) >= '15:00:00' "
         "OR time(timestamp) < '05:00:00' "
@@ -427,7 +435,7 @@ def load_ohlcv(symbol: str, start: datetime, end: datetime, tf_minutes: int) -> 
             )
             df = pd.read_sql_query(
                 query, conn,
-                params=(symbol, start.isoformat(), end.isoformat()),
+                params=(symbol, ts_start, ts_end),
                 parse_dates=["timestamp"],
             )
         elif tf_minutes >= 1440:
@@ -481,8 +489,8 @@ def load_ohlcv(symbol: str, start: datetime, end: datetime, tf_minutes: int) -> 
                 query, conn,
                 params={
                     "sym": symbol,
-                    "ts_start": start.isoformat(),
-                    "ts_end": end.isoformat(),
+                    "ts_start": ts_start,
+                    "ts_end": ts_end,
                 },
                 parse_dates=["timestamp"],
             )
@@ -522,8 +530,8 @@ def load_ohlcv(symbol: str, start: datetime, end: datetime, tf_minutes: int) -> 
                 params={
                     "bkt": bucket_secs,
                     "sym": symbol,
-                    "ts_start": start.isoformat(),
-                    "ts_end": end.isoformat(),
+                    "ts_start": ts_start,
+                    "ts_end": ts_end,
                 },
                 parse_dates=["timestamp"],
             )
@@ -664,6 +672,7 @@ def run_grid_mc(
 _session_manager = None
 _gateway_registry = None
 _account_equity_store = None
+_portfolio_equity_store = None
 _market_data_subscriber = None
 _live_bar_store = None
 _live_pipeline = None
@@ -731,18 +740,24 @@ def _start_market_data_subscriber() -> None:
     _market_data_subscriber = "initializing"
     bar_store = _live_bar_store
 
-    def _connect_and_subscribe(sj_mod) -> Any:
-        """Login and subscribe to R1+R2 tick feeds for all configured contracts.
+    def _connect_and_subscribe(sj_mod, on_tick_cb) -> Any:
+        """Login, register tick callback, then subscribe to R1+R2 tick feeds.
 
-        Walks each CONTRACTS entry's shioaji_path (e.g. "Futures.TXF.TXFR1")
-        to its actual contract object so R1 and R2 are subscribed separately
-        and routed by exact contract code, not by group prefix.
+        Callback is registered BEFORE subscribing so no early ticks are lost.
+        Rolling contracts (R1/R2) have a logical code like "TMFR1" in their
+        .code attribute, but ticks carry the physical contract code (e.g.
+        "TMFE6"). We resolve the physical code by finding the underlying
+        contract in the same group with matching delivery.
         """
         from src.data.contracts import CONTRACTS
 
         api = sj_mod.Shioaji(simulation=False)
         api.login(api_key=api_key, secret_key=secret_key)
         logger.info("market_data_subscriber: connected to Sinopac")
+
+        # Register tick callback BEFORE subscribing to avoid losing early ticks
+        api.quote.set_on_tick_fop_v1_callback(on_tick_cb)
+
         time.sleep(2)
 
         # Rebuild on every reconnect — contract codes change after settlement.
@@ -753,22 +768,39 @@ def _start_market_data_subscriber() -> None:
                 obj = api.Contracts
                 for part in contract_def.shioaji_path.split("."):
                     obj = getattr(obj, part)
-                actual_code = getattr(obj, "code", None)
-                if not actual_code:
+                logical_code = getattr(obj, "code", None)
+                if not logical_code:
                     logger.warning(
                         "market_data_subscriber: resolve failed for %s (path=%s)",
                         contract_def.db_symbol, contract_def.shioaji_path,
                     )
                     continue
+
+                # Rolling contracts (R1/R2) return a logical code that differs
+                # from the physical tick code. Resolve the physical code by
+                # matching delivery_date within the contract group.
+                physical_code = logical_code
+                delivery = getattr(obj, "delivery_date", None)
+                if delivery and logical_code.endswith(("R1", "R2")):
+                    group = getattr(api.Contracts.Futures, contract_def.shioaji_group, None)
+                    if group:
+                        for c in group:
+                            c_code = getattr(c, "code", "")
+                            if c_code.endswith(("R1", "R2")):
+                                continue
+                            if getattr(c, "delivery_date", None) == delivery:
+                                physical_code = c_code
+                                break
+
                 api.quote.subscribe(
                     obj,
                     quote_type=sj_mod.constant.QuoteType.Tick,
                     version=sj_mod.constant.QuoteVersion.v1,
                 )
-                _code_to_symbol[actual_code] = contract_def.db_symbol
+                _code_to_symbol[physical_code] = contract_def.db_symbol
                 logger.info(
-                    "market_data_subscriber: subscribed to %s (code=%s, path=%s)",
-                    contract_def.db_symbol, actual_code, contract_def.shioaji_path,
+                    "market_data_subscriber: subscribed %s logical=%s physical=%s",
+                    contract_def.db_symbol, logical_code, physical_code,
                 )
             except Exception as exc:
                 logger.warning(
@@ -862,9 +894,10 @@ def _start_market_data_subscriber() -> None:
 
         while True:
             try:
-                api = _connect_and_subscribe(sj)
-                api.quote.set_on_tick_fop_v1_callback(_on_tick)
+                api = _connect_and_subscribe(sj, _on_tick)
                 _market_data_subscriber = api
+                connected_at = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
+                logger.info("market_data_subscriber: health monitor started, codes=%s", list(_code_to_symbol.keys()))
                 # Health monitor: check for tick stalls every 120s during trading hours
                 while True:
                     time.sleep(120)
@@ -872,10 +905,23 @@ def _start_market_data_subscriber() -> None:
                     h, m = now_taipei.hour, now_taipei.minute
                     mins = h * 60 + m
                     in_session = mins >= 15 * 60 or mins < 5 * 60 or (8 * 60 + 45 <= mins <= 13 * 60 + 45)
-                    if in_session and _subscriber_last_tick_ts:
+                    if not in_session:
+                        continue
+                    if _subscriber_last_tick_ts:
                         stale_secs = (now_taipei - _subscriber_last_tick_ts).total_seconds()
                         if stale_secs > 300:
                             logger.warning("market_data_subscriber: no ticks for %.0fs, reconnecting", stale_secs)
+                            try:
+                                api.logout()
+                            except Exception:
+                                pass
+                            break
+                    else:
+                        # Never received any ticks since connection — reconnect
+                        # after 5 minutes to avoid silent dead connections.
+                        age_secs = (now_taipei - connected_at).total_seconds()
+                        if age_secs > 300:
+                            logger.warning("market_data_subscriber: zero ticks after %.0fs, reconnecting", age_secs)
                             try:
                                 api.logout()
                             except Exception:
@@ -920,7 +966,7 @@ def get_telegram_dispatcher():
 def _init_war_room() -> None:
     """Lazy-init the SessionManager, GatewayRegistry, and LivePipeline singletons."""
     global _session_manager, _gateway_registry, _account_equity_store
-    global _live_bar_store, _live_pipeline
+    global _live_bar_store, _live_pipeline, _portfolio_equity_store
     global _live_portfolio_store, _live_portfolio_manager
     if _gateway_registry is not None:
         return
@@ -930,7 +976,7 @@ def _init_war_room() -> None:
     from src.execution.live_pipeline import LivePipelineManager
     from src.trading_session.manager import SessionManager
     from src.trading_session.session_db import SessionDB
-    from src.trading_session.store import AccountEquityStore, SnapshotStore
+    from src.trading_session.store import AccountEquityStore, PortfolioEquityStore, SnapshotStore
     db = AccountDB()
     _gateway_registry = GatewayRegistry(db=db)
     _gateway_registry.load_all()
@@ -949,6 +995,7 @@ def _init_war_room() -> None:
         session_manager=_session_manager,
     )
     _account_equity_store = AccountEquityStore()
+    _portfolio_equity_store = PortfolioEquityStore()
     _live_bar_store = LiveMinuteBarStore()
     # Seed mock accounts with synthetic equity history (idempotent).
     _warroom_seed_enabled = os.environ.get("QUANT_WARROOM_SEED") == "1"
@@ -970,6 +1017,8 @@ def _init_war_room() -> None:
         bar_store=_live_bar_store,
         equity_store=_account_equity_store,
         notifier=_telegram_dispatcher,
+        portfolio_equity_store=_portfolio_equity_store,
+        portfolio_store=_live_portfolio_store,
     )
     try:
         from src.api.main import get_main_loop
@@ -1006,8 +1055,43 @@ def get_war_room_data() -> dict:
                 snap = gw.get_account_snapshot()
             except Exception:
                 snap = None
-        # Record equity for the curve whenever we have a live snapshot
-        if snap and snap.connected and snap.equity > 0:
+        # Account-level equity curve = the broker's real money. Record the
+        # snapshot whenever we have a live one — sandbox flag no longer
+        # matters here because per-portfolio paper equity now lives in
+        # ``portfolio_equity_history`` (see PortfolioEquityStore).
+        # Mock account: write a synthesized point that follows the same
+        # contract used by the war-room route — `mock_initial + sum(live
+        # runner pnl)` — so the chart matches the chip without depending
+        # on the GBM walk inside MockGateway.
+        if config.broker == "mock":
+            try:
+                mock_initial = float(getattr(gw, "_initial", 2_000_000.0)) if gw else 2_000_000.0
+                runner_snaps = (
+                    _live_pipeline.get_runner_snapshots()
+                    if _live_pipeline is not None else {}
+                )
+                live_pnl = 0.0
+                for rs in runner_snaps.values():
+                    if rs.get("account_id") != config.id:
+                        continue
+                    sid = rs.get("session_id")
+                    sess = _session_manager.get_session(sid) if sid else None
+                    pid = getattr(sess, "portfolio_id", None) if sess else None
+                    if not pid:
+                        continue
+                    portfolio = (
+                        _live_portfolio_manager.get_portfolio(pid)
+                        if _live_portfolio_manager is not None else None
+                    )
+                    if portfolio and portfolio.mode == "live":
+                        live_pnl += float(rs.get("realized_pnl", 0.0) or 0.0)
+                        live_pnl += float(rs.get("unrealized_pnl", 0.0) or 0.0)
+                _account_equity_store.record(
+                    config.id, mock_initial + live_pnl, margin_used=0.0,
+                )
+            except Exception:
+                pass
+        elif snap and snap.connected and snap.equity > 0:
             try:
                 _account_equity_store.record(config.id, snap.equity, snap.margin_used)
             except Exception:
@@ -1028,10 +1112,22 @@ def get_war_room_data() -> dict:
     sessions_by_account: dict[str, list] = {}
     for s in sessions:
         sessions_by_account.setdefault(s.account_id, []).append(s)
+    # Per-portfolio paper equity curves (only paper portfolios write here;
+    # live portfolios share the account-level curve via the broker snapshot).
+    portfolio_equity_curves: dict[str, list[tuple]] = {}
+    if _portfolio_equity_store is not None and _live_portfolio_store is not None:
+        try:
+            for p in _live_portfolio_store.load_all():
+                portfolio_equity_curves[p.portfolio_id] = (
+                    _portfolio_equity_store.get_equity_curve(p.portfolio_id, days=30)
+                )
+        except Exception:
+            pass
     return {
         "accounts": accounts,
         "all_sessions": sessions,
         "sessions_by_account": sessions_by_account,
+        "portfolio_equity_curves": portfolio_equity_curves,
     }
 
 
