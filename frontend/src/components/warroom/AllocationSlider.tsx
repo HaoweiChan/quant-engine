@@ -8,6 +8,11 @@ interface AllocationSliderProps {
   /** All sessions that belong to the same account. Typically 2. */
   sessions: WarRoomSession[];
   onCommit: () => void;
+  /** When true, render a static read-only summary (per-member %) instead
+   *  of the interactive slider/inputs. Used for live portfolios where the
+   *  weights come from the original optimization and must not be edited
+   *  post-creation. */
+  readOnly?: boolean;
 }
 
 /**
@@ -19,7 +24,7 @@ interface AllocationSliderProps {
  * component is a passive display, and with 3+ sessions it falls back to a
  * read-only summary — a full n-way slider is a follow-up.
  */
-export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) {
+export function AllocationSlider({ sessions, onCommit, readOnly }: AllocationSliderProps) {
   const [pendingShares, setPendingShares] = useState<Record<string, number>>({});
   const [draftPct, setDraftPct] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -57,6 +62,36 @@ export function AllocationSlider({ sessions, onCommit }: AllocationSliderProps) 
         }}
       >
         Allocation: 100% → {s.strategy_slug.split("/").pop()}
+      </div>
+    );
+  }
+
+  if (readOnly) {
+    // Live portfolios: weights come from the original optimization and
+    // are not editable here. Render a static per-member summary.
+    void onCommit;
+    return (
+      <div
+        className="flex flex-col gap-1 p-2 rounded"
+        style={{
+          background: colors.card,
+          border: `1px solid ${colors.cardBorder}`,
+          fontFamily: "var(--font-mono)",
+        }}
+      >
+        <div className="text-[11px] font-semibold tracking-wider" style={{ color: colors.muted }}>
+          ALLOCATION ({sessions.length} strategies)
+        </div>
+        {sessions.map((s) => (
+          <div key={s.session_id} className="flex items-center justify-between gap-2 text-[11px]">
+            <span className="truncate" style={{ color: colors.text }} title={s.strategy_slug}>
+              {s.strategy_slug.split("/").pop()}
+            </span>
+            <span className="shrink-0 font-semibold" style={{ color: colors.blue }}>
+              {Math.round((s.equity_share ?? 0) * 100)}%
+            </span>
+          </div>
+        ))}
       </div>
     );
   }

@@ -31,6 +31,10 @@ interface UnifiedLoaderProps {
   defaultSymbol?: string;
   /** Slugs already bound to the account — greyed out in strategy mode. */
   existingSlugs?: string[];
+  /** Whether the active account is connected to shioaji's simulation server.
+   *  Used to surface a warning when the user picks `LIVE` against a sandbox
+   *  account — orders still route to the sim server in that case. */
+  accountSandbox?: boolean;
   onLoadPortfolio: (
     strategies: { slug: string; symbol: string; weight: number }[],
     meta: { name: string; mode: "paper" | "live" },
@@ -92,6 +96,7 @@ export function UnifiedLoader({
   busy,
   defaultSymbol = "TX",
   existingSlugs,
+  accountSandbox,
   onLoadPortfolio,
   onAddStrategy,
 }: UnifiedLoaderProps) {
@@ -100,6 +105,7 @@ export function UnifiedLoader({
     ? defaultSymbol
     : "TX") as Contract;
   const [symbol, setSymbol] = useState<Contract>(initialSymbol);
+  const [portfolioMode, setPortfolioMode] = useState<"paper" | "live">("paper");
   const [expanded, setExpanded] = useState(false);
   const [dropdownPos, setDropdownPos] = useState<
     { top: number; left: number; width: number } | null
@@ -202,7 +208,7 @@ export function UnifiedLoader({
     const suffix = targetSymbol === p.symbol
       ? p.symbol
       : `${targetSymbol}\u2190${p.symbol}`;  // arrow hints at the override
-    onLoadPortfolio(strategyList, { name: `${label} (${suffix})`, mode: "paper" });
+    onLoadPortfolio(strategyList, { name: `${label} (${suffix})`, mode: portfolioMode });
   };
 
   const handleStrategyPick = (s: StrategyInfo) => {
@@ -442,6 +448,51 @@ export function UnifiedLoader({
           );
         })}
       </div>
+
+      {/* PORTFOLIO tab: paper/live mode toggle. STRATEGY tab always
+          wraps in paper-of-one, so the toggle only matters here. */}
+      {mode === "portfolio" && (
+        <>
+          <div className="flex items-center gap-1">
+            <span className="text-[10px]" style={{ color: colors.muted }} title="Mode for the loaded portfolio">
+              Mode:
+            </span>
+            {(["paper", "live"] as const).map((m) => {
+              const active = portfolioMode === m;
+              const accent = m === "live" ? colors.red : colors.gold;
+              return (
+                <button
+                  key={m}
+                  onClick={() => setPortfolioMode(m)}
+                  className="px-1.5 py-0.5 rounded text-[10px] font-bold cursor-pointer border-none tracking-wider"
+                  style={{
+                    background: active ? `${accent}26` : "transparent",
+                    color: active ? accent : colors.dim,
+                    border: `1px solid ${active ? `${accent}66` : colors.cardBorder}`,
+                  }}
+                >
+                  {m.toUpperCase()}
+                </button>
+              );
+            })}
+          </div>
+          {portfolioMode === "live" && accountSandbox && (
+            <div
+              className="text-[10px] leading-snug px-1.5 py-1 rounded"
+              style={{
+                color: "#D4A017",
+                background: "rgba(139,105,20,0.12)",
+                border: "1px solid rgba(139,105,20,0.35)",
+                fontFamily: "var(--font-mono)",
+              }}
+              title="The active account is in sandbox mode"
+            >
+              ⚠ Account is sim-connected. Live orders route to shioaji's
+              simulation server, not real money.
+            </div>
+          )}
+        </>
+      )}
 
       {/* Trigger */}
       <button

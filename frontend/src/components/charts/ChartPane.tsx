@@ -109,6 +109,7 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
       return;
     }
     const ts = chart.timeScale();
+    const MARKER_H = 16;
     const positioned = rawMarkers
       .map((m) => {
         const x = ts.timeToCoordinate(m.time as any);
@@ -118,11 +119,20 @@ export const ChartPane = forwardRef<ChartPaneHandle, ChartPaneProps>(function Ch
         if (price == null) return null;
         const y = cs.priceToCoordinate(price);
         if (y === null) return null;
-        const offset = m.position === "aboveBar" ? -22 : 8;
-            return { x: x - 10, y: y + offset, color: m.color, text: m.text ?? "", strategyColor: m.strategyColor };
+        const baseOffset = m.position === "aboveBar" ? -22 : 8;
+        return { x: x - 10, y: y + baseOffset, color: m.color, text: m.text ?? "", strategyColor: m.strategyColor, _pos: m.position };
       })
       .filter((m): m is NonNullable<typeof m> => m !== null);
-    setOverlayMarkers(positioned);
+    // Stack markers that share the same x-coordinate and position type
+    const slotCount = new Map<string, number>();
+    const stacked = positioned.map((m) => {
+      const key = `${Math.round(m.x)}:${m._pos}`;
+      const idx = slotCount.get(key) ?? 0;
+      slotCount.set(key, idx + 1);
+      const stackOffset = m._pos === "aboveBar" ? -idx * MARKER_H : idx * MARKER_H;
+      return { x: m.x, y: m.y + stackOffset, color: m.color, text: m.text, strategyColor: m.strategyColor };
+    });
+    setOverlayMarkers(stacked);
   }, []);
 
   useImperativeHandle(ref, () => ({

@@ -4,8 +4,8 @@ import { useTradingStore } from "@/stores/tradingStore";
 import { useWarRoomStore } from "@/stores/warRoomStore";
 import { createMarketDataStore, type MarketDataStore } from "@/stores/marketDataStore";
 import { useLiveFeed } from "@/hooks/useLiveFeed";
-import { fetchWarRoomTyped, fetchOHLCV, fetchDeployHistory, startCrawl, fetchCrawlStatus, fetchWarRoomMockRange, initPlaybackEngine, stopPlaybackEngine } from "@/lib/api";
-import type { WarRoomData, DeployLogEntry, TradeSignal } from "@/lib/api";
+import { fetchWarRoomTyped, fetchOHLCV, fetchDeployHistory, startCrawl, fetchCrawlStatus, fetchWarRoomMockRange, initPlaybackEngine, stopPlaybackEngine, fetchLivePortfolios } from "@/lib/api";
+import type { WarRoomData, DeployLogEntry, TradeSignal, LivePortfolio } from "@/lib/api";
 import { colors } from "@/lib/theme";
 import { parseTimestampMs, parseTimestampSec } from "@/lib/time";
 
@@ -39,7 +39,7 @@ const CHART_SYMBOLS = ["TX", "MTX", "TMF"];
 
 const POLL_MS = 15_000;
 const BAR_REFRESH_MS = 15_000;
-const PLAYBACK_POLL_MS = 500;
+const PLAYBACK_POLL_MS = 2000;
 
 type BottomTab = "blotter" | "trades" | "activity";
 
@@ -47,6 +47,10 @@ export function WarRoomLayout() {
   const [data, setData] = useState<WarRoomData | null>(
     () => useTradingStore.getState().warRoomData as WarRoomData | null,
   );
+  // LivePortfolio metadata for the active account. We need it to join
+  // sessions → portfolio.mode for the "live affects account, paper
+  // doesn't" contract on the top stats row.
+  const [portfolios, setPortfolios] = useState<LivePortfolio[]>([]);
   const [deployHistory, setDeployHistory] = useState<DeployLogEntry[]>([]);
   const activeAccountId = useTradingStore((s) => s.activeAccountId);
   const selectedSessionId = useWarRoomStore((s) => s.selectedSessionId);
@@ -62,7 +66,6 @@ export function WarRoomLayout() {
 
   const playbackEnabled = usePlaybackStore((s) => s.enabled);
   const playbackIsPlaying = usePlaybackStore((s) => s.isPlaying);
-  const virtualClockMs = usePlaybackStore((s) => s.virtualClockMs);
   const playbackRangeStartMs = usePlaybackStore((s) => s.rangeStartMs);
   const setPlaybackRange = usePlaybackStore((s) => s.setRange);
   const setPlaybackDataBounds = usePlaybackStore((s) => s.setDataBounds);
@@ -379,7 +382,7 @@ export function WarRoomLayout() {
       const delta = now - lastTickRef.current;
       lastTickRef.current = now;
       playbackTick(delta);
-    }, 100);
+    }, 250);
 
     return () => {
       clearInterval(ticker);
@@ -387,11 +390,17 @@ export function WarRoomLayout() {
     };
   }, [playbackEnabled, playbackIsPlaying, playbackTick]);
 
-  // Poll war room data — refs keep the callback stable across playback ticks
+  // Poll war room data — refs keep the callback stable across playback ticks.
+  // virtualClockMs is read via ref (updated by store subscription) to avoid
+  // re-rendering this entire component tree on every 100ms playback tick.
   const playbackEnabledRef = useRef(playbackEnabled);
   playbackEnabledRef.current = playbackEnabled;
-  const virtualClockMsRef = useRef(virtualClockMs);
-  virtualClockMsRef.current = virtualClockMs;
+  const virtualClockMsRef = useRef<number | null>(usePlaybackStore.getState().virtualClockMs);
+  useEffect(() => {
+    return usePlaybackStore.subscribe((s) => {
+      virtualClockMsRef.current = s.virtualClockMs;
+    });
+  }, []);
   const pollInFlightRef = useRef(false);
 
   const poll = useCallback(() => {
@@ -408,6 +417,14 @@ export function WarRoomLayout() {
       setData(res);
       useTradingStore.getState().setWarRoomData(res as unknown as Record<string, unknown>);
     }).catch(() => {}).finally(() => { pollInFlightRef.current = false; });
+
+    // Refresh LivePortfolio metadata for the active account so the
+    // session→portfolio→mode join behind the top-stats filter stays
+    // current as portfolios get added/removed/flipped.
+    const aid = useTradingStore.getState().activeAccountId;
+    if (aid) {
+      fetchLivePortfolios(aid).then(setPortfolios).catch(() => {});
+    }
 
     if (!pbEnabled) {
       fetchDeployHistory().then(setDeployHistory).catch(() => {});
@@ -432,13 +449,28 @@ export function WarRoomLayout() {
   }, [poll, playbackEnabled]);
 
   // Derived data scoped to the active account (not summed across all)
-  const activeEquity = activeAccountData?.equity ?? 0;
+  const activeEquity = (activeAccountData?.equity ?? 0) || 0;
   const activeMarginUsed = activeAccountData?.margin_used ?? 0;
   const activeMarginAvail = activeAccountData?.margin_available ?? 0;
   const equityRatio = activeMarginUsed > 0 && activeEquity > 0 ? activeEquity / activeMarginUsed : null;
 
-  const totalPnl = sessions.reduce((sum, s) => sum + (s.snapshot?.realized_pnl ?? 0) + (s.snapshot?.unrealized_pnl ?? 0), 0);
-  const worstDD = sessions.reduce((mx, s) => Math.max(mx, s.snapshot?.drawdown_pct ?? 0), 0);
+  // Top-stats row reflects the broker chip's reality: only LIVE-portfolio
+  // sessions move account money. Paper sessions have their own per-card
+  // equity and never roll up here.
+  const portfoliosById = useMemo(
+    () => new Map(portfolios.map((p) => [p.portfolio_id, p])),
+    [portfolios],
+  );
+  const liveSessions = useMemo(() => {
+    return sessions.filter((s) => {
+      const pid = s.portfolio_id;
+      if (!pid) return false; // ad-hoc/loose sessions are sandbox-style; never count
+      const p = portfoliosById.get(pid);
+      return p?.mode === "live";
+    });
+  }, [sessions, portfoliosById]);
+  const totalPnl = liveSessions.reduce((sum, s) => sum + (s.snapshot?.realized_pnl ?? 0) + (s.snapshot?.unrealized_pnl ?? 0), 0);
+  const worstDD = liveSessions.reduce((mx, s) => Math.max(mx, s.snapshot?.drawdown_pct ?? 0), 0);
   const activeSessions = sessions.filter((s) => s.status === "active" || s.status === "paused");
 
   const accountBindings = useMemo(() => {
@@ -453,8 +485,14 @@ export function WarRoomLayout() {
     return bindings;
   }, [sessions]);
 
+  // EquityPanel chart = the account's broker curve (real broker money for
+  // sinopac, or mock-with-live-PnL for the mock account). Per-portfolio
+  // paper equity stays on each PortfolioCard's header — never aggregated
+  // into this top chart, so paper sandboxes can't pollute the account view.
   const _nonZeroEquityCurve = useMemo(() => {
-    return (activeAccountData?.equity_curve ?? []).filter((p: { equity: number }) => p.equity > 0);
+    return (activeAccountData?.equity_curve ?? []).filter(
+      (p: { equity: number }) => p.equity > 0,
+    );
   }, [activeAccountData?.equity_curve]);
 
   const equityCurve = useMemo(() => {
@@ -467,24 +505,36 @@ export function WarRoomLayout() {
     );
   }, [_nonZeroEquityCurve]);
 
-  // Progressive bar reveal during playback: show warmup bars (before range start)
-  // plus bars up to the virtual clock. This mimics a live market feed.
-  // Uses a count-based approach so the array reference only changes when new
-  // bars enter the visible window, not on every playback tick.
+  // Progressive bar reveal during playback: show bars up to the virtual clock.
+  // Updated via a store subscription (not a render-level selector) so the
+  // heavyweight WarRoomLayout tree only re-renders when new bars actually
+  // enter the visible window, NOT on every 100ms playback tick.
   const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
-  const visibleBarCount = useMemo(() => {
-    if (!playbackEnabled || virtualClockMs === null) return marketBars.length;
-    let count = 0;
-    for (const bar of marketBars) {
-      const barMs = parseTimestampMs(bar.timestamp) - TAIPEI_OFFSET_MS;
-      if (barMs > virtualClockMs) break;
-      count++;
+  const [visibleBarCount, setVisibleBarCount] = useState(marketBars.length);
+  const barsRef = useRef(marketBars);
+  barsRef.current = marketBars;
+  useEffect(() => {
+    if (!playbackEnabled) {
+      setVisibleBarCount(barsRef.current.length);
+      return;
     }
-    // If count is 0 but bars exist, the loaded bars don't overlap the
-    // playback clock yet (e.g. recent bars while clock is in the past,
-    // pending a full-range reload). Show all bars rather than "Loading...".
-    return count > 0 ? count : marketBars.length;
-  }, [marketBars, playbackEnabled, virtualClockMs]);
+    const computeCount = (clockMs: number | null) => {
+      const bars = barsRef.current;
+      if (clockMs === null) return bars.length;
+      let count = 0;
+      for (const bar of bars) {
+        const barMs = parseTimestampMs(bar.timestamp) - TAIPEI_OFFSET_MS;
+        if (barMs > clockMs) break;
+        count++;
+      }
+      return count > 0 ? count : bars.length;
+    };
+    setVisibleBarCount(computeCount(usePlaybackStore.getState().virtualClockMs));
+    return usePlaybackStore.subscribe((s) => {
+      const newCount = computeCount(s.virtualClockMs);
+      setVisibleBarCount((prev) => prev === newCount ? prev : newCount);
+    });
+  }, [playbackEnabled, marketBars]);
   const visibleBars = useMemo(
     () => visibleBarCount === marketBars.length ? marketBars : marketBars.slice(0, visibleBarCount),
     [marketBars, visibleBarCount],
@@ -617,6 +667,7 @@ export function WarRoomLayout() {
               <StrategyBindings
                 accountId={activeAccountId}
                 bindings={accountBindings}
+                accountSandbox={activeAccountData?.sandbox_mode}
                 onUpdate={poll}
                 compact
               />
@@ -625,7 +676,13 @@ export function WarRoomLayout() {
 
           {/* Session Grid */}
           <div className="flex-1 min-h-0 overflow-y-auto">
-            <SessionGrid sessions={sessions} bindings={accountBindings} accountId={activeAccountId ?? undefined} onAction={poll} />
+            <SessionGrid
+              sessions={sessions}
+              bindings={accountBindings}
+              accountId={activeAccountId ?? undefined}
+              portfolioEquityCurves={(data as unknown as { portfolio_equity_curves?: Record<string, { timestamp: string; equity: number }[]> })?.portfolio_equity_curves}
+              onAction={poll}
+            />
           </div>
 
           {/* Risk Guards merged into Row 2 stats bar */}

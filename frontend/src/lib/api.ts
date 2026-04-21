@@ -122,7 +122,6 @@ export interface AccountInfo {
   strategies: Record<string, unknown>[];
   credential_status?: Record<string, boolean>;
   sandbox_mode?: boolean;
-  demo_trading?: boolean;
 }
 
 export interface CrawlStatus {
@@ -491,6 +490,8 @@ export interface SettlementInfo {
   }>;
 }
 
+export interface PortfolioEquityCurvePoint { timestamp: string; equity: number }
+
 export interface WarRoomData {
   accounts: Record<string, {
     display_name: string;
@@ -498,7 +499,7 @@ export interface WarRoomData {
     sandbox_mode?: boolean;
     connected: boolean;
     connect_error?: string | null;
-    equity: number;
+    equity: number | null;
     margin_used: number;
     margin_available: number;
     positions?: AccountPosition[];
@@ -506,6 +507,7 @@ export interface WarRoomData {
     equity_curve?: { timestamp: string; equity: number }[];
   }>;
   all_sessions: WarRoomSession[];
+  portfolio_equity_curves?: Record<string, PortfolioEquityCurvePoint[]>;
   settlement?: SettlementInfo;
   fetched_at?: string;
 }
@@ -766,6 +768,7 @@ export interface LivePortfolio {
   name: string;
   account_id: string;
   mode: "paper" | "live";
+  initial_equity?: number | null;
   created_at: string;
   updated_at: string;
   members?: LivePortfolioMember[];
@@ -783,12 +786,46 @@ export async function createLivePortfolio(
   name: string,
   accountId: string,
   mode: "paper" | "live" = "paper",
+  initialEquity?: number | null,
 ): Promise<LivePortfolio> {
+  const body: Record<string, unknown> = { name, account_id: accountId, mode };
+  if (initialEquity != null && initialEquity > 0) body.initial_equity = initialEquity;
   return fetchJSON("/api/live-portfolios", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, account_id: accountId, mode }),
+    body: JSON.stringify(body),
   });
+}
+
+export interface ResetPortfolioEquityResponse {
+  status: string;
+  portfolio_id: string;
+  new_equity: number;
+  runners_reset: number;
+  timestamp: string;
+}
+
+export async function resetPortfolioEquity(
+  portfolioId: string,
+): Promise<ResetPortfolioEquityResponse> {
+  return fetchJSON(
+    `/api/paper-trade/reset-portfolio-equity?portfolio_id=${encodeURIComponent(portfolioId)}`,
+    { method: "POST" },
+  );
+}
+
+export async function updatePortfolioInitialEquity(
+  portfolioId: string,
+  initialEquity: number,
+): Promise<LivePortfolio> {
+  return fetchJSON(
+    `/api/live-portfolios/${encodeURIComponent(portfolioId)}/initial-equity`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initial_equity: initialEquity }),
+    },
+  );
 }
 
 export async function attachMemberToPortfolio(

@@ -86,9 +86,11 @@ export const EquityCurveChart = React.memo(forwardRef<EquityCurveChartHandle, Eq
   // Effect 1: Create chart once (deps: [height])
   useEffect(() => {
     if (!containerRef.current) return;
+    const w = containerRef.current.clientWidth;
+    if (w <= 0 || height <= 0) return;
 
     const chart = createChart(containerRef.current, {
-      width: containerRef.current.clientWidth,
+      width: w,
       height,
       layout: {
         background: { color: colors.card },

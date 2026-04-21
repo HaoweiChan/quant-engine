@@ -35,20 +35,18 @@ interface PlaybackBarProps {
 }
 
 export function PlaybackBar({ isMockAccount, initializing }: PlaybackBarProps) {
-  const {
-    enabled,
-    isPlaying,
-    speedX,
-    virtualClockMs,
-    rangeStartMs,
-    rangeEndMs,
-    setEnabled,
-    setRange,
-    play,
-    pause,
-    setSpeed,
-    jumpTo,
-  } = usePlaybackStore();
+  const enabled = usePlaybackStore((s) => s.enabled);
+  const isPlaying = usePlaybackStore((s) => s.isPlaying);
+  const speedX = usePlaybackStore((s) => s.speedX);
+  const virtualClockMs = usePlaybackStore((s) => s.virtualClockMs);
+  const rangeStartMs = usePlaybackStore((s) => s.rangeStartMs);
+  const rangeEndMs = usePlaybackStore((s) => s.rangeEndMs);
+  const setEnabled = usePlaybackStore((s) => s.setEnabled);
+  const setRange = usePlaybackStore((s) => s.setRange);
+  const play = usePlaybackStore((s) => s.play);
+  const pause = usePlaybackStore((s) => s.pause);
+  const setSpeed = usePlaybackStore((s) => s.setSpeed);
+  const jumpTo = usePlaybackStore((s) => s.jumpTo);
 
   if (!isMockAccount) return null;
 

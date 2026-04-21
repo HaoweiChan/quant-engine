@@ -7,7 +7,7 @@ import type { HeartbeatResponse } from "@/lib/api";
 interface AccountData {
   display_name: string;
   broker: string;
-  equity: number;
+  equity: number | null;
   connected: boolean;
   sandbox_mode: boolean;
   margin_used: number;
@@ -65,6 +65,12 @@ export function AccountStrip({ accounts }: AccountStripProps) {
         const isSelected = activeAccountId === id;
         const lat = latencyMap.get(id);
         const latMs = lat !== undefined ? lat : null;
+        // Top chip = the real broker money. We always render the value when
+        // the backend has one (live snapshot for connected brokers, last
+        // persisted snapshot during transient disconnects, GBM-seeded curve
+        // for mock accounts). Only when there is no value at all do we
+        // hide the equity span.
+        const showEquity = info.equity != null;
         return (
           <button
             key={id}
@@ -84,20 +90,11 @@ export function AccountStrip({ accounts }: AccountStripProps) {
             <span className="text-[11px]" style={{ color: isSelected ? colors.text : colors.muted }}>
               {info.display_name || id}
             </span>
-            <span
-              className="font-bold px-1 rounded"
-              style={{
-                fontSize: 9,
-                lineHeight: "14px",
-                background: info.sandbox_mode ? "#8B6914" : "#166534",
-                color: "#fff",
-              }}
-            >
-              {info.sandbox_mode ? "PAPER" : "LIVE"}
-            </span>
-            <span className="text-[11px] font-semibold" style={{ color: colors.green }}>
-              ${info.equity.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-            </span>
+            {showEquity && (
+              <span className="text-[11px] font-semibold" style={{ color: colors.green }}>
+                ${(info.equity as number).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </span>
+            )}
             <span className="text-[11px]" style={{ color: latencyColor(latMs) }}>
               {latMs !== null ? `${latMs}ms` : "—"}
             </span>

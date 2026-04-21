@@ -76,7 +76,10 @@ export function EquityPanel({ equityCurve, equityTimestamps, sessions, accountLa
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setChartHeight(el.clientHeight));
+    const ro = new ResizeObserver(() => {
+      const h = el.clientHeight;
+      if (h > 0) setChartHeight(h);
+    });
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
@@ -117,21 +120,23 @@ export function EquityPanel({ equityCurve, equityTimestamps, sessions, accountLa
           </svg>
         </button>
       </div>
-      <div ref={containerRef} className="p-2 flex-1 min-h-0">
-        {equityCurve.length > 0 ? (
-          <EquityCurveChart
-            ref={chartRef}
-            equity={equityCurve}
-            timestamps={equityTimestamps}
-            height={chartHeight}
-            visibleRange={visibleRange}
-            playbackActive={playbackActive}
-          />
-        ) : (
-          <div className="text-[11px] py-4 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
-            No equity data yet.
-          </div>
-        )}
+      <div className="flex-1 min-h-0">
+        <div ref={containerRef} className="h-full">
+          {equityCurve.length > 0 ? (
+            <EquityCurveChart
+              ref={chartRef}
+              equity={equityCurve}
+              timestamps={equityTimestamps}
+              height={chartHeight}
+              visibleRange={visibleRange}
+              playbackActive={playbackActive}
+            />
+          ) : (
+            <div className="text-[11px] py-4 text-center" style={{ color: colors.dim, fontFamily: "var(--font-mono)" }}>
+              No equity data yet.
+            </div>
+          )}
+        </div>
       </div>
       {activeSessions.length > 0 && (
         <div className="px-2 pb-2 border-t" style={{ borderColor: colors.cardBorder }}>

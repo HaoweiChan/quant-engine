@@ -10,6 +10,10 @@ interface SessionGridProps {
   sessions: WarRoomSession[];
   bindings?: { slug: string; symbol: string }[];
   accountId?: string;
+  /** Per-portfolio equity history from /api/war-room. Used to surface the
+   *  latest equity for each portfolio chip without round-tripping the
+   *  member runners. */
+  portfolioEquityCurves?: Record<string, { timestamp: string; equity: number }[]>;
   onAction: () => void;
 }
 
@@ -30,7 +34,9 @@ function groupByPortfolio(
 interface SummaryRow {
   key: string;
   label: string;
-  sharePct: number;
+  /** Numeric % to show, or `null` to render `—` (paper portfolios are
+   *  sandbox bubbles — they don't own a slice of real account money). */
+  sharePct: number | null;
   accent: string;
   tone: "portfolio" | "adhoc";
 }
@@ -80,9 +86,10 @@ function PortfolioAllocationSummary({ rows }: { rows: SummaryRow[] }) {
           </div>
           <span
             className="shrink-0 font-semibold"
-            style={{ color: colors.blue }}
+            style={{ color: r.sharePct == null ? colors.dim : colors.blue }}
+            title={r.sharePct == null ? "Paper portfolio — no allocation of real money" : undefined}
           >
-            {r.sharePct}%
+            {r.sharePct == null ? "—" : `${r.sharePct}%`}
           </span>
         </div>
       ))}
@@ -90,7 +97,7 @@ function PortfolioAllocationSummary({ rows }: { rows: SummaryRow[] }) {
   );
 }
 
-export function SessionGrid({ sessions, bindings, accountId, onAction }: SessionGridProps) {
+export function SessionGrid({ sessions, bindings, accountId, portfolioEquityCurves, onAction }: SessionGridProps) {
   const [portfolios, setPortfolios] = useState<LivePortfolio[]>([]);
 
   // Fetch portfolio metadata alongside the war-room poll so the group header
@@ -145,7 +152,9 @@ export function SessionGrid({ sessions, bindings, accountId, onAction }: Session
       rows.push({
         key: `pf:${pid}`,
         label: p?.name ?? `Portfolio ${pid.slice(0, 8)}…`,
-        sharePct,
+        // Paper portfolios are sandbox bubbles → don't claim a slice of
+        // the real account's money. Show "—" via the null sentinel.
+        sharePct: p?.mode === "live" ? sharePct : null,
         accent: p?.mode === "live" ? colors.red : colors.gold,
         tone: "portfolio",
       });
@@ -175,6 +184,10 @@ export function SessionGrid({ sessions, bindings, accountId, onAction }: Session
       {groupedEntries.map(([portfolioId, members]) => {
         const portfolio = portfolioId ? portfolioById.get(portfolioId) : null;
         if (portfolio && accountId) {
+          const curve = portfolioId ? portfolioEquityCurves?.[portfolioId] : undefined;
+          const currentEquity = curve && curve.length > 0
+            ? curve[curve.length - 1].equity
+            : null;
           return (
             <PortfolioCard
               key={portfolioId ?? "pf"}
@@ -182,6 +195,7 @@ export function SessionGrid({ sessions, bindings, accountId, onAction }: Session
               members={members}
               accountId={accountId}
               bindings={bindings ?? []}
+              currentEquity={currentEquity}
               onAction={onAction}
             >
               {members.map((s) => (

@@ -36,3 +36,67 @@ export class ChartErrorBoundary extends Component<Props, State> {
     return this.props.children;
   }
 }
+
+export class AppErrorBoundary extends Component<Props, State> {
+  state: State = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            minHeight: "100vh",
+            background: colors.bg,
+            color: colors.text,
+            fontFamily: "var(--font-mono)",
+            gap: 16,
+          }}
+        >
+          <div style={{ fontSize: 14, color: colors.red }}>
+            Something went wrong
+          </div>
+          <div style={{ fontSize: 11, color: colors.dim, maxWidth: 500, textAlign: "center" }}>
+            {this.state.error.message}
+          </div>
+          <button
+            onClick={() => this.setState({ error: null })}
+            style={{
+              padding: "8px 20px",
+              fontSize: 12,
+              border: `1px solid ${colors.cardBorder}`,
+              borderRadius: 4,
+              background: colors.card,
+              color: colors.text,
+              cursor: "pointer",
+            }}
+          >
+            Try Again
+          </button>
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              padding: "8px 20px",
+              fontSize: 12,
+              border: `1px solid ${colors.cardBorder}`,
+              borderRadius: 4,
+              background: "transparent",
+              color: colors.dim,
+              cursor: "pointer",
+            }}
+          >
+            Reload Page
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}

@@ -1,11 +1,13 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { colors } from "@/lib/theme";
 import {
   deleteLivePortfolio,
   detachMemberFromPortfolio,
+  resetPortfolioEquity,
   startSession,
   stopSession,
   updateAccountStrategies,
+  updatePortfolioInitialEquity,
 } from "@/lib/api";
 import type { LivePortfolio, WarRoomSession } from "@/lib/api";
 import { AllocationSlider } from "./AllocationSlider";
@@ -16,12 +18,14 @@ interface PortfolioCardProps {
   accountId: string;
   /** Current account bindings — needed to compute the post-remove binding list. */
   bindings: { slug: string; symbol: string }[];
+  /** Latest aggregated equity for this portfolio (sum of member runner equities). */
+  currentEquity?: number | null;
   onAction: () => void;
   /** Member SessionCards rendered inside the card body. */
   children?: ReactNode;
 }
 
-type BusyKind = "toggle" | "remove" | null;
+type BusyKind = "toggle" | "remove" | "reset" | null;
 
 function ConfirmDialog({
   open, title, message, onConfirm, onCancel,
@@ -80,12 +84,39 @@ export function PortfolioCard({
   members,
   accountId,
   bindings,
+  currentEquity,
   onAction,
   children,
 }: PortfolioCardProps) {
   const [busy, setBusy] = useState<BusyKind>(null);
   const [error, setError] = useState<string | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  // Local draft for the editable Init $ input. Synced from props when the
+  // server-side value changes (e.g. after a successful commit or refetch).
+  const [initDraft, setInitDraft] = useState<string>(
+    portfolio.initial_equity != null ? String(portfolio.initial_equity) : "",
+  );
+  const [savingInit, setSavingInit] = useState(false);
+  useEffect(() => {
+    setInitDraft(portfolio.initial_equity != null ? String(portfolio.initial_equity) : "");
+  }, [portfolio.initial_equity]);
+
+  const commitInitialEquity = async () => {
+    const parsed = Number(initDraft);
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+    if (parsed === portfolio.initial_equity) return;
+    setSavingInit(true);
+    setError(null);
+    try {
+      await updatePortfolioInitialEquity(portfolio.portfolio_id, parsed);
+      onAction();
+    } catch (e) {
+      setError(`init equity: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSavingInit(false);
+    }
+  };
 
   const anyRunning = members.some(
     (m) => m.status === "active" || m.status === "paused",
@@ -122,6 +153,21 @@ export function PortfolioCard({
   };
 
   const handleRemove = () => setShowConfirm(true);
+  const handleReset = () => setShowResetConfirm(true);
+
+  const executeReset = async () => {
+    setShowResetConfirm(false);
+    setBusy("reset");
+    setError(null);
+    try {
+      await resetPortfolioEquity(portfolio.portfolio_id);
+    } catch (e) {
+      setError(`reset: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(null);
+      onAction();
+    }
+  };
 
   const executeRemove = async () => {
     setShowConfirm(false);
@@ -198,6 +244,13 @@ export function PortfolioCard({
       onConfirm={executeRemove}
       onCancel={() => setShowConfirm(false)}
     />
+    <ConfirmDialog
+      open={showResetConfirm}
+      title={`Reset paper equity for "${portfolio.name}"?`}
+      message={`Wipes this portfolio's equity history and re-anchors each member runner's budget to ${portfolio.initial_equity != null ? `$${portfolio.initial_equity.toLocaleString()}` : "the portfolio's seed equity"}. The other portfolios on this account are not touched.`}
+      onConfirm={executeReset}
+      onCancel={() => setShowResetConfirm(false)}
+    />
     <div
       className="flex flex-col rounded overflow-hidden"
       style={{
@@ -207,7 +260,9 @@ export function PortfolioCard({
         fontFamily: "var(--font-mono)",
       }}
     >
-      {/* Header: mode chip + name + count + × */}
+      {/* Row 1 (always): mode chip · name · members count · current equity · ×.
+          Action controls (INIT $ / RESET) live on Row 2 so they cannot push
+          × past the parent's overflow:hidden boundary in narrow sidebars. */}
       <div
         className="flex items-center gap-2 px-2 py-1.5"
         style={{ borderBottom: `1px solid ${accent}25` }}
@@ -236,6 +291,15 @@ export function PortfolioCard({
         >
           {members.length}
         </span>
+        {currentEquity != null && (
+          <span
+            className="text-[10px] tabular-nums shrink-0"
+            style={{ color: colors.green }}
+            title="Latest aggregated portfolio equity"
+          >
+            ${currentEquity.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+          </span>
+        )}
         <button
           onClick={handleRemove}
           disabled={isBusy}
@@ -249,6 +313,65 @@ export function PortfolioCard({
           ×
         </button>
       </div>
+
+      {/* Row 2 (paper only): INIT $ input · RESET. Live portfolios get no
+          row-2 chrome — they're driven by the broker, not a chosen seed. */}
+      {portfolio.mode === "paper" && (
+        <div
+          className="flex items-center gap-2 px-2 py-1"
+          style={{ borderBottom: `1px solid ${accent}20` }}
+        >
+          <span
+            className="flex items-center gap-1 flex-1 min-w-0"
+            title="Initial paper equity used to seed this portfolio's curve. Edit and commit to persist; press RESET to wipe history at the new value."
+          >
+            <span className="text-[9px] tracking-wider shrink-0" style={{ color: colors.dim }}>INIT $</span>
+            <input
+              type="number"
+              min={0}
+              step={1000}
+              value={initDraft}
+              placeholder="set seed"
+              disabled={isBusy || savingInit}
+              onChange={(e) => setInitDraft(e.target.value)}
+              onBlur={() => void commitInitialEquity()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                if (e.key === "Escape") {
+                  setInitDraft(portfolio.initial_equity != null ? String(portfolio.initial_equity) : "");
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+              className="text-[10px] tabular-nums px-1 py-0 rounded outline-none flex-1 min-w-0"
+              style={{
+                background: colors.card,
+                color: colors.text,
+                border: `1px solid ${colors.cardBorder}`,
+                fontFamily: "var(--font-mono)",
+              }}
+            />
+            {savingInit && <span className="text-[9px] shrink-0" style={{ color: colors.dim }}>…</span>}
+          </span>
+          <button
+            onClick={handleReset}
+            disabled={isBusy || !portfolio.initial_equity}
+            className="text-[9px] font-bold px-1.5 py-0.5 rounded cursor-pointer border-none shrink-0 tracking-wider"
+            style={{
+              background: "rgba(139,105,20,0.25)",
+              color: busy === "reset" ? colors.dim : "#D4A017",
+              opacity: isBusy || !portfolio.initial_equity ? 0.4 : 1,
+              fontFamily: "var(--font-mono)",
+            }}
+            title={
+              portfolio.initial_equity
+                ? `Reset paper equity to $${portfolio.initial_equity.toLocaleString()}`
+                : "Set initial_equity on this portfolio to enable reset"
+            }
+          >
+            {busy === "reset" ? "…" : "RESET"}
+          </button>
+        </div>
+      )}
 
       {/* Toggle: START ALL ↔ STOP ALL */}
       <div className="px-2 py-1">
@@ -276,10 +399,26 @@ export function PortfolioCard({
         </div>
       )}
 
-      {/* Detailed allocation editor (scoped to this portfolio's members) */}
-      {members.length >= 2 && (
+      {/* Detailed allocation editor: live portfolios only, read-only.
+          Paper portfolios are sandbox bubbles — no real money to carve up,
+          so we render `Allocation: —` instead of the slider. */}
+      {portfolio.mode === "live" && members.length >= 2 && (
         <div className="px-2 pb-2">
-          <AllocationSlider sessions={members} onCommit={onAction} />
+          <AllocationSlider sessions={members} onCommit={onAction} readOnly />
+        </div>
+      )}
+      {portfolio.mode === "paper" && members.length >= 2 && (
+        <div
+          className="mx-2 mb-2 text-[11px] px-2 py-1.5 rounded"
+          style={{
+            background: colors.card,
+            border: `1px solid ${colors.cardBorder}`,
+            color: colors.muted,
+            fontFamily: "var(--font-mono)",
+          }}
+          title="Paper portfolio — no allocation of real money"
+        >
+          Allocation: —
         </div>
       )}
 

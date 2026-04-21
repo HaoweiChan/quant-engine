@@ -101,14 +101,16 @@ export const ChartStack = forwardRef<ChartStackHandle, ChartStackProps>(function
   // Track container height for responsive chart sizing
   const [containerHeight, setContainerHeight] = useState<number | null>(null);
 
-  // Observe container size changes
+  // Observe container size changes (skip zero-height from hidden tabs)
   useEffect(() => {
     const container = chartCardRef.current;
     if (!container) return;
 
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        setContainerHeight(entry.contentRect.height);
+        if (entry.contentRect.height > 0) {
+          setContainerHeight(entry.contentRect.height);
+        }
       }
     });
     observer.observe(container);
@@ -238,29 +240,43 @@ export const ChartStack = forwardRef<ChartStackHandle, ChartStackProps>(function
       const z = /(?:Z|[+-]\d{2}:\d{2})$/i.test(n) ? n : `${n}Z`;
       return Math.floor(new Date(z).getTime() / 1000);
     });
-    return signals
-      .map((s) => {
-        const n = s.timestamp.includes("T") ? s.timestamp : s.timestamp.replace(" ", "T");
-        const z = /(?:Z|[+-]\d{2}:\d{2})$/i.test(n) ? n : `${n}Z`;
-        const sigTime = Math.floor(new Date(z).getTime() / 1000);
-        let bestIdx = 0;
-        let bestDiff = Math.abs(sigTime - barEpochs[0]);
-        for (let i = 1; i < barEpochs.length; i++) {
-          const diff = Math.abs(sigTime - barEpochs[i]);
-          if (diff < bestDiff) { bestIdx = i; bestDiff = diff; }
-          if (barEpochs[i] > sigTime && diff > bestDiff) break;
-        }
-        const isBuy = s.side === "buy";
-        const qty = s.lots > 0 ? s.lots : 1;
+    // Map each signal to its nearest bar, then aggregate by (time, side, slug)
+    const raw = signals.map((s) => {
+      const n = s.timestamp.includes("T") ? s.timestamp : s.timestamp.replace(" ", "T");
+      const z = /(?:Z|[+-]\d{2}:\d{2})$/i.test(n) ? n : `${n}Z`;
+      const sigTime = Math.floor(new Date(z).getTime() / 1000);
+      let bestIdx = 0;
+      let bestDiff = Math.abs(sigTime - barEpochs[0]);
+      for (let i = 1; i < barEpochs.length; i++) {
+        const diff = Math.abs(sigTime - barEpochs[i]);
+        if (diff < bestDiff) { bestIdx = i; bestDiff = diff; }
+        if (barEpochs[i] > sigTime && diff > bestDiff) break;
+      }
+      return { time: times[bestIdx], side: s.side, qty: s.lots > 0 ? s.lots : 1, slug: s.strategy_slug };
+    });
+    // Aggregate: same bar + same side + same strategy → sum quantities
+    const agg = new Map<string, { time: number; side: string; qty: number; slug: string | undefined }>();
+    for (const r of raw) {
+      const key = `${r.time}:${r.side}:${r.slug ?? ""}`;
+      const existing = agg.get(key);
+      if (existing) {
+        existing.qty += r.qty;
+      } else {
+        agg.set(key, { ...r });
+      }
+    }
+    return [...agg.values()]
+      .map((m) => {
+        const isBuy = m.side === "buy";
         return {
-          time: times[bestIdx],
+          time: m.time,
           position: isBuy ? "belowBar" as const : "aboveBar" as const,
           color: isBuy ? "#26a69a" : "#ef5350",
           shape: "square" as const,
           size: 2,
-          text: `${isBuy ? "B" : "S"}${qty}`,
-          strategyColor: slugColorMap.get(s.strategy_slug ?? ""),
-          _slug: s.strategy_slug,
+          text: `${isBuy ? "B" : "S"}${m.qty}`,
+          strategyColor: slugColorMap.get(m.slug ?? ""),
+          _slug: m.slug,
         };
       })
       .sort((a, b) => a.time - b.time);

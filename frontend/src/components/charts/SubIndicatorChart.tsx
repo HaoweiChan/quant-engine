@@ -37,7 +37,7 @@ export function SubIndicatorChart({
 
   // Create chart once
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!containerRef.current || containerRef.current.clientWidth <= 0) return;
     const chart = createChart(containerRef.current, {
       layout: {
         background: { color: colors.card },

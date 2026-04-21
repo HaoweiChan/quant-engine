@@ -19,7 +19,7 @@ export function AccountModal({ initial, onClose, onSaved }: {
   const cred = initial?.credential_status;
   const [broker, setBroker] = useState(initial?.broker ?? "mock");
   const [displayName, setDisplayName] = useState(initial?.display_name ?? "");
-  const [paperTrading, setPaperTrading] = useState(initial?.sandbox_mode || initial?.demo_trading || false);
+  const [paperTrading, setPaperTrading] = useState(initial?.sandbox_mode || false);
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [password, setPassword] = useState("");
@@ -38,7 +38,6 @@ export function AccountModal({ initial, onClose, onSaved }: {
         broker,
         display_name: displayName || `${broker.charAt(0).toUpperCase() + broker.slice(1)} Account`,
         sandbox_mode: paperTrading,
-        demo_trading: paperTrading,
         api_key: apiKey || undefined,
         api_secret: apiSecret || undefined,
         password: password || undefined,
