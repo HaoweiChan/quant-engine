@@ -7,9 +7,11 @@ the source of truth for mode when a session is bound — see
 `src.trading_session.mode_resolver.resolve_session_mode` for the
 precedence ladder.
 
-The portfolio is a grouping + mode-binding abstraction, not a capital
-pool: the per-account `equity_share <= 1.0` invariant stays in
-SessionManager and is unaffected by portfolio membership.
+Paper portfolios additionally own an ``initial_equity`` value: the
+seed capital the user chose when creating the portfolio. The live
+pipeline divides this across the portfolio's runners (per
+``equity_share``) so paper equity is **per-portfolio**, not summed
+across the whole account.
 """
 from __future__ import annotations
 
@@ -31,16 +33,25 @@ ExecutionMode = Literal["paper", "live"]
 
 _PORTFOLIO_SCHEMA = """
 CREATE TABLE IF NOT EXISTS live_portfolios (
-    portfolio_id TEXT PRIMARY KEY,
-    name         TEXT NOT NULL,
-    account_id   TEXT NOT NULL,
-    mode         TEXT NOT NULL CHECK (mode IN ('paper','live')),
-    created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
+    portfolio_id    TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    account_id      TEXT NOT NULL,
+    mode            TEXT NOT NULL CHECK (mode IN ('paper','live')),
+    initial_equity  REAL,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_live_portfolios_account
     ON live_portfolios(account_id);
 """
+
+
+def _ensure_initial_equity_column(conn: sqlite3.Connection) -> None:
+    """Idempotent migration adding ``initial_equity`` to legacy DBs."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(live_portfolios)").fetchall()}
+    if "initial_equity" not in cols:
+        conn.execute("ALTER TABLE live_portfolios ADD COLUMN initial_equity REAL")
+        conn.commit()
 
 
 @dataclass
@@ -51,10 +62,15 @@ class LivePortfolio:
     mode: ExecutionMode
     created_at: datetime
     updated_at: datetime
+    initial_equity: float | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in ("paper", "live"):
             raise ValueError(f"mode must be 'paper' or 'live', got {self.mode!r}")
+        if self.initial_equity is not None and self.initial_equity <= 0:
+            raise ValueError(
+                f"initial_equity must be positive, got {self.initial_equity!r}"
+            )
 
     @classmethod
     def create(
@@ -63,6 +79,7 @@ class LivePortfolio:
         account_id: str,
         mode: ExecutionMode = "paper",
         portfolio_id: str | None = None,
+        initial_equity: float | None = None,
     ) -> LivePortfolio:
         now = datetime.now(_TAIPEI_TZ)
         return cls(
@@ -72,6 +89,7 @@ class LivePortfolio:
             mode=mode,
             created_at=now,
             updated_at=now,
+            initial_equity=initial_equity,
         )
 
 
@@ -84,6 +102,7 @@ class LivePortfolioStore:
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_PORTFOLIO_SCHEMA)
+        _ensure_initial_equity_column(self._conn)
 
     def close(self) -> None:
         self._conn.close()
@@ -93,13 +112,14 @@ class LivePortfolioStore:
         portfolio.updated_at = datetime.now(_TAIPEI_TZ)
         self._conn.execute(
             """INSERT OR REPLACE INTO live_portfolios
-               (portfolio_id, name, account_id, mode, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (portfolio_id, name, account_id, mode, initial_equity, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 portfolio.portfolio_id,
                 portfolio.name,
                 portfolio.account_id,
                 portfolio.mode,
+                portfolio.initial_equity,
                 portfolio.created_at.isoformat(),
                 now,
             ),
@@ -150,6 +170,8 @@ class LivePortfolioStore:
 
     @staticmethod
     def _row_to_portfolio(row: sqlite3.Row) -> LivePortfolio:
+        keys = row.keys() if hasattr(row, "keys") else []
+        initial_equity = row["initial_equity"] if "initial_equity" in keys else None
         return LivePortfolio(
             portfolio_id=row["portfolio_id"],
             name=row["name"],
@@ -157,4 +179,5 @@ class LivePortfolioStore:
             mode=row["mode"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+            initial_equity=float(initial_equity) if initial_equity is not None else None,
         )

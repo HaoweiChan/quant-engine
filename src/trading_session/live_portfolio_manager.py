@@ -81,8 +81,14 @@ class LivePortfolioManager:
         name: str,
         account_id: str,
         mode: ExecutionMode = "paper",
+        initial_equity: float | None = None,
     ) -> LivePortfolio:
-        portfolio = LivePortfolio.create(name=name, account_id=account_id, mode=mode)
+        portfolio = LivePortfolio.create(
+            name=name,
+            account_id=account_id,
+            mode=mode,
+            initial_equity=initial_equity,
+        )
         self._store.save(portfolio)
         logger.info(
             "portfolio_created",
@@ -90,6 +96,7 @@ class LivePortfolioManager:
             name=name,
             account_id=account_id,
             mode=mode,
+            initial_equity=initial_equity,
         )
         return portfolio
 

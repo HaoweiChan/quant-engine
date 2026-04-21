@@ -32,6 +32,15 @@ CREATE TABLE IF NOT EXISTS account_equity_history (
     margin_used REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_acct_equity_ts ON account_equity_history(account_id, timestamp);
+CREATE TABLE IF NOT EXISTS portfolio_equity_history (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id TEXT NOT NULL,
+    timestamp    TEXT NOT NULL,
+    equity       REAL NOT NULL,
+    margin_used  REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_portfolio_equity_ts
+    ON portfolio_equity_history(portfolio_id, timestamp);
 CREATE TABLE IF NOT EXISTS live_fills (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp       TEXT NOT NULL,
@@ -200,6 +209,89 @@ class AccountEquityStore:
                 points,
             )
         return len(points)
+
+
+class PortfolioEquityStore:
+    """Records and retrieves per-portfolio equity snapshots over time.
+
+    Mirrors AccountEquityStore but keys by ``portfolio_id`` so paper-trading
+    portfolios each get an isolated curve. The account-level chip stays the
+    real broker money; only paper portfolios live here.
+    """
+
+    _MIN_INTERVAL_SECS: int = 60
+
+    def __init__(self, db_path: Path | None = None) -> None:
+        self._db_path = db_path or _DB_PATH
+        self._last_write: dict[str, float] = {}
+        self._ensure_schema()
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_schema(self) -> None:
+        with self._conn() as conn:
+            conn.executescript(_SCHEMA)
+
+    def record(
+        self,
+        portfolio_id: str,
+        equity: float,
+        margin_used: float = 0.0,
+    ) -> None:
+        import time
+        now = time.monotonic()
+        if now - self._last_write.get(portfolio_id, 0.0) < self._MIN_INTERVAL_SECS:
+            return
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO portfolio_equity_history "
+                "(portfolio_id, timestamp, equity, margin_used) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    portfolio_id,
+                    datetime.now(_TAIPEI_TZ).isoformat(),
+                    equity,
+                    margin_used,
+                ),
+            )
+        self._last_write[portfolio_id] = now
+
+    def get_equity_curve(
+        self, portfolio_id: str, days: int = 30
+    ) -> list[tuple[datetime, float]]:
+        cutoff = (datetime.now(_TAIPEI_TZ) - timedelta(days=days)).isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT timestamp, equity FROM portfolio_equity_history "
+                "WHERE portfolio_id = ? AND timestamp >= ? ORDER BY timestamp",
+                (portfolio_id, cutoff),
+            ).fetchall()
+        return [(datetime.fromisoformat(r["timestamp"]), r["equity"]) for r in rows]
+
+    def get_curves_for_account(
+        self, portfolio_ids: list[str], days: int = 30
+    ) -> dict[str, list[tuple[datetime, float]]]:
+        return {pid: self.get_equity_curve(pid, days) for pid in portfolio_ids}
+
+    def reset(self, portfolio_id: str, seed_equity: float | None = None) -> None:
+        """Wipe history for a portfolio and optionally seed a starting row."""
+        now_iso = datetime.now(_TAIPEI_TZ).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM portfolio_equity_history WHERE portfolio_id = ?",
+                (portfolio_id,),
+            )
+            if seed_equity is not None and seed_equity > 0:
+                conn.execute(
+                    "INSERT INTO portfolio_equity_history "
+                    "(portfolio_id, timestamp, equity, margin_used) "
+                    "VALUES (?, ?, ?, ?)",
+                    (portfolio_id, now_iso, float(seed_equity), 0.0),
+                )
+        self._last_write.pop(portfolio_id, None)
 
 
 class FillStore:
