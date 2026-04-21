@@ -30,20 +30,21 @@ PLAN = [
 def main() -> int:
     db = SessionDB()
     # Verify the paper account exists (we don't create it here — it's
-    # already seeded in trading.db with sandbox_mode=1 + demo_trading=1).
-    # Just sanity-check via a raw query against the same connection.
+    # already seeded in trading.db with sandbox_mode=1, which routes shioaji
+    # to its simulation server). ``demo_trading`` was dropped; sandbox_mode
+    # is now the single connection-mode flag.
     row = db._conn.execute(  # noqa: SLF001
-        "SELECT id, broker, sandbox_mode, demo_trading FROM accounts WHERE id = ?",
+        "SELECT id, broker, sandbox_mode FROM accounts WHERE id = ?",
         (PAPER_ACCOUNT,),
     ).fetchone()
     if row is None:
         print(f"ERROR: paper account {PAPER_ACCOUNT!r} not found in trading.db")
         print("Seed it first via the /api/accounts route or the CLI helper.")
         return 1
-    if not (row["sandbox_mode"] and row["demo_trading"]):
+    if not row["sandbox_mode"]:
         print(
-            f"ERROR: account {PAPER_ACCOUNT} is not in sandbox + demo mode"
-            f" (sandbox_mode={row['sandbox_mode']}, demo_trading={row['demo_trading']})"
+            f"ERROR: account {PAPER_ACCOUNT} is not in sandbox mode"
+            f" (sandbox_mode={row['sandbox_mode']})"
         )
         return 1
 

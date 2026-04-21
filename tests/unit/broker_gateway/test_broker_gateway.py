@@ -65,18 +65,23 @@ class TestAccountConfig:
             id="test-main", broker="sinopac",
             display_name="Test Account",
             gateway_class="src.broker_gateway.mock.MockGateway",
-            sandbox_mode=True, demo_trading=False,
+            sandbox_mode=True,
             guards={"max_drawdown_pct": 15.0, "max_margin_pct": 80.0},
             strategies=[{"slug": "atr_mean_reversion", "symbol": "TX"}],
         )
         row = config.to_db_row()
         assert row["id"] == "test-main"
         assert row["sandbox_mode"] == 1
-        assert row["demo_trading"] == 0
+        assert "demo_trading" not in row  # collapsed into sandbox_mode
         restored = AccountConfig.from_db_row(row)
         assert restored.id == config.id
         assert restored.broker == config.broker
         assert restored.sandbox_mode is True
+        # Legacy DBs may still have a demo_trading=1 row; ensure it folds
+        # into sandbox_mode on read so we don't lose intent.
+        legacy_row = {**row, "demo_trading": 1, "sandbox_mode": 0}
+        legacy_restored = AccountConfig.from_db_row(legacy_row)
+        assert legacy_restored.sandbox_mode is True
         assert restored.guards == config.guards
         assert restored.strategies == config.strategies
 
