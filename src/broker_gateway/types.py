@@ -89,8 +89,10 @@ class AccountConfig:
     broker: str
     display_name: str
     gateway_class: str
+    # ``True`` = connect to shioaji's simulation server (no real money);
+    # ``False`` = production. This is the only flag that controls broker
+    # routing — paper-vs-live execution is decided per-portfolio.
     sandbox_mode: bool = False
-    demo_trading: bool = False
     guards: dict[str, float] = field(default_factory=dict)
     strategies: list[dict[str, str]] = field(default_factory=list)
 
@@ -101,20 +103,21 @@ class AccountConfig:
             "display_name": self.display_name,
             "gateway_class": self.gateway_class,
             "sandbox_mode": int(self.sandbox_mode),
-            "demo_trading": int(self.demo_trading),
             "guards_json": json.dumps(self.guards),
             "strategies_json": json.dumps(self.strategies),
         }
 
     @classmethod
     def from_db_row(cls, row: dict) -> AccountConfig:
+        # ``demo_trading`` may still exist in legacy rows; collapse it into
+        # ``sandbox_mode`` so old data behaves the same as before the merge.
+        legacy_demo = bool(row.get("demo_trading", 0))
         return cls(
             id=row["id"],
             broker=row["broker"],
             display_name=row["display_name"],
             gateway_class=row["gateway_class"],
-            sandbox_mode=bool(row.get("sandbox_mode", 0)),
-            demo_trading=bool(row.get("demo_trading", 0)),
+            sandbox_mode=bool(row.get("sandbox_mode", 0)) or legacy_demo,
             guards=json.loads(row.get("guards_json", "{}")),
             strategies=json.loads(row.get("strategies_json", "[]")),
         )

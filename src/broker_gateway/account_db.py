@@ -15,11 +15,53 @@ CREATE TABLE IF NOT EXISTS accounts (
     display_name  TEXT NOT NULL,
     gateway_class TEXT NOT NULL,
     sandbox_mode  INTEGER NOT NULL DEFAULT 0,
-    demo_trading  INTEGER NOT NULL DEFAULT 0,
     guards_json   TEXT NOT NULL DEFAULT '{}',
     strategies_json TEXT NOT NULL DEFAULT '[]'
 );
 """
+
+
+def _migrate_drop_demo_trading(conn: sqlite3.Connection) -> None:
+    """Idempotent migration: collapse legacy ``demo_trading`` into ``sandbox_mode``.
+
+    Keeps the schema clean (single connection-mode flag) without losing the
+    intent of any existing row that had ``demo_trading=1`` but
+    ``sandbox_mode=0``.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(accounts)").fetchall()}
+    if "demo_trading" not in cols:
+        return
+    # Fold demo_trading=1 into sandbox_mode=1 for any rows that need it.
+    conn.execute(
+        "UPDATE accounts SET sandbox_mode = 1 "
+        "WHERE demo_trading = 1 AND sandbox_mode = 0",
+    )
+    try:
+        conn.execute("ALTER TABLE accounts DROP COLUMN demo_trading")
+    except sqlite3.OperationalError:
+        # SQLite < 3.35: rebuild the table.
+        conn.executescript(
+            """
+            CREATE TABLE accounts__new (
+                id            TEXT PRIMARY KEY,
+                broker        TEXT NOT NULL,
+                display_name  TEXT NOT NULL,
+                gateway_class TEXT NOT NULL,
+                sandbox_mode  INTEGER NOT NULL DEFAULT 0,
+                guards_json   TEXT NOT NULL DEFAULT '{}',
+                strategies_json TEXT NOT NULL DEFAULT '[]'
+            );
+            INSERT INTO accounts__new
+                (id, broker, display_name, gateway_class, sandbox_mode,
+                 guards_json, strategies_json)
+            SELECT id, broker, display_name, gateway_class, sandbox_mode,
+                   guards_json, strategies_json
+            FROM accounts;
+            DROP TABLE accounts;
+            ALTER TABLE accounts__new RENAME TO accounts;
+            """
+        )
+    conn.commit()
 
 
 class AccountDB:
@@ -37,14 +79,17 @@ class AccountDB:
     def _ensure_schema(self) -> None:
         with self._conn() as conn:
             conn.executescript(_SCHEMA)
+            _migrate_drop_demo_trading(conn)
 
     def save_account(self, config: AccountConfig) -> None:
         row = config.to_db_row()
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO accounts "
-                "(id, broker, display_name, gateway_class, sandbox_mode, demo_trading, guards_json, strategies_json) "
-                "VALUES (:id, :broker, :display_name, :gateway_class, :sandbox_mode, :demo_trading, :guards_json, :strategies_json)",
+                "(id, broker, display_name, gateway_class, sandbox_mode, "
+                "guards_json, strategies_json) "
+                "VALUES (:id, :broker, :display_name, :gateway_class, "
+                ":sandbox_mode, :guards_json, :strategies_json)",
                 row,
             )
 

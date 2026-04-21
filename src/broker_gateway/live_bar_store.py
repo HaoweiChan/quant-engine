@@ -70,6 +70,7 @@ class LiveMinuteBarStore:
                         close=current.close,
                         volume=current.volume,
                     )
+                    self._check_gap(symbol, current.timestamp, minute_ts)
                 current = MinuteBar(
                     timestamp=minute_ts,
                     open=price,
@@ -100,6 +101,22 @@ class LiveMinuteBarStore:
             or minute_of_day <= NIGHT_END_MIN
             or (DAY_START_MIN <= minute_of_day <= DAY_END_MIN)
         )
+
+    def _check_gap(self, symbol: str, prev_ts: datetime, new_ts: datetime) -> None:
+        """Detect and auto-repair gaps between consecutive bars."""
+        try:
+            from src.data.gap_repair import async_repair_gap, check_live_continuity
+            gap_min = check_live_continuity(symbol, prev_ts, new_ts)
+            if gap_min is not None:
+                import threading
+                threading.Thread(
+                    target=async_repair_gap,
+                    args=(symbol, prev_ts, new_ts),
+                    daemon=True,
+                    name=f"gap-repair-{symbol}",
+                ).start()
+        except Exception:
+            logger.exception("live_gap_check_error", symbol=symbol)
 
     def _upsert_locked(self, symbol: str, bar: MinuteBar) -> None:
         timestamp = bar.timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")

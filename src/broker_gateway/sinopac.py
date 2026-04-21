@@ -431,6 +431,137 @@ class SinopacGateway(BrokerGateway):
         # shioaji doesn't provide historical equity directly — delegate to snapshot store
         return []
 
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        order_type: str = "market",
+        price: float = 0.0,
+    ) -> dict[str, Any]:
+        """Place an order through the Shioaji API.
+
+        Args:
+            symbol: Contract group code (e.g. "TXF", "MXF", "TMF")
+            side: "buy" or "sell"
+            quantity: Number of lots
+            order_type: "market" or "limit"
+            price: Limit price (ignored for market orders)
+
+        Returns dict with order_id, status, and contract info.
+        """
+        _sj = _ensure_shioaji()
+        if not self._connected or not self._api:
+            raise RuntimeError("Gateway not connected")
+        group = getattr(self._api.Contracts.Futures, symbol, None)
+        if group is None:
+            raise ValueError(f"Unknown futures group: {symbol}")
+        candidates = [c for c in group if not getattr(c, "code", "").endswith(("R1", "R2"))]
+        if not candidates:
+            raise ValueError(f"No contracts found for {symbol}")
+        contract = min(candidates, key=lambda c: getattr(c, "delivery_date", "9999"))
+        action = _sj.constant.Action.Buy if side == "buy" else _sj.constant.Action.Sell
+        if order_type == "market":
+            sj_order = self._api.Order(
+                action=action,
+                price=0,
+                quantity=quantity,
+                price_type=_sj.constant.FuturesPriceType.MKT,
+                order_type=_sj.constant.OrderType.IOC,
+                octype=_sj.constant.FuturesOCType.Auto,
+                account=self._api.futopt_account,
+            )
+        else:
+            sj_order = self._api.Order(
+                action=action,
+                price=price,
+                quantity=quantity,
+                price_type=_sj.constant.FuturesPriceType.LMT,
+                order_type=_sj.constant.OrderType.ROD,
+                octype=_sj.constant.FuturesOCType.Auto,
+                account=self._api.futopt_account,
+            )
+        trade = self._api.place_order(contract, sj_order)
+        order_id = trade.order.id
+        status = str(trade.status.status)
+        code = getattr(contract, "code", "?")
+        logger.info(
+            "sinopac_order_placed",
+            order_id=order_id, symbol=symbol, code=code,
+            side=side, quantity=quantity, order_type=order_type,
+            price=price, status=status,
+        )
+        return {
+            "order_id": order_id,
+            "code": code,
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "order_type": order_type,
+            "price": price,
+            "status": status,
+        }
+
+    def poll_fills(self) -> list[dict[str, Any]]:
+        """Poll for new fills since the last check. Returns list of new fill dicts."""
+        if not self._connected or not self._api:
+            return []
+        try:
+            self._api.update_status(self._api.futopt_account)
+        except Exception as exc:
+            logger.debug("poll_fills_update_status_failed", error=str(exc))
+        try:
+            trades = self._api.list_trades()
+        except Exception as exc:
+            logger.debug("poll_fills_list_trades_failed", error=str(exc))
+            return []
+        if not hasattr(self, "_seen_deal_ids"):
+            self._seen_deal_ids: set[str] = set()
+        new_fills: list[dict[str, Any]] = []
+        for trade in trades:
+            status = getattr(trade, "status", None)
+            if not status:
+                continue
+            deals = getattr(status, "deals", [])
+            for deal in deals:
+                deal_seq = getattr(deal, "seq", None) or str(id(deal))
+                order_id = trade.order.id
+                deal_key = f"{order_id}:{deal_seq}"
+                if deal_key in self._seen_deal_ids:
+                    continue
+                self._seen_deal_ids.add(deal_key)
+                code = getattr(trade.contract, "code", "") or getattr(trade.order, "code", "")
+                action = str(getattr(trade.order, "action", ""))
+                fill = {
+                    "type": "fill",
+                    "order_id": order_id,
+                    "code": code,
+                    "symbol": self._code_to_db_symbol(code),
+                    "side": "buy" if "Buy" in action else "sell",
+                    "price": float(getattr(deal, "price", 0)),
+                    "quantity": int(getattr(deal, "quantity", 0)),
+                    "timestamp": time.time(),
+                    "source": "simulation" if getattr(self, "_simulation", False) else "live",
+                }
+                new_fills.append(fill)
+                logger.info(
+                    "poll_fills_new_deal",
+                    order_id=order_id, code=code,
+                    side=fill["side"], price=fill["price"],
+                    quantity=fill["quantity"],
+                )
+        return new_fills
+
+    @staticmethod
+    def _code_to_db_symbol(code: str) -> str:
+        if code.startswith("TXF"):
+            return "TX"
+        if code.startswith("MXF"):
+            return "MTX"
+        if code.startswith("TMF"):
+            return "TMF"
+        return code
+
     def get_order_events_since(self, cursor: str | None) -> tuple[list[OrderEvent], str | None]:
         try:
             trades = self._api.list_trades() if self._api else []

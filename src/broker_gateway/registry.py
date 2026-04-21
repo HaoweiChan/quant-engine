@@ -106,7 +106,7 @@ class GatewayRegistry:
     def _bg_connect(self, account_id: str, gateway: BrokerGateway) -> None:
         """Attempt gateway.connect() in a background thread (non-blocking)."""
         config = self._configs.get(account_id)
-        simulation = bool(config and (config.sandbox_mode or config.demo_trading))
+        simulation = bool(config and config.sandbox_mode)
         def _do_connect() -> None:
             try:
                 gateway.connect(account_id=account_id, simulation=simulation)  # type: ignore[call-arg]
