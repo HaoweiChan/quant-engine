@@ -1,11 +1,12 @@
 """Heartbeat endpoint — ping broker gateways and report latency."""
 from __future__ import annotations
 
+import threading
 import time
 
 from fastapi import APIRouter
 
-from src.api.helpers import get_gateway_registry, get_session_manager
+from src.api.helpers import get_gateway_registry, get_session_manager, get_subscriber_stats
 
 
 router = APIRouter(prefix="/api", tags=["heartbeat"])
@@ -31,8 +32,12 @@ async def heartbeat() -> dict:
             "connected": connected,
             "latency_ms": latency_ms,
         })
+    sub_stats = get_subscriber_stats()
+    sub_thread = next((t for t in threading.enumerate() if t.name == "market-data-subscriber"), None)
+    sub_stats["thread_alive"] = sub_thread.is_alive() if sub_thread else False
     return {
         "brokers": brokers,
         "halt_active": mgr.halt_active,
+        "market_data": sub_stats,
         "timestamp": time.time(),
     }

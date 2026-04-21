@@ -277,6 +277,81 @@ def reset_paper_equity(account_id: str = Query(...)):
     }
 
 
+@router.post("/reset-portfolio-equity")
+def reset_portfolio_equity(portfolio_id: str = Query(...)):
+    """Reset paper-trading equity for one portfolio to its ``initial_equity``.
+
+    Replaces the legacy account-level reset for the new per-portfolio model:
+
+      1. Look up the portfolio. Refuse if its mode is "live".
+      2. Wipe ``portfolio_equity_history`` rows for that portfolio.
+      3. Reset every runner whose session belongs to the portfolio: set
+         ``_equity_budget`` to ``initial_equity * equity_share`` and zero
+         realized/unrealized PnL.
+      4. Insert a single seed row at the portfolio's initial_equity.
+    """
+    from fastapi import HTTPException
+    import src.api.helpers as h
+
+    portfolio_mgr = h._live_portfolio_manager
+    if portfolio_mgr is None:
+        raise HTTPException(status_code=503, detail="Portfolio manager not initialized")
+    portfolio = portfolio_mgr.get_portfolio(portfolio_id)
+    if portfolio is None:
+        raise HTTPException(status_code=404, detail=f"Portfolio '{portfolio_id}' not found")
+    if portfolio.mode == "live":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Portfolio '{portfolio_id}' is in live mode; reset only "
+                "applies to paper portfolios."
+            ),
+        )
+    if not portfolio.initial_equity or portfolio.initial_equity <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Portfolio '{portfolio_id}' has no initial_equity set; "
+                "cannot reset to an unknown seed."
+            ),
+        )
+
+    seed_equity = float(portfolio.initial_equity)
+    portfolio_store = h._portfolio_equity_store
+    if portfolio_store is None:
+        raise HTTPException(status_code=503, detail="Portfolio equity store not initialized")
+    portfolio_store.reset(portfolio_id, seed_equity=seed_equity)
+
+    # Reset runner budgets for any active members of this portfolio.
+    runners_reset = 0
+    pipeline = h._live_pipeline
+    sm = h._session_manager
+    if pipeline is not None and sm is not None:
+        member_session_ids = {
+            s.session_id for s in sm.get_all_sessions()
+            if s.portfolio_id == portfolio_id
+        }
+        members = [
+            (sid, runner) for sid, runner in pipeline.iter_runners()
+            if sid in member_session_ids
+        ]
+        n = max(len(members), 1)
+        for sid, runner in members:
+            sess = sm.get_session(sid)
+            share = float(getattr(sess, "equity_share", 1.0 / n) or (1.0 / n))
+            runner._equity_budget = seed_equity * share
+            runner._realized_pnl = 0.0
+            runners_reset += 1
+
+    return {
+        "status": "ok",
+        "portfolio_id": portfolio_id,
+        "new_equity": seed_equity,
+        "runners_reset": runners_reset,
+        "timestamp": datetime.now(timezone(timedelta(hours=8))).isoformat(),
+    }
+
+
 @router.post("/test-telegram")
 async def test_telegram():
     """Send a test message to verify Telegram notification setup."""
