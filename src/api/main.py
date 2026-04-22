@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
+from src.pipeline.logging import setup_logging
 from src.api.routes import (
     accounts,
     admin_warroom,
@@ -47,6 +48,8 @@ _frontend_dist = Path(
     )
 ).resolve()
 _frontend_index = _frontend_dist / "index.html"
+
+setup_logging()
 
 def get_main_loop() -> asyncio.AbstractEventLoop | None:
     return _main_loop

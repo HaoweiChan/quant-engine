@@ -995,11 +995,21 @@ async def war_room(as_of: str | None = Query(None)) -> dict:
         ]
 
         # Direct-backtest engine takes priority over mock DB for mock-dev.
+        # When the caller is in playback mode (as_of is provided) we never
+        # want to leak the pre-seeded 1-year mock equity history into the UI
+        # — that was the "313d / 256d equity label" bug. If the engine isn't
+        # ready yet, return an empty playback view; the frontend will hide
+        # the chart or show a loading state rather than a ghost year of data.
         if acct_id == _MOCK_ACCOUNT_ID and use_engine and engine_state is not None:
             equity_val = float(engine_state["equity"]) or equity_val
             positions_block = engine_state["positions"]
             recent_fills_block = engine_state["recent_fills"]
             equity_curve_block = engine_state["equity_curve"]
+        elif acct_id == _MOCK_ACCOUNT_ID and as_of is not None:
+            equity_val = 0.0
+            positions_block = []
+            recent_fills_block = []
+            equity_curve_block = []
         elif acct_id == _MOCK_ACCOUNT_ID and mock_state is not None:
             equity_val = float(mock_state["equity"]) or equity_val
             positions_block = mock_state["positions"]

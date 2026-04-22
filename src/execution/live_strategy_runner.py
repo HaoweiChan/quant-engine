@@ -164,6 +164,8 @@ class LiveStrategyRunner:
         active_params = active.get("params", {}) or {}
         if not merged and active_source == "registry":
             merged = active_params
+        # Always pass session_id to the factory for DB-backed entry guards
+        merged["session_id"] = self.session_id
         pinned_hash = active.get("strategy_hash") if isinstance(active, dict) else None
         pinned_code = active.get("strategy_code") if isinstance(active, dict) else None
 
@@ -632,6 +634,16 @@ class LiveStrategyRunner:
                 continue
             self._fill_history.append(r)
             fill_pnl = 0.0
+
+            # Record entry guard for DB persistence (survives runner recreation)
+            if r.order.reason == "entry":
+                try:
+                    from src.trading_session.store import SnapshotStore
+                    store = SnapshotStore()
+                    store.record_entry_guard(self.session_id, self.strategy_slug)
+                except Exception as e:
+                    logger.warning("entry_guard_record_failed", session_id=self.session_id, error=str(e))
+
             if r.order.reason in ("exit", "stop", "stop_loss", "trail_stop", "trailing_stop",
                                    "session_close", "close", "circuit_breaker"):
                 # Calculate realized PnL using entry price from order metadata
@@ -655,6 +667,24 @@ class LiveStrategyRunner:
                 reason=r.order.reason,
                 realized_pnl=fill_pnl,
             )
+
+            # Log to activity log for portfolio/strategy tracking
+            try:
+                from src.trading_session.store import ActivityLogger
+                activity_logger = ActivityLogger()
+                activity_logger.log_trade(
+                    account_id=self.account_id,
+                    timestamp=snapshot.timestamp.isoformat(),
+                    portfolio_id=None,  # Could be populated from session context
+                    strategy_slug=self.strategy_slug,
+                    side=r.order.side,
+                    symbol=self.symbol,
+                    price=r.fill_price,
+                    quantity=r.fill_qty,
+                    reason=r.order.reason,
+                )
+            except Exception as e:
+                logger.debug("activity_log_trade_failed", error=str(e))
 
     async def _force_flat(self, bar: MinuteBar) -> list[ExecutionResult]:
         """Force-close all open positions at session boundary."""

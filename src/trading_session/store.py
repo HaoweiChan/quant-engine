@@ -58,6 +58,28 @@ CREATE TABLE IF NOT EXISTS live_fills (
     slippage_bps    REAL
 );
 CREATE INDEX IF NOT EXISTS idx_live_fills_acct_ts ON live_fills(account_id, timestamp);
+CREATE TABLE IF NOT EXISTS session_entry_guard (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    strategy_slug   TEXT NOT NULL,
+    timestamp_entered TEXT NOT NULL,
+    UNIQUE(session_id, strategy_slug)
+);
+CREATE INDEX IF NOT EXISTS idx_entry_guard_session ON session_entry_guard(session_id, strategy_slug);
+CREATE TABLE IF NOT EXISTS activity_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       TEXT NOT NULL,
+    account_id      TEXT NOT NULL,
+    portfolio_id    TEXT,
+    strategy_slug   TEXT,
+    event_type      TEXT NOT NULL,
+    description     TEXT,
+    payload         TEXT,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_activity_log_acct_ts ON activity_log(account_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_activity_log_portfolio ON activity_log(portfolio_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_activity_log_strategy ON activity_log(strategy_slug, timestamp);
 """
 
 
@@ -104,6 +126,28 @@ class SnapshotStore:
                 (session_id,),
             ).fetchone()
         return dict(row) if row else None
+
+    def has_entry_guard(self, session_id: str, strategy_slug: str) -> bool:
+        """Check if an entry guard exists for (session, strategy) pair."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM session_entry_guard WHERE session_id = ? AND strategy_slug = ? LIMIT 1",
+                (session_id, strategy_slug),
+            ).fetchone()
+        return row is not None
+
+    def record_entry_guard(self, session_id: str, strategy_slug: str) -> None:
+        """Record that a strategy has entered in this session (idempotent via UNIQUE constraint)."""
+        with self._conn() as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO session_entry_guard (session_id, strategy_slug, timestamp_entered) "
+                    "VALUES (?, ?, ?)",
+                    (session_id, strategy_slug, datetime.now(_TAIPEI_TZ).isoformat()),
+                )
+            except sqlite3.IntegrityError:
+                # Already recorded; this is fine (idempotent)
+                pass
 
 
 class AccountEquityStore:
@@ -369,3 +413,175 @@ class FillStore:
                 (account_id, since, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+
+class ActivityLogger:
+    """Logs portfolio/strategy activities (trades, notifications, events) with retention."""
+
+    def __init__(self, db_path: Path | None = None) -> None:
+        self._db_path = db_path or _DB_PATH
+        self._ensure_schema()
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self._db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_schema(self) -> None:
+        with self._conn() as conn:
+            conn.executescript(_SCHEMA)
+
+    def log_trade(
+        self,
+        account_id: str,
+        timestamp: str,
+        portfolio_id: str | None,
+        strategy_slug: str | None,
+        side: str,
+        symbol: str,
+        price: float,
+        quantity: int,
+        reason: str = "entry",
+    ) -> None:
+        """Log a trade execution."""
+        import json
+        payload = json.dumps({
+            "side": side,
+            "symbol": symbol,
+            "price": price,
+            "quantity": quantity,
+            "reason": reason,
+        })
+        description = f"{reason}: {side} {quantity} {symbol} @ {price}"
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO activity_log "
+                "(timestamp, account_id, portfolio_id, strategy_slug, event_type, description, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    timestamp,
+                    account_id,
+                    portfolio_id,
+                    strategy_slug,
+                    "trade",
+                    description,
+                    payload,
+                    datetime.now(_TAIPEI_TZ).isoformat(),
+                ),
+            )
+
+    def log_notification(
+        self,
+        account_id: str,
+        timestamp: str,
+        notification_type: str,
+        message: str,
+        portfolio_id: str | None = None,
+        strategy_slug: str | None = None,
+    ) -> None:
+        """Log a notification sent (Telegram, alert, etc)."""
+        import json
+        payload = json.dumps({
+            "type": notification_type,
+            "message": message[:500],  # Cap message length
+        })
+        description = f"{notification_type}: {message[:100]}"
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO activity_log "
+                "(timestamp, account_id, portfolio_id, strategy_slug, event_type, description, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    timestamp,
+                    account_id,
+                    portfolio_id,
+                    strategy_slug,
+                    "notification",
+                    description,
+                    payload,
+                    datetime.now(_TAIPEI_TZ).isoformat(),
+                ),
+            )
+
+    def log_risk_event(
+        self,
+        account_id: str,
+        timestamp: str,
+        event_type: str,
+        description: str,
+        strategy_slug: str | None = None,
+        portfolio_id: str | None = None,
+        details: dict | None = None,
+    ) -> None:
+        """Log a risk warning, rejection, or other system event."""
+        import json
+        payload = json.dumps(details or {})
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO activity_log "
+                "(timestamp, account_id, portfolio_id, strategy_slug, event_type, description, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    timestamp,
+                    account_id,
+                    portfolio_id,
+                    strategy_slug,
+                    event_type,
+                    description,
+                    payload,
+                    datetime.now(_TAIPEI_TZ).isoformat(),
+                ),
+            )
+
+    def get_activity(
+        self,
+        account_id: str,
+        days: int = 30,
+        limit: int = 500,
+        event_type: str | None = None,
+    ) -> list[dict]:
+        """Retrieve activity logs for an account."""
+        cutoff = (datetime.now(_TAIPEI_TZ) - timedelta(days=days)).isoformat()
+        query = (
+            "SELECT * FROM activity_log "
+            "WHERE account_id = ? AND timestamp >= ?"
+        )
+        params = [account_id, cutoff]
+        if event_type:
+            query += " AND event_type = ?"
+            params.append(event_type)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        with self._conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def cleanup_old_logs(self, days: int = 30) -> int:
+        """Delete logs older than N days. Returns count deleted."""
+        cutoff = (datetime.now(_TAIPEI_TZ) - timedelta(days=days)).isoformat()
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM activity_log WHERE timestamp < ?",
+                (cutoff,),
+            )
+            count = cursor.rowcount
+        return count
+
+    def cleanup_inactive_strategies(self, days: int = 30) -> int:
+        """Delete all logs for strategies with no activity in N days. Returns count deleted."""
+        cutoff = (datetime.now(_TAIPEI_TZ) - timedelta(days=days)).isoformat()
+        with self._conn() as conn:
+            # Find strategies with latest activity older than cutoff
+            cursor = conn.execute(
+                "DELETE FROM activity_log "
+                "WHERE strategy_slug IS NOT NULL AND strategy_slug IN ("
+                "  SELECT strategy_slug FROM activity_log "
+                "  WHERE strategy_slug IS NOT NULL "
+                "  GROUP BY strategy_slug "
+                "  HAVING MAX(timestamp) < ?"
+                ")",
+                (cutoff,),
+            )
+            count = cursor.rowcount
+        return count

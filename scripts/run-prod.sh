@@ -68,7 +68,8 @@ echo "[1/3] Building frontend..."
 
 echo "[2/3] Starting backend on :$BACKEND_PORT..."
 kill_port "$BACKEND_PORT"
-uv run uvicorn src.api.main:app --host 127.0.0.1 --port "$BACKEND_PORT" &
+mkdir -p data/logs
+uv run uvicorn src.api.main:app --host 127.0.0.1 --port "$BACKEND_PORT" >> data/logs/backend.log 2>&1 &
 BACKEND_PID=$!
 trap 'kill $BACKEND_PID 2>/dev/null || true' EXIT
 

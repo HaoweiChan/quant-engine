@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 import structlog
 
@@ -44,6 +45,16 @@ def setup_logging(level: int = logging.INFO, json_output: bool = True) -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
+
+    # Configure shioaji logger to write to data/logs/shioaji.log
+    log_dir = Path(__file__).resolve().parent.parent.parent / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    sj_handler = logging.FileHandler(log_dir / "shioaji.log")
+    sj_handler.setFormatter(formatter)
+    sj_logger = logging.getLogger("shioaji")
+    sj_logger.handlers.clear()
+    sj_logger.addHandler(sj_handler)
+    sj_logger.setLevel(logging.DEBUG)
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

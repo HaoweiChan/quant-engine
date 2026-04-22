@@ -35,8 +35,13 @@ function strategyLabel(slug: string | undefined): string {
   return slug.split("/").pop() ?? slug;
 }
 
-function fmtTime(ts: number): string {
-  return new Date(ts * 1000).toLocaleTimeString(undefined, { hour12: false });
+function fmtTime(ts: number | string): string {
+  try {
+    const date = typeof ts === 'string' ? new Date(ts) : new Date(ts * 1000);
+    return date.toLocaleTimeString(undefined, { hour12: false });
+  } catch {
+    return "—";
+  }
 }
 
 interface OrderBlotterPaneProps {

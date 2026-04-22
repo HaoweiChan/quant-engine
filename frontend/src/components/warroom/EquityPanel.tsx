@@ -65,9 +65,9 @@ interface EquityPanelProps {
   playbackActive?: boolean;
 }
 
-export function EquityPanel({ equityCurve, equityTimestamps, sessions, accountLabel: _accountLabel, visibleRange, playbackActive }: EquityPanelProps) {
+export function EquityPanel({ equityCurve, equityTimestamps, sessions: _sessions, accountLabel: _accountLabel, visibleRange, playbackActive }: EquityPanelProps) {
   void _accountLabel;
-  const activeSessions = sessions.filter((s) => s.status === "active" || s.status === "paused");
+  void _sessions;
   const chartRef = useRef<EquityCurveChartHandle>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [chartHeight, setChartHeight] = useState(120);
@@ -138,26 +138,6 @@ export function EquityPanel({ equityCurve, equityTimestamps, sessions, accountLa
           )}
         </div>
       </div>
-      {activeSessions.length > 0 && (
-        <div className="px-2 pb-2 border-t" style={{ borderColor: colors.cardBorder }}>
-          <div className="text-[11px] py-1" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>SESSION PNL</div>
-          {activeSessions.map((s) => (
-            <div key={s.session_id} className="flex items-center justify-between py-0.5 text-[11px]" style={{ fontFamily: "var(--font-mono)" }}>
-              <span style={{ color: colors.text }}>
-                {s.strategy_slug.split("/").pop()} &middot; {s.symbol}
-              </span>
-              {(() => {
-                const total = (s.snapshot?.realized_pnl ?? 0) + (s.snapshot?.unrealized_pnl ?? 0);
-                return (
-                  <span style={{ color: total >= 0 ? colors.green : colors.red }}>
-                    {total >= 0 ? "+" : ""}${Math.round(total).toLocaleString()}
-                  </span>
-                );
-              })()}
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

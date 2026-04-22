@@ -186,29 +186,30 @@ class PlaybackEngine:
                         "timestamp": fill["timestamp"],
                     })
 
-        # Build equity curve on a unified hourly grid with forward-fill
-        # interpolation so every point sums ALL strategies' equity.
-        all_epochs = [ep for series in per_strat.values() for ep, _ in series]
+        # Sum equity at the union of observed timestamps (per-bar granularity).
+        # The previous hourly-grid + forward-fill caused PnL to step only on
+        # the hour, which at 1000x+ playback looked like abrupt jumps. Keeping
+        # native bar resolution gives a smooth curve that accumulates as the
+        # virtual clock advances. Subsample to MAX_POINTS for large windows to
+        # bound network/render cost; the tail is always retained so the
+        # reported total_equity lines up with the last displayed point.
+        MAX_POINTS = 5000
+        all_epochs = sorted({ep for series in per_strat.values() for ep, _ in series})
         if all_epochs:
-            grid_start = min(all_epochs)
-            grid_end = max(all_epochs)
-            step = 3600
-            grid: list[int] = []
-            t = grid_start
-            while t <= grid_end + step:
-                grid.append(t)
-                t += step
-            if grid and grid[-1] < grid_end:
-                grid.append(grid_end)
-            eq_curve_out = []
-            for ep in grid:
-                total = sum(
-                    self._interp_at(per_strat[s], ep, per_strat_init.get(s, 0.0))
-                    for s in per_strat
-                )
-                eq_curve_out.append(
-                    {"timestamp": _epoch_to_taipei_iso(ep), "equity": total}
-                )
+            step = max(1, (len(all_epochs) + MAX_POINTS - 1) // MAX_POINTS)
+            sampled = all_epochs[::step]
+            if sampled[-1] != all_epochs[-1]:
+                sampled.append(all_epochs[-1])
+            eq_curve_out = [
+                {
+                    "timestamp": _epoch_to_taipei_iso(ep),
+                    "equity": sum(
+                        self._interp_at(per_strat[s], ep, per_strat_init.get(s, 0.0))
+                        for s in per_strat
+                    ),
+                }
+                for ep in sampled
+            ]
         else:
             eq_curve_out = []
 

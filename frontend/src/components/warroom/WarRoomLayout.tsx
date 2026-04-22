@@ -39,7 +39,7 @@ const CHART_SYMBOLS = ["TX", "MTX", "TMF"];
 
 const POLL_MS = 15_000;
 const BAR_REFRESH_MS = 15_000;
-const PLAYBACK_POLL_MS = 2000;
+const PLAYBACK_POLL_MS = 500;
 
 type BottomTab = "blotter" | "trades" | "activity";
 
@@ -67,6 +67,7 @@ export function WarRoomLayout() {
   const playbackEnabled = usePlaybackStore((s) => s.enabled);
   const playbackIsPlaying = usePlaybackStore((s) => s.isPlaying);
   const playbackRangeStartMs = usePlaybackStore((s) => s.rangeStartMs);
+  const playbackRangeEndMs = usePlaybackStore((s) => s.rangeEndMs);
   const setPlaybackRange = usePlaybackStore((s) => s.setRange);
   const setPlaybackDataBounds = usePlaybackStore((s) => s.setDataBounds);
   const playbackTick = usePlaybackStore((s) => s.tick);
@@ -316,7 +317,26 @@ export function WarRoomLayout() {
   }, [isMockAccount, setPlaybackRange, setPlaybackDataBounds, playbackReset]);
 
   // Initialize / tear down the direct-backtest PlaybackEngine.
-  // Runs backtests via the same MCP facade so results are bit-exact.
+  // The backtest window is the user-selected playback range, so the cached
+  // equity curve starts at rangeStartMs — not a year ago. Changing the date
+  // range picker re-runs the backtest (debounced) so the displayed curve
+  // always matches the visible window. Runs via the same MCP facade as
+  // MCP tools, keeping results bit-exact.
+  //
+  // Dep key is a stable join of the strategy (slug,symbol,weight) triples for
+  // the mock account, NOT the raw sessions array. Sessions update on every
+  // war-room poll (snapshot fields change), and including the array here
+  // would tear down and re-initialize the playback engine on every poll,
+  // producing an endless DELETE → init loop.
+  const mockStrategiesKey = useMemo(() => {
+    return (data?.all_sessions ?? [])
+      .filter((s) => s.account_id === "mock-dev" && s.strategy_slug)
+      .map((s) => `${s.strategy_slug}|${s.symbol || "MTX"}|${s.equity_share ?? 1.0}`)
+      .sort()
+      .join(",");
+  }, [data?.all_sessions]);
+  const allSessionsRef = useRef(data?.all_sessions);
+  allSessionsRef.current = data?.all_sessions;
   useEffect(() => {
     if (!playbackEnabled || !isMockAccount) {
       if (!playbackEnabled) {
@@ -324,7 +344,10 @@ export function WarRoomLayout() {
       }
       return;
     }
-    const mockSessions = (data?.all_sessions ?? []).filter(
+    if (playbackRangeStartMs === null || playbackRangeEndMs === null) return;
+    if (!mockStrategiesKey) return;
+
+    const mockSessions = (allSessionsRef.current ?? []).filter(
       (s) => s.account_id === "mock-dev" && s.strategy_slug,
     );
     if (mockSessions.length === 0) return;
@@ -335,29 +358,28 @@ export function WarRoomLayout() {
       weight: s.equity_share ?? 1.0,
       intraday: false,
     }));
-    const now = new Date();
-    const oneYearAgo = new Date(now);
-    oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
-    const start = oneYearAgo.toISOString().slice(0, 10);
-    const end = now.toISOString().slice(0, 10);
+    const msToTaipeiDate = (ms: number) =>
+      new Date(ms + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const start = msToTaipeiDate(playbackRangeStartMs);
+    const end = msToTaipeiDate(playbackRangeEndMs);
 
+    let cancelled = false;
     setPlaybackInitializing(true);
-    initPlaybackEngine({ strategies, start, end })
-      .then((res) => {
-        if (res.time_range.min_ts && res.time_range.max_ts) {
-          const minMs = new Date(res.time_range.min_ts).getTime();
-          const maxMs = new Date(res.time_range.max_ts).getTime();
-          setPlaybackDataBounds(minMs, maxMs);
-          setPlaybackRange(minMs, maxMs);
-        }
-      })
-      .catch((err) => console.error("Playback engine init failed:", err))
-      .finally(() => setPlaybackInitializing(false));
+    const debounceHandle = setTimeout(() => {
+      if (cancelled) return;
+      initPlaybackEngine({ strategies, start, end })
+        .catch((err) => console.error("Playback engine init failed:", err))
+        .finally(() => {
+          if (!cancelled) setPlaybackInitializing(false);
+        });
+    }, 500);
 
     return () => {
+      cancelled = true;
+      clearTimeout(debounceHandle);
       stopPlaybackEngine().catch(() => {});
     };
-  }, [playbackEnabled, isMockAccount]);
+  }, [playbackEnabled, isMockAccount, playbackRangeStartMs, playbackRangeEndMs, mockStrategiesKey]);
 
   // Playback ticker
   const lastTickRef = useRef(performance.now());
@@ -407,7 +429,13 @@ export function WarRoomLayout() {
     if (pollInFlightRef.current) return;
 
     const pbEnabled = playbackEnabledRef.current;
-    const clockMs = virtualClockMsRef.current;
+    // In playback mode every poll MUST carry as_of; a bare /api/war-room
+    // would hit the mock-DB fallthrough and splash a seeded 1-year equity
+    // curve into the UI. Fall back to rangeStartMs if the virtual clock
+    // hasn't been set yet (e.g. first poll after enabling playback).
+    const pbState = usePlaybackStore.getState();
+    const clockMs = virtualClockMsRef.current ?? pbState.rangeStartMs;
+    if (pbEnabled && clockMs === null) return;  // wait until range is known
     const asOf = pbEnabled && clockMs !== null
       ? new Date(clockMs).toISOString()
       : undefined;
@@ -431,13 +459,14 @@ export function WarRoomLayout() {
     }
   }, []);
 
-  // Live polling (non-playback): initial fetch + 15s interval
+  // Live polling (non-playback): initial fetch + 15s interval. Skipped
+  // entirely when playback is enabled — the playback polling effect below
+  // owns all requests in that mode and they always carry as_of.
   useEffect(() => {
+    if (playbackEnabled) return;
     poll();
-    if (!playbackEnabled) {
-      const interval = setInterval(poll, POLL_MS);
-      return () => clearInterval(interval);
-    }
+    const interval = setInterval(poll, POLL_MS);
+    return () => clearInterval(interval);
   }, [poll, playbackEnabled]);
 
   // Playback polling: dedicated interval that reads from refs

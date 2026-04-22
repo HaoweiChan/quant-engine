@@ -259,6 +259,7 @@ class NightSessionLongEntry(EntryPolicy):
         mr_min_drop_atr: float = 0.0,
         rsi_filter_enabled: bool = False,
         rsi_max_entry: float = 70.0,
+        session_id: str | None = None,
     ) -> None:
         self._ind = indicators
         self._entry_offset_min = entry_offset_min
@@ -275,6 +276,7 @@ class NightSessionLongEntry(EntryPolicy):
         self._rsi_max_entry = rsi_max_entry
         self._momentum_filter = momentum_filter
         self._mr_min_drop_atr = mr_min_drop_atr
+        self._session_id = session_id
         self._entered_this_session = False
         self._last_session_date = None
         self._session_open_price: float | None = None
@@ -333,9 +335,23 @@ class NightSessionLongEntry(EntryPolicy):
             self._entered_this_session = False
             self._session_open_price = snapshot.price
 
-        # Already entered this session
+        # Already entered this session (in-memory guard)
         if self._entered_this_session:
             return None
+
+        # Check DB-persisted entry guard (survives runner recreation)
+        try:
+            from src.trading_session.store import SnapshotStore
+            store = SnapshotStore()
+            guard_key = self._session_id or session_key.isoformat()
+            if store.has_entry_guard(guard_key, "short_term/trend_following/night_session_long"):
+                self._entered_this_session = True
+                return None
+        except Exception as e:
+            # If DB check fails, log but continue (fail open for robustness)
+            import structlog
+            logger = structlog.get_logger()
+            logger.warning("entry_guard_db_check_failed", error=str(e), session_key=self._session_id or session_key.isoformat())
 
         # Already in position
         if engine_state.positions:
@@ -540,6 +556,7 @@ def create_night_session_long_engine(
     rsi_filter_enabled: int = 0,
     rsi_max_entry: float = 70.0,
     rsi_period: int = 14,
+    session_id: str | None = None,
 ) -> "PositionEngine":
     """Build a PositionEngine for night session long strategy."""
     from src.core.position_engine import PositionEngine
@@ -566,6 +583,7 @@ def create_night_session_long_engine(
             mr_min_drop_atr=mr_min_drop_atr,
             rsi_filter_enabled=bool(rsi_filter_enabled),
             rsi_max_entry=rsi_max_entry,
+            session_id=session_id,
         ),
         add_policy=NoAddPolicy(),
         stop_policy=NightSessionLongStop(
