@@ -34,7 +34,7 @@ def session_id(ts: datetime) -> str:
     elif t < NIGHT_CLOSE:
         prev = (ts - timedelta(days=1)).strftime("%Y%m%d")
         return f"N{prev}"
-    elif DAY_OPEN <= t <= DAY_CLOSE:
+    elif DAY_OPEN <= t < DAY_CLOSE:
         return f"D{ts.strftime('%Y%m%d')}"
     return "CLOSED"
 
