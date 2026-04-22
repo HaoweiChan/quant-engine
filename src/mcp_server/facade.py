@@ -537,80 +537,34 @@ def _load_bars_for_tf(db, symbol: str, start, end, bar_agg: int):
 
 
 def _aggregate_bars(raw, bar_agg: int):
-    """Aggregate 1-min OHLCVBar objects into N-min bars (session-aware).
+    """Aggregate 1-min OHLCVBar objects into N-min bars (fallback).
 
     Prefer pre-aggregated tables via _load_bars_for_tf() when available.
-    Respects TAIFEX session boundaries to avoid creating bars that cross sessions.
+    This function does NOT respect session boundaries — it uses simple
+    epoch bucketing. Only used when pre-aggregated tables are empty.
     """
     from src.data.db import OHLCVBar
-    from src.data.session_utils import session_id
 
     if bar_agg <= 1 or not raw:
         return raw
-
-    aggregated = []
-    current_group = []
-    current_session = None
     bucket_secs = bar_agg * 60
-
+    buckets: dict[int, list] = {}
     for b in raw:
-        bar_session = session_id(b.timestamp)
-
-        # Start new group if session changed
-        if bar_session != current_session:
-            if current_group:
-                group = current_group
-                aggregated.append(OHLCVBar(
-                    symbol=group[0].symbol,
-                    timestamp=group[0].timestamp,
-                    open=group[0].open,
-                    high=max(bar.high for bar in group),
-                    low=min(bar.low for bar in group),
-                    close=group[-1].close,
-                    volume=sum(bar.volume for bar in group),
-                ))
-                current_group = []
-            current_session = bar_session
-
-        # Skip bars in CLOSED periods (inter-session gaps)
-        if bar_session == "CLOSED":
-            continue
-
-        # Check if starting a new bucket (epoch-based within session)
-        if current_group:
-            group_ts_epoch = int(current_group[0].timestamp.timestamp())
-            bar_ts_epoch = int(b.timestamp.timestamp())
-            bucket_key_group = group_ts_epoch // bucket_secs
-            bucket_key_bar = bar_ts_epoch // bucket_secs
-            if bucket_key_bar != bucket_key_group:
-                # Flush current group and start new one
-                group = current_group
-                aggregated.append(OHLCVBar(
-                    symbol=group[0].symbol,
-                    timestamp=group[0].timestamp,
-                    open=group[0].open,
-                    high=max(bar.high for bar in group),
-                    low=min(bar.low for bar in group),
-                    close=group[-1].close,
-                    volume=sum(bar.volume for bar in group),
-                ))
-                current_group = []
-
-        current_group.append(b)
-
-    # Flush final group
-    if current_group:
-        group = current_group
+        ts_epoch = int(b.timestamp.timestamp())
+        key = ts_epoch // bucket_secs
+        buckets.setdefault(key, []).append(b)
+    aggregated = []
+    for key in sorted(buckets):
+        group = buckets[key]
         aggregated.append(OHLCVBar(
             symbol=group[0].symbol,
             timestamp=group[0].timestamp,
             open=group[0].open,
-            high=max(bar.high for bar in group),
-            low=min(bar.low for bar in group),
+            high=max(b.high for b in group),
+            low=min(b.low for b in group),
             close=group[-1].close,
-            volume=sum(bar.volume for bar in group),
+            volume=sum(b.volume for b in group),
         ))
-
     return aggregated
 
 
