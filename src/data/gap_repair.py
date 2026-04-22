@@ -31,7 +31,14 @@ def _detect_recent_gaps(
     lookback_days: int = LOOKBACK_DAYS,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> list[tuple[str, str, int]]:
-    """Return (gap_start, gap_end, gap_minutes) for missing intraday bars."""
+    """Return (gap_start, gap_end, gap_minutes) for missing intraday bars.
+
+    Detects gaps that are within the same trading session (intra-session data
+    outages). Skips gaps that span session boundaries (expected inter-session
+    gaps where trading is closed).
+    """
+    from src.data.session_utils import session_id as _session_id
+
     if not db_path.exists():
         return []
     start = (datetime.now(TAIPEI_TZ) - timedelta(days=lookback_days)).strftime("%Y-%m-%d 00:00:00")
@@ -53,7 +60,21 @@ def _detect_recent_gaps(
         t1 = datetime.strptime(rows[i - 1][0][:19], "%Y-%m-%d %H:%M:%S")
         t2 = datetime.strptime(rows[i][0][:19], "%Y-%m-%d %H:%M:%S")
         diff_min = int((t2 - t1).total_seconds() / 60)
-        if diff_min > 2 and diff_min < SESSION_GAP_MINUTES:
+
+        # Skip trivially small gaps (< 2 min are fine, likely rounding)
+        if diff_min <= 2:
+            continue
+
+        # Check if both timestamps are in the same session
+        # Add timezone info for session_id function
+        t1_tz = t1.replace(tzinfo=TAIPEI_TZ)
+        t2_tz = t2.replace(tzinfo=TAIPEI_TZ)
+        sid1 = _session_id(t1_tz)
+        sid2 = _session_id(t2_tz)
+
+        # If both bars are in the same trading session, it's an intra-session gap
+        # that should be repaired (regardless of size)
+        if sid1 == sid2 and sid1 != "CLOSED":
             gaps.append((rows[i - 1][0][:19], rows[i][0][:19], diff_min))
     return gaps
 
