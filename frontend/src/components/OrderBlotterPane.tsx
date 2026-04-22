@@ -38,7 +38,9 @@ function strategyLabel(slug: string | undefined): string {
 function fmtTime(ts: number | string): string {
   try {
     const date = typeof ts === 'string' ? new Date(ts) : new Date(ts * 1000);
-    return date.toLocaleTimeString(undefined, { hour12: false });
+    const dateStr = date.toLocaleDateString(undefined, { year: '2-digit', month: '2-digit', day: '2-digit' });
+    const timeStr = date.toLocaleTimeString(undefined, { hour12: false });
+    return `${dateStr} ${timeStr}`;
   } catch {
     return "—";
   }
