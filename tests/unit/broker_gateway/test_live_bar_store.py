@@ -12,23 +12,24 @@ TAIPEI = ZoneInfo("Asia/Taipei")
 
 
 def _init_ohlcv_table(db_path: Path) -> None:
+    schema_cols = (
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "symbol VARCHAR(32) NOT NULL, "
+        "timestamp DATETIME NOT NULL, "
+        "open FLOAT NOT NULL, high FLOAT NOT NULL, "
+        "low FLOAT NOT NULL, close FLOAT NOT NULL, "
+        "volume INTEGER NOT NULL"
+    )
     with sqlite3.connect(str(db_path)) as conn:
-        conn.execute(
-            """
-            CREATE TABLE ohlcv_bars (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol VARCHAR(32) NOT NULL,
-                timestamp DATETIME NOT NULL,
-                open FLOAT NOT NULL,
-                high FLOAT NOT NULL,
-                low FLOAT NOT NULL,
-                close FLOAT NOT NULL,
-                volume INTEGER NOT NULL,
-                CONSTRAINT uq_ohlcv_symbol_ts UNIQUE (symbol, timestamp)
+        for table, uq in (
+            ("ohlcv_bars", "uq_ohlcv_symbol_ts"),
+            ("ohlcv_5m", "uq_ohlcv5m_symbol_ts"),
+            ("ohlcv_1h", "uq_ohlcv1h_symbol_ts"),
+        ):
+            conn.execute(
+                f"CREATE TABLE {table} ({schema_cols}, "
+                f"CONSTRAINT {uq} UNIQUE (symbol, timestamp))"
             )
-            """
-        )
-        conn.execute("CREATE INDEX ix_ohlcv_symbol_ts ON ohlcv_bars(symbol, timestamp)")
         conn.commit()
 
 

@@ -3,15 +3,19 @@
 Never aggregates across TAIFEX session boundaries. Uses session_id() as the
 grouping key so bars within the 13:45–15:00 and 05:00–08:45 gaps are excluded,
 and no bar spans two sessions.
+
+Bars are right-aligned to session-relative boundaries:
+- Day session (08:45–13:45): bars labeled 09:45, 10:45, ..., 13:45
+- Night session (15:00–05:00+1d): bars labeled 16:00, 17:00, ..., 05:00
 """
 from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from src.data.session_utils import session_id
+from src.data.session_utils import session_id, session_open_dt, session_close_dt
 
 if TYPE_CHECKING:
     from src.data.db import Database, OHLCVBar, OHLCVBar1h, OHLCVBar5m
@@ -46,18 +50,32 @@ def _aggregate_1m_to_n(
 
     for sid in sorted(sessions):
         sbars = sessions[sid]
-        # Bucket within the session by time
+        session_open = session_open_dt(sid)
+
+        # Bucket within the session using session-relative offsets (right-aligned)
         buckets: dict[int, list] = defaultdict(list)
         for b in sbars:
-            epoch = int(b.timestamp.timestamp())
-            key = epoch // bucket_secs
-            buckets[key].append(b)
+            # Calculate offset from session open
+            offset_secs = int((b.timestamp - session_open).total_seconds())
+            if offset_secs < 0:
+                # Shouldn't happen with correct session_id assignment, but skip if it does
+                continue
+            bucket_index = offset_secs // bucket_secs
+            buckets[bucket_index].append(b)
 
-        for key in sorted(buckets):
-            group = buckets[key]
+        session_close = session_close_dt(sid)
+        for bucket_index in sorted(buckets):
+            group = buckets[bucket_index]
+            # Left-aligned: bar timestamp = session_open + bucket_index * bucket_secs (start of period)
+            bar_ts = session_open + timedelta(seconds=bucket_index * bucket_secs)
+            # Exclude bars that would extend past session close
+            # (a left-aligned bar must fully fit within the session)
+            bar_end = bar_ts + timedelta(seconds=bucket_secs)
+            if bar_end > session_close:
+                continue
             result.append(model_cls(
                 symbol=symbol,
-                timestamp=group[0].timestamp,
+                timestamp=bar_ts,
                 open=group[0].open,
                 high=max(b.high for b in group),
                 low=min(b.low for b in group),

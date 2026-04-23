@@ -17,6 +17,29 @@ DAY_OPEN = time(8, 45)
 DAY_CLOSE = time(13, 45)
 
 
+def session_open_dt(sid: str) -> datetime:
+    """Return the naive Taipei datetime at which a session opened.
+
+        "N20260417" -> 2026-04-17 15:00:00
+        "D20260417" -> 2026-04-17 08:45:00
+    """
+    session_date = datetime.strptime(sid[1:], "%Y%m%d").date()
+    open_time = NIGHT_OPEN if sid[0] == "N" else DAY_OPEN
+    return datetime.combine(session_date, open_time)
+
+
+def session_close_dt(sid: str) -> datetime:
+    """Return the naive Taipei datetime at which a session closed.
+
+        "N20260417" -> 2026-04-18 05:00:00  (night sessions cross midnight)
+        "D20260417" -> 2026-04-17 13:45:00
+    """
+    session_date = datetime.strptime(sid[1:], "%Y%m%d").date()
+    if sid[0] == "N":
+        return datetime.combine(session_date + timedelta(days=1), NIGHT_CLOSE)
+    return datetime.combine(session_date, DAY_CLOSE)
+
+
 def session_id(ts: datetime) -> str:
     """Return the canonical session identifier for a bar timestamp.
 
