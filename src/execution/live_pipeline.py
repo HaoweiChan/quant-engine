@@ -206,6 +206,7 @@ class LivePipelineManager:
         self._loop = loop
         self._bar_store.register_bar_callback(self._on_bar_complete)
         self._sync_runners()
+        self._startup_aggregate_bars()
         self._started = True
         self._reconciler = reconciler
         # Spawn the session-close safety-net timer when an event loop is
@@ -225,6 +226,36 @@ class LivePipelineManager:
                         "live_pipeline_reconciler_start_failed",
                     )
         logger.info("live_pipeline_started", runners=len(self._runners))
+
+    def _startup_aggregate_bars(self) -> None:
+        """Catch up on any 1m bars that may exist before live aggregator started.
+
+        Collects all unique symbols from active runners and calls incremental_update()
+        to ensure 5m and 1h bars are available for War Room charts.
+        """
+        try:
+            symbols: set[str] = {
+                runner.symbol
+                for runner in self._runners.values()
+            }
+            if not symbols:
+                return
+            from src.data.aggregator import incremental_update
+            from src.data.db import Database, DEFAULT_DB_PATH
+            db = Database(f"sqlite:///{DEFAULT_DB_PATH}")
+            for symbol in symbols:
+                try:
+                    results = incremental_update(db, symbol, since=None)
+                    logger.info(
+                        "startup_aggregation_complete",
+                        symbol=symbol,
+                        new_5m=results.get("5m", 0),
+                        new_1h=results.get("1h", 0),
+                    )
+                except Exception:
+                    logger.exception("startup_aggregation_failed", symbol=symbol)
+        except Exception:
+            logger.exception("startup_aggregate_bars_failed")
 
     def stop(self) -> None:
         """Tear down all runners and cancel the session-close + reconciler tasks."""
@@ -514,7 +545,7 @@ class LivePipelineManager:
                     f"{format_trade(result)}\n"
                     f"Equity: {runner.equity:,.0f}"
                 )
-                await self._notifier.dispatch(msg)
+                await self._notifier.dispatch(msg, account_id=runner.account_id)
         except Exception:
             logger.debug("telegram_notify_failed", exc_info=True)
 

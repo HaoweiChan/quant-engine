@@ -191,6 +191,20 @@ def async_repair_gap(symbol: str, gap_start: datetime, gap_end: datetime) -> Non
         gaps = [(gap_start.strftime("%Y-%m-%d %H:%M:%S"), gap_end.strftime("%Y-%m-%d %H:%M:%S"), 0)]
         recovered = _backfill_gaps(symbol, contract.shioaji_path, gaps, DEFAULT_DB_PATH)
         logger.info("live_gap_repaired", symbol=symbol, bars_recovered=recovered)
+        # Aggregate repaired 1m bars into 5m and 1h for live charts
+        try:
+            from src.data.aggregator import incremental_update
+            from src.data.db import Database
+            db = Database(f"sqlite:///{DEFAULT_DB_PATH}")
+            results = incremental_update(db, symbol, gap_start)
+            logger.info(
+                "gap_repair_aggregation_complete",
+                symbol=symbol,
+                new_5m=results.get("5m", 0),
+                new_1h=results.get("1h", 0),
+            )
+        except Exception:
+            logger.exception("gap_repair_aggregation_failed", symbol=symbol)
     except Exception:
         logger.exception("live_gap_repair_failed", symbol=symbol)
     finally:
