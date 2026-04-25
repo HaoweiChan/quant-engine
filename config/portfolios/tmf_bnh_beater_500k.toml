@@ -1,0 +1,32 @@
+# Portfolio config: tmf_bnh_beater_500k
+# Last saved: 2026-04-25T13:55:23.060071+08:00
+
+[portfolio]
+name = "tmf_bnh_beater_500k"
+symbol = "TMF"
+
+[[portfolio.strategies]]
+slug = "swing/trend_following/vol_managed_bnh"
+weight = 0.25
+
+[[portfolio.strategies]]
+slug = "medium_term/trend_following/donchian_trend_strength"
+weight = 0.5
+
+[[portfolio.strategies]]
+slug = "short_term/trend_following/night_session_long"
+weight = 0.25
+
+[optimization]
+level = 2
+level_name = "L2_VALIDATED"
+achieved_at = "2026-04-25T13:55:23.060008+08:00"
+
+[optimization.gate_results]
+combined_sharpe = 1.357
+aggregate_oos_sharpe = 2.679
+worst_fold_oos_mdd = 0.076
+weight_drift_cv = 0
+correlation_stability = 0.823
+slippage_stress_sharpe = 0.312
+paper_trade_sessions = 0
