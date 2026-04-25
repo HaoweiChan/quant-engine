@@ -8,6 +8,8 @@ import { parseTimestampMs, formatTaipeiTimestamp, normalizeToNaiveTaipei } from 
 const parseBarTimestamp = parseTimestampMs;
 
 function createLiveBar(tick: { price: number; volume: number }, tickTime: number, tfMs: number): OHLCVBar {
+  // Left-aligned bucketing: bar timestamp = start of the bucket
+  // E.g., for a 1h bucket, a tick at 09:30 goes into the 09:00 bar
   const newBarEpoch = Math.floor(tickTime / tfMs) * tfMs;
   const newBarTime = formatTaipeiTimestamp(newBarEpoch);
   return {
