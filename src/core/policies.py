@@ -5,8 +5,11 @@ Policies answer "what to do"; the engine answers "how to execute it."
 import structlog
 from abc import ABC, abstractmethod
 from collections import deque
+from datetime import datetime
+from typing import Callable
 
 from src.core.types import (
+    METADATA_EXPOSURE_MULTIPLIER,
     AccountState,
     AddDecision,
     EngineState,
@@ -253,6 +256,96 @@ class ChandelierStopPolicy(StopPolicy):
                 new_stop = min(new_stop, chandelier)
 
         return new_stop
+
+
+class AtrPyramidAdd(AddPolicy):
+    """Generic anti-martingale ATR-profit pyramid for trend-following strategies.
+
+    Fires when floating profit on the initial position exceeds
+    ``(level + 1) × trigger_atr × daily_atr``. Each add is sized
+    ``gamma^level × base_lots`` so exposure converges (anti-martingale).
+
+    The underlying PortfolioSizer resolves ``AddDecision.lots`` to absolute
+    contract count. This policy emits the multiplier; actual sizing is driven
+    by the risk / margin budget set on the runner's SizingConfig.
+
+    Replaces per-strategy subclasses that all implemented the same ATR-profit
+    pattern. Strategies that need session-boundary filtering (e.g.
+    night_session_long only wants to pyramid during the night session) pass
+    a ``session_filter`` callable that returns True when the add is allowed.
+
+    Strategies with truly strategy-specific sizing logic (vol_managed_bnh's
+    inverse-vol overlay, PyramidAddPolicy's per-level trigger schedule)
+    continue to use their own AddPolicy — this class is for the plain
+    "+K ATR, half each level" pattern only.
+    """
+
+    def __init__(
+        self,
+        max_levels: int = 2,
+        trigger_atr: float = 1.0,
+        gamma: float = 0.5,
+        breakeven_on_first_add: bool = True,
+        session_filter: Callable[[datetime], bool] | None = None,
+        atr_key: str = "daily",
+    ) -> None:
+        self._max_levels = int(max_levels)
+        self._trigger_atr = float(trigger_atr)
+        self._gamma = float(gamma)
+        self._breakeven_on_first_add = bool(breakeven_on_first_add)
+        self._session_filter = session_filter
+        self._atr_key = atr_key
+
+    def should_add(
+        self,
+        snapshot: MarketSnapshot,
+        signal: MarketSignal | None,
+        engine_state: EngineState,
+    ) -> AddDecision | None:
+        if engine_state.mode == "halted":
+            return None
+        if not engine_state.positions:
+            return None
+
+        level = engine_state.pyramid_level
+        if level >= self._max_levels:
+            return None
+
+        if self._session_filter is not None and not self._session_filter(
+            snapshot.timestamp,
+        ):
+            return None
+
+        atr = snapshot.atr.get(self._atr_key, 0.0)
+        if atr <= 0:
+            return None
+
+        pos = engine_state.positions[0]
+        floating = snapshot.price - pos.entry_price
+        if pos.direction == "short":
+            floating = -floating
+        needed = (level + 1) * self._trigger_atr * atr
+        if floating < needed:
+            return None
+
+        add_lots = max(self._gamma ** level, 0.1)
+        return AddDecision(
+            lots=add_lots,
+            contract_type=pos.contract_type,
+            move_existing_to_breakeven=(
+                self._breakeven_on_first_add and level == 0
+            ),
+            metadata={
+                # `lots` is a multiplier of base position, not absolute contracts.
+                # PortfolioSizer.size_add checks this flag to scale by base_lots.
+                METADATA_EXPOSURE_MULTIPLIER: True,
+                "pyramid_level": level + 1,
+                "atr_key": self._atr_key,
+                "atr_value": atr,
+                "needed_profit": needed,
+                "actual_profit": floating,
+            },
+        )
 
 
 class NoAddPolicy(AddPolicy):

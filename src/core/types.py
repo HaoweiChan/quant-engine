@@ -198,6 +198,13 @@ class PyramidConfig:
 
 # Reserved metadata keys for Decision classes — typed to prevent silent typos.
 METADATA_EXPOSURE_MULTIPLIER = "exposure_multiplier"
+# When a strategy does its own account-aware sizing (e.g. vol_managed_bnh
+# uses inverse-vol overlay with a calibrated margin_fraction), it sets this
+# flag on its EntryDecision / AddDecision so the outer PortfolioSizer in the
+# BacktestRunner treats decision.lots as authoritative and applies only a
+# margin-cap safety rail (never inflates lots, only trims if they exceed
+# equity × margin_cap).
+METADATA_STRATEGY_SIZED = "strategy_sized"
 
 
 @dataclass
@@ -409,7 +416,7 @@ class InstrumentCostConfig:
     """Per-instrument default transaction cost configuration."""
 
     slippage_pct: float = 0.1  # 0.1% per side
-    commission_per_contract: float = 100.0  # NT$ round-trip
+    commission_per_contract: float = 100.0  # NT$ per fill (MarketImpactFillModel charges this on both entry and exit fills, so round-trip cost = 2x this value)
     symbol: str = "TX"
 
     @property

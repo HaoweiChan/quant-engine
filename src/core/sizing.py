@@ -121,6 +121,29 @@ def compute_margin_lots(
     return float(lots) if lots >= min_lot else 0.0
 
 
+def default_sizing_config(
+    initial_equity: float,
+    risk_per_trade: float = 0.02,
+    margin_cap: float = 0.50,
+) -> "SizingConfig":
+    """Build a SizingConfig for the default backtest pipeline.
+
+    Position size is bounded by ``margin_cap`` (fraction of equity allowed
+    to sit in open margin). No separate ``max_lots`` hard cap is applied —
+    it would be redundant with the margin cap and introduces a second
+    tuning knob that most users don't need.
+
+    The backtest pipeline attaches a PortfolioSizer built from this helper
+    to every BacktestRunner (facade._build_runner + all other call sites)
+    so strategies emitting ``lots=1`` scale with account equity uniformly.
+    """
+    _ = initial_equity  # retained for signature stability; no longer used
+    return SizingConfig(
+        risk_per_trade=risk_per_trade,
+        margin_cap=margin_cap,
+    )
+
+
 @dataclass
 class SizingConfig:
     """Per-session sizing parameters set at the portfolio/account level.
@@ -136,7 +159,11 @@ class SizingConfig:
     """
     risk_per_trade: float = 0.02
     margin_cap: float = 0.50
-    max_lots: int = 10
+    # max_lots is an optional hard cap retained for backward compatibility.
+    # The binding position-size constraint is margin_cap (enforced as
+    # equity × margin_cap / margin_per_unit). The default is a large
+    # sentinel so max_lots never binds in practice unless explicitly set.
+    max_lots: int = 10_000
     min_lots: int = 1
     use_kelly: bool = False
     kelly_fraction: float = 0.25
