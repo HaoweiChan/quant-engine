@@ -33,7 +33,11 @@ def run_monte_carlo(
         path_config = PathConfig()
 
     paths = generate_paths(n_paths, path_config)
-    runner = BacktestRunner(config, adapter, fill_model, initial_equity)
+    from src.core.sizing import default_sizing_config
+    runner = BacktestRunner(
+        config, adapter, fill_model, initial_equity,
+        sizing_config=default_sizing_config(initial_equity=initial_equity),
+    )
 
     if use_ray and n_paths >= ray_threshold:
         results = _run_parallel(paths, runner, path_config)

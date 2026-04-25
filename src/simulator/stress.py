@@ -25,7 +25,11 @@ def run_stress_test(
     """Run a stress scenario through PositionEngine."""
     prices = _generate_scenario_prices(scenario, start_price)
     bars, timestamps = _prices_to_bars(prices)
-    runner = BacktestRunner(config, adapter, fill_model, initial_equity)
+    from src.core.sizing import default_sizing_config
+    runner = BacktestRunner(
+        config, adapter, fill_model, initial_equity,
+        sizing_config=default_sizing_config(initial_equity=initial_equity),
+    )
     result = runner.run(bars, timestamps=timestamps)
 
     cb_triggered = any(

@@ -119,11 +119,13 @@ def _run_single_trial(
     a_cls = getattr(a_mod, adapter_class)
     adapter = a_cls(**adapter_kwargs)
     fill_model = _rebuild_fill_model(fill_model_kwargs)
+    from src.core.sizing import default_sizing_config
     runner = BacktestRunner(
         config=lambda: engine,
         adapter=adapter,
         fill_model=fill_model,
         initial_equity=initial_equity,
+        sizing_config=default_sizing_config(initial_equity=initial_equity),
     )
     result = runner.run(bars, timestamps=timestamps, force_flat_indices=force_flat_indices)
     row: dict[str, Any] = dict(params)
@@ -152,11 +154,13 @@ def _run_single_trial_callable(
     a_cls = getattr(a_mod, adapter_class)
     adapter = a_cls(**adapter_kwargs)
     fill_model = _rebuild_fill_model(fill_model_kwargs)
+    from src.core.sizing import default_sizing_config
     runner = BacktestRunner(
         config=lambda: engine,
         adapter=adapter,
         fill_model=fill_model,
         initial_equity=initial_equity,
+        sizing_config=default_sizing_config(initial_equity=initial_equity),
     )
     result = runner.run(bars, timestamps=timestamps, force_flat_indices=force_flat_indices)
     row: dict[str, Any] = dict(params)
@@ -477,11 +481,13 @@ class StrategyOptimizer:
         force_flat_indices: set[int] | None = None,
     ) -> BacktestResult:
         engine = factory(**params)
+        from src.core.sizing import default_sizing_config
         runner = BacktestRunner(
             config=lambda: engine,
             adapter=self._adapter,
             fill_model=self._fill_model,
             initial_equity=self._initial_equity,
+            sizing_config=default_sizing_config(initial_equity=self._initial_equity),
         )
         return runner.run(bars, timestamps=timestamps, force_flat_indices=force_flat_indices)
 

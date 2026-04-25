@@ -58,7 +58,11 @@ def grid_search(
             kelly_fraction=kelly,
             entry_conf_threshold=base_config.entry_conf_threshold,
         )
-        runner = BacktestRunner(cfg, adapter, fill_model, initial_equity)
+        from src.core.sizing import default_sizing_config
+        runner = BacktestRunner(
+            cfg, adapter, fill_model, initial_equity,
+            sizing_config=default_sizing_config(initial_equity=initial_equity),
+        )
         result = runner.run(bars, timestamps=timestamps)
         row: dict[str, float] = {
             "stop_atr_mult": stop_m,
