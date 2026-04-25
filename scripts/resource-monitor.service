@@ -1,12 +1,12 @@
 [Unit]
 Description=Quant Engine Resource Monitor (VPS RAM/CPU guardian)
 After=default.target
-Documentation=file:///home/openclaw/.openclaw/workspace/quant-engine/.claude/skills/process-cleanup/SKILL.md
+Documentation=file:///home/willy/invest/quant-engine/.claude/skills/process-cleanup/SKILL.md
 
 [Service]
 Type=simple
-WorkingDirectory=/home/openclaw/.openclaw/workspace/quant-engine
-ExecStart=/usr/bin/python3 /home/openclaw/.openclaw/workspace/quant-engine/scripts/resource_monitor.py
+WorkingDirectory=/home/willy/invest/quant-engine
+ExecStart=/usr/bin/python3 /home/willy/invest/quant-engine/scripts/resource_monitor.py
 Restart=always
 RestartSec=30
 # Low priority so monitor never competes with trading system
