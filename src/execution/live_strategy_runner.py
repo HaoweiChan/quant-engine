@@ -233,7 +233,23 @@ class LiveStrategyRunner:
         )
         cost = get_instrument_cost_config(self.symbol)
         specs = self._adapter.get_contract_specs(self.symbol)
-        engine: PositionEngine = factory(**merged)
+        # Older pinned factories may predate the session_id kwarg and reject
+        # it (either by signature or by their own unknown-kwarg guard). Drop
+        # it and retry once so B5 doesn't silently lose runners on restart.
+        try:
+            engine: PositionEngine = factory(**merged)
+        except TypeError as e:
+            if "session_id" in merged and "session_id" in str(e):
+                retry_merged = {k: v for k, v in merged.items() if k != "session_id"}
+                logger.warning(
+                    "live_runner_factory_session_id_dropped",
+                    session_id=self.session_id,
+                    slug=self.strategy_slug,
+                    reason=str(e),
+                )
+                engine = factory(**retry_merged)
+            else:
+                raise
 
         if self._execution_mode == "paper":
             # Commission is round-trip per contract; PaperExecutor charges
