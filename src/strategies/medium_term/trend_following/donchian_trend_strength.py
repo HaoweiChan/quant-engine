@@ -30,11 +30,9 @@ from collections import deque
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from src.core.policies import AddPolicy, EntryPolicy, NoAddPolicy, StopPolicy
+from src.core.policies import AddPolicy, AtrPyramidAdd, EntryPolicy, NoAddPolicy, StopPolicy
 from src.core.types import (
-    METADATA_EXPOSURE_MULTIPLIER,
     AccountState,
-    AddDecision,
     EngineConfig,
     EngineState,
     EntryDecision,
@@ -236,65 +234,6 @@ class DonchianTrendStrengthEntry(EntryPolicy):
         return None
 
 
-class DonchianTrendStrengthAdd(AddPolicy):
-    """Anti-martingale pyramid: add into winners at ATR-based profit thresholds.
-
-    Emits ``AddDecision.lots`` as a **multiplier of the base position lots**
-    (e.g. gamma=0.5, level=1 → 0.5×base). PortfolioSizer resolves the
-    multiplier to absolute contracts via ``METADATA_EXPOSURE_MULTIPLIER=True``,
-    so the strategy stays a pure signal emitter and contract-count math
-    lives in the sizer / engine config.
-    """
-
-    def __init__(
-        self,
-        indicators: _Indicators,
-        max_levels: int = 3,
-        trigger_atr: float = 1.0,
-        gamma: float = 0.5,
-    ) -> None:
-        self._ind = indicators
-        self._max_levels = max_levels
-        self._trigger_atr = trigger_atr
-        self._gamma = gamma
-
-    def should_add(
-        self,
-        snapshot: MarketSnapshot,
-        signal: MarketSignal | None,
-        engine_state: EngineState,
-    ) -> AddDecision | None:
-        if engine_state.mode == "halted":
-            return None
-        if engine_state.pyramid_level >= self._max_levels:
-            return None
-        if not engine_state.positions:
-            return None
-        daily_atr = snapshot.atr.get("daily", 0.0)
-        if daily_atr <= 0:
-            return None
-        pos = engine_state.positions[0]
-        if pos.direction == "long":
-            floating_profit = snapshot.price - pos.entry_price
-        else:
-            floating_profit = pos.entry_price - snapshot.price
-        level = engine_state.pyramid_level
-        trigger = level * self._trigger_atr * daily_atr
-        if floating_profit < trigger:
-            return None
-        multiplier = max(self._gamma ** level, 0.25)
-        return AddDecision(
-            lots=multiplier,
-            contract_type=pos.contract_type,
-            move_existing_to_breakeven=True,
-            metadata={
-                METADATA_EXPOSURE_MULTIPLIER: True,
-                "gamma": self._gamma,
-                "level": level,
-            },
-        )
-
-
 class DonchianTrendStrengthStop(StopPolicy):
     def __init__(
         self,
@@ -391,11 +330,11 @@ def create_donchian_trend_strength_engine(
     indicators = _Indicators(lookback_period=lookback_period, rsi_len=rsi_len)
     pcfg = pyramid_config_from_risk_level(pyramid_risk_level, max_loss, 1.0)
     if pcfg is not None:
-        add_policy = DonchianTrendStrengthAdd(
-            indicators=indicators,
+        add_policy: AddPolicy = AtrPyramidAdd(
             max_levels=pcfg.max_levels,
             trigger_atr=pcfg.add_trigger_atr[0] if pcfg.add_trigger_atr else 1.0,
             gamma=pcfg.gamma or 0.5,
+            breakeven_on_first_add=True,
         )
     else:
         add_policy = NoAddPolicy()

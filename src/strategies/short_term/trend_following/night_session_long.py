@@ -25,7 +25,13 @@ from collections import deque
 from datetime import time
 from typing import TYPE_CHECKING
 
-from src.core.policies import EntryPolicy, NoAddPolicy, StopPolicy
+from src.core.policies import (
+    AddPolicy,
+    AtrPyramidAdd,
+    EntryPolicy,
+    NoAddPolicy,
+    StopPolicy,
+)
 from src.core.types import (
     AccountState,
     EngineConfig,
@@ -58,12 +64,12 @@ PARAM_SCHEMA: dict[str, dict] = {
         "description": "Minutes after 15:00 to enter (0=session open, 15=after OR window).",
     },
     "exit_before_close_min": {
-        "type": "int", "default": 5, "min": 5, "max": 15,
-        "description": "Minutes before 05:00 to force close.",
+        "type": "int", "default": 5, "min": 1, "max": 15,
+        "description": "Minutes before 05:00 to force close (min=1 so we can hold until near the bell).",
     },
     "atr_sl_mult": {
-        "type": "float", "default": 2.0, "min": 0.5, "max": 4.0,
-        "description": "Stop-loss distance as multiplier of daily ATR.",
+        "type": "float", "default": 2.0, "min": 0.5, "max": 20.0,
+        "description": "Stop-loss distance as multiplier of daily ATR. Set >=10 for effectively 'no mid-session stop, only force-close at session end'.",
     },
     "use_atr_filter": {
         "type": "int", "default": 0, "min": 0, "max": 1,
@@ -140,6 +146,27 @@ PARAM_SCHEMA: dict[str, dict] = {
     "rsi_max_entry": {
         "type": "float", "default": 70.0, "min": 50.0, "max": 85.0,
         "description": "Max RSI for entry. Skip if RSI is above this level.",
+    },
+    # Pyramiding (intra-session scale-in)
+    "pyramid_enabled": {
+        "type": "int", "default": 0, "min": 0, "max": 1,
+        "description": "Enable intra-session pyramiding (scale in on winning positions) (1=on, 0=off).",
+    },
+    "pyramid_max_levels": {
+        "type": "int", "default": 2, "min": 1, "max": 4,
+        "description": "Max pyramid levels (1 base + N adds; 2 = base + 2 adds total 3 entries).",
+    },
+    "pyramid_trigger_atr": {
+        "type": "float", "default": 1.0, "min": 0.3, "max": 3.0,
+        "description": "Floating profit (in daily-ATR multiples) to trigger next pyramid add.",
+    },
+    "pyramid_gamma": {
+        "type": "float", "default": 0.5, "min": 0.2, "max": 1.0,
+        "description": "Anti-martingale decay per add: add_lots = gamma^level × base. 0.5 = halve each level.",
+    },
+    "pyramid_breakeven_on_add": {
+        "type": "int", "default": 1, "min": 0, "max": 1,
+        "description": "Move prior-lot stop to entry price (breakeven) after first pyramid add.",
     },
     **_INDICATOR_PARAMS,
 }
@@ -421,6 +448,11 @@ class NightSessionLongEntry(EntryPolicy):
         sl_pts = effective_atr * self._atr_sl_mult
         self._entered_this_session = True
 
+        # Emit lots=1 as a semantic signal. The backtester's PortfolioSizer
+        # (attached by default in facade._build_runner) scales this to
+        # risk-appropriate contract count from equity × risk_per_trade /
+        # (stop_distance × point_value). Live runners configure their own
+        # sizer via SizingConfig.
         return EntryDecision(
             lots=1,
             contract_type="large",
@@ -556,6 +588,11 @@ def create_night_session_long_engine(
     rsi_filter_enabled: int = 0,
     rsi_max_entry: float = 70.0,
     rsi_period: int = 14,
+    pyramid_enabled: int = 0,
+    pyramid_max_levels: int = 2,
+    pyramid_trigger_atr: float = 1.0,
+    pyramid_gamma: float = 0.5,
+    pyramid_breakeven_on_add: int = 1,
     session_id: str | None = None,
 ) -> "PositionEngine":
     """Build a PositionEngine for night session long strategy."""
@@ -567,6 +604,17 @@ def create_night_session_long_engine(
     )
 
     engine_config = EngineConfig(max_loss=max_loss)
+    add_policy: AddPolicy = (
+        AtrPyramidAdd(
+            max_levels=int(pyramid_max_levels),
+            trigger_atr=float(pyramid_trigger_atr),
+            gamma=float(pyramid_gamma),
+            breakeven_on_first_add=bool(pyramid_breakeven_on_add),
+            session_filter=lambda ts: _in_night_session(ts.time()),
+        )
+        if pyramid_enabled
+        else NoAddPolicy()
+    )
     return PositionEngine(
         entry_policy=NightSessionLongEntry(
             indicators=indicators,
@@ -585,7 +633,7 @@ def create_night_session_long_engine(
             rsi_max_entry=rsi_max_entry,
             session_id=session_id,
         ),
-        add_policy=NoAddPolicy(),
+        add_policy=add_policy,
         stop_policy=NightSessionLongStop(
             indicators=indicators,
             atr_sl_mult=atr_sl_mult,

@@ -61,7 +61,15 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _OVERLAY_MAX_MULTIPLIER = 2.0
-_STOP_ATR_MULT = 15.0  # nominal; base lot protected by EngineConfig.min_hold_lots=1.0
+# Stop distance as a fraction of entry price. Drives PortfolioSizer risk-lots
+# (risk_lots = equity × risk_per_trade / (price × _SIZING_STOP_PCT × point_value)).
+# We do NOT use snapshot.atr["daily"] because the 5m-bar adapter's "daily" key
+# reports a cumulative intra-day range that is ~10x a true daily ATR on TMF,
+# which collapses risk-based sizing to zero lots. 3% is a conservative swing
+# stop; the base lot is still protected from actual stop-out by
+# EngineConfig.min_hold_lots=1.0.
+_SIZING_STOP_PCT = 0.03
+_STOP_ATR_MULT = 3.0  # retained for legacy PyramidConfig plumbing only
 
 # Deprecated kwargs accepted silently (with DeprecationWarning) from stale
 # configs / registry entries for one release window.
@@ -248,7 +256,9 @@ class InverseVolEntryPolicy(EntryPolicy):
         if atr is None or atr <= 0:
             return None
 
-        stop_distance = _STOP_ATR_MULT * atr
+        # Stop distance for sizing = price × _SIZING_STOP_PCT (see constant
+        # comment for why we avoid snapshot.atr["daily"] on 5m-bar inputs).
+        stop_distance = snapshot.price * _SIZING_STOP_PCT
         return EntryDecision(
             lots=1.0,
             contract_type="large",
@@ -258,6 +268,7 @@ class InverseVolEntryPolicy(EntryPolicy):
                 "rv": self.hub.rv_value,
                 "desired_overlay": self.hub.desired_overlay_lots,
                 "sizing_mode": "base",
+                "sizing_stop_pct": _SIZING_STOP_PCT,
             },
         )
 

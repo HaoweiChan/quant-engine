@@ -155,7 +155,7 @@ class TestSchemaFactoryConsistency:
         import inspect
 
         from src.strategies.registry import get_all
-        skip_params = {"max_loss", "lots", "contract_type", "latest_entry_time", "pyramid_risk_level"}
+        skip_params = {"max_loss", "lots", "contract_type", "latest_entry_time", "pyramid_risk_level", "session_id"}
         for slug, info in get_all().items():
             import importlib
             mod = importlib.import_module(info.module)
