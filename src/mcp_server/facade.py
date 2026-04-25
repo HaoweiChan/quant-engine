@@ -737,6 +737,19 @@ def _build_runner(
         fm = MarketImpactFillModel(params=impact_params)
     else:
         fm = fill_model
+    # Extract optional sizing overrides from strategy_params (stripped before
+    # passing to factory). Two generic tuning knobs: `risk_per_trade` sets the
+    # fraction of equity risked per trade (drives `risk_lots = equity ×
+    # risk_per_trade / (stop_distance × point_value)`), and `margin_cap` sets
+    # the upper bound (`max_lots_by_margin = equity × margin_cap /
+    # margin_per_unit`). The sizer applies `min(risk_lots, margin_cap_lots)`,
+    # so margin_cap IS the hard cap — no separate max_lots knob needed.
+    # `max_lots` is accepted for advanced callers who explicitly want an
+    # additional hard cap; popped here so it never reaches the factory.
+    _risk_per_trade = float(merged.pop("risk_per_trade", 0.02))
+    _margin_cap = float(merged.pop("margin_cap", 0.50))
+    _max_lots_override = merged.pop("max_lots", None)
+
     merged.pop("bar_agg", None)
     if "max_loss" not in merged:
         merged["max_loss"] = 500_000
@@ -746,12 +759,26 @@ def _build_runner(
     if "initial_capital" in _sig.parameters:
         merged["initial_capital"] = initial_equity
     engine_factory = lambda: factory(**merged)  # noqa: E731
+    # Default SizingConfig so strategies emitting `lots=1` scale with equity.
+    # Without this the BacktestRunner runs with sizer=None and the literal lots
+    # from each EntryDecision flows through unchanged — i.e. 1 contract at any
+    # account size, which silently wastes the Sharpe of any strategy that does
+    # not hand-roll its own sizing. See docs/night-session-investigation.md.
+    from src.core.sizing import default_sizing_config
+    default_sizing = default_sizing_config(
+        initial_equity=initial_equity,
+        risk_per_trade=_risk_per_trade,
+        margin_cap=_margin_cap,
+    )
+    if _max_lots_override is not None:
+        default_sizing.max_lots = int(_max_lots_override)
     return BacktestRunner(
         engine_factory,
         adapter,
         fill_model=fm,
         initial_equity=initial_equity,
         periods_per_year=periods_per_year,
+        sizing_config=default_sizing,
     )
 
 
@@ -1474,7 +1501,11 @@ def _mc_single_path(args: tuple) -> tuple[float, float, float]:
     )
     engine_factory = lambda: factory(**strategy_params)  # noqa: E731
     adapter = _get_adapter()
-    runner = BacktestRunner(engine_factory, adapter)
+    from src.core.sizing import default_sizing_config
+    runner = BacktestRunner(
+        engine_factory, adapter,
+        sizing_config=default_sizing_config(initial_equity=2_000_000.0),
+    )
     bars, timestamps = _bars_from_path(path_array, path_config, timeframe, bar_agg)
     result = runner.run(bars, timestamps=timestamps)
     pnl = result.equity_curve[-1] - result.equity_curve[0]
@@ -1674,7 +1705,11 @@ def _run_mc_with_runner(
         )
         engine_factory = lambda: factory(**strategy_params)  # noqa: E731
         adapter = _get_adapter()
-        runner = BacktestRunner(engine_factory, adapter)
+        from src.core.sizing import default_sizing_config
+        runner = BacktestRunner(
+            engine_factory, adapter,
+            sizing_config=default_sizing_config(initial_equity=2_000_000.0),
+        )
         results_list = []
         for i in range(n_paths):
             cfg = PathConfig(
@@ -2168,7 +2203,11 @@ def run_stress_for_mcp(
         if "max_loss" not in merged:
             merged["max_loss"] = 500_000
         engine_factory = lambda: factory(**merged)  # noqa: E731
-        runner = BacktestRunner(engine_factory, adapter)
+        from src.core.sizing import default_sizing_config
+        runner = BacktestRunner(
+            engine_factory, adapter,
+            sizing_config=default_sizing_config(initial_equity=2_000_000.0),
+        )
         prices = _generate_scenario_prices(scenario_obj, 20000.0)
         bar_agg = _get_stress_bar_agg(resolved_slug)
         if bar_agg > 1:

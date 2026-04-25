@@ -148,6 +148,16 @@ TOOLS: list[Tool] = [
                     ),
                     "default": False,
                 },
+                "initial_equity": {
+                    "type": "number",
+                    "description": (
+                        "Starting account equity in NTD. Default 2,000,000. "
+                        "Folded into the cache key, so changing it both reflects "
+                        "the correct sizing and forces a fresh run. Set to 100000 "
+                        "(or similar) to validate strategies at small-account sizes."
+                    ),
+                    "default": 2000000.0,
+                },
             },
             "required": ["symbol", "start", "end"],
         },
@@ -1178,6 +1188,7 @@ def register_tools(app: Server) -> None:
                         strategy=arguments.get("strategy", "pyramid"),
                         strategy_params=arguments.get("strategy_params"),
                         intraday=arguments.get("intraday", False),
+                        initial_equity=arguments.get("initial_equity", 2_000_000.0),
                     ),
                 )
                 if "metrics" in result:
