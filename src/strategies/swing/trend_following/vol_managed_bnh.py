@@ -371,6 +371,7 @@ def create_vol_managed_bnh_engine(
     dd_breaker_pct: float = 0.15,
     dd_reentry_pct: float = 0.05,
     vol_target_annual: float = 0.20,
+    session_id: str | None = None,  # noqa: ARG001 - accepted for runner parity; B&H is not session-scoped
     **kwargs,
 ) -> PositionEngine:
     """Build a PositionEngine for vol-managed B&H (inverse-vol overlay).
