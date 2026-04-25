@@ -18,6 +18,7 @@ class NotificationDispatcher:
     """Send messages to a Telegram chat. Failures are logged, never raised.
 
     In dev mode (EXECUTION_ENV=dev), logs notifications but skips Telegram send.
+    Also skips notifications for accounts starting with "mock".
     """
 
     def __init__(self, bot_token: str, chat_id: str, account_id: str | None = None) -> None:
@@ -44,10 +45,14 @@ class NotificationDispatcher:
         except Exception as e:
             logger.debug("activity_log_write_failed", error=str(e))
 
-    async def dispatch(self, message: str) -> bool:
+    async def dispatch(self, message: str, account_id: str | None = None) -> bool:
         self._log_to_activity(message)
         if self._dev_mode:
             logger.debug("telegram_skipped_dev_mode", message=message[:100])
+            return True
+        check_account = account_id or self._account_id
+        if check_account and check_account.startswith("mock"):
+            logger.debug("telegram_skipped_mock_account", account=check_account)
             return True
         try:
             resp = await self._client.post(
