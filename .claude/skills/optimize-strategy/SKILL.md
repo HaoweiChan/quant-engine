@@ -244,6 +244,17 @@ Constraints:
 - Check parameter interactions from `references/position-sizing.md` (e.g., trail > stop).
 - Keep Kelly fraction ≤ 0.25 and margin_limit ≤ 0.50 — these are safety rails.
 
+**Before writing a new `AddPolicy` subclass**: check `src/core/policies.py` for
+existing reusable classes. The canonical ATR-profit pyramid pattern
+("+K ATR floating profit triggers another add, sized gamma^level") lives in
+`AtrPyramidAdd` and supports an optional `session_filter` callable for
+session-scoped strategies. Most trend-following adds should use it directly —
+do not copy-paste `PyramidAddPolicy` or prior per-strategy subclasses.
+Write a new subclass only if the sizing or trigger logic is genuinely
+strategy-specific (e.g., `vol_managed_bnh` inverse-vol overlay,
+`PyramidAddPolicy` per-level trigger schedule); document the reason in the
+class docstring.
+
 ---
 
 ### Stage 4: EVALUATE

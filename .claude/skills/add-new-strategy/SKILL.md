@@ -165,6 +165,38 @@ STRATEGY_META: dict = {
 
 Factory kwarg names MUST match `PARAM_SCHEMA` keys (excluding `max_loss`, `lots`, `contract_type`, `pyramid_risk_level`).
 
+## Reusable AddPolicy (Pyramiding)
+
+**Before writing a new `AddPolicy` subclass, check `src/core/policies.py` for
+existing reusable classes.** Most trend-following strategies follow the same
+"+K ATR profit triggers another add, sized gamma^level" pattern — do not
+re-implement it.
+
+Use the shared class:
+
+```python
+from src.core.policies import AtrPyramidAdd
+
+add_policy = AtrPyramidAdd(
+    max_levels=pcfg.max_levels,
+    trigger_atr=pcfg.add_trigger_atr[0],
+    gamma=pcfg.gamma or 0.5,
+    breakeven_on_first_add=True,
+    session_filter=lambda ts: _in_night_session(ts.time()),  # optional
+    atr_key="daily",
+)
+```
+
+**Write a new subclass only if the add logic is genuinely strategy-specific**
+(e.g., `vol_managed_bnh` inverse-vol overlay, `PyramidAddPolicy` per-level
+trigger schedule). In that case, document in the class docstring why
+`AtrPyramidAdd` was insufficient.
+
+Pyramid parameters are NOT in `PARAM_SCHEMA` — they are account-level via
+`EngineConfig.pyramid_risk_level`. The exception is strategies like
+`night_session_long` that expose pyramid tunables to explore profit
+maximization during optimization.
+
 ## Intraday Session Helpers
 
 Import from `src.strategies._session_utils`:
