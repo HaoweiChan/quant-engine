@@ -34,7 +34,7 @@ function formatNaiveTimestamp(date: Date): string {
   const dd = date.getUTCDate().toString().padStart(2, "0");
   const hh = date.getUTCHours().toString().padStart(2, "0");
   const min = date.getUTCMinutes().toString().padStart(2, "0");
-  return `${yyyy}-${mm}-${dd} ${hh}:${min}:00`;
+  return `${yyyy}/${mm}/${dd} ${hh}:${min}:00`;
 }
 
 function isEmptyBar(bar: OHLCVBar): boolean {
@@ -92,7 +92,7 @@ function buildNaiveTimestamp(parts: { year: number; month: number; day: number; 
   return formatNaiveTimestamp(new Date(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, 0)));
 }
 
-function getTaipeiParts(
+export function getTaipeiParts(
   ts: string,
 ): { month: number; day: number; hour: number; minute: number } | null {
   const parts = extractTaipeiClockParts(ts);
@@ -131,6 +131,18 @@ function alignDisplayTimestamp(timestamp: string, timeframeMinutes: number): str
   if (timeframeMinutes >= 1440) {
     return buildNaiveTimestamp({ year: local.year, month: local.month, day: local.day, hour: 0, minute: 0 });
   }
+  // For pre-aggregated bars (5m, 1h, etc.), the backend already provides
+  // session-relative right-aligned timestamps. Just return them as-is.
+  if (timeframeMinutes >= 5) {
+    return buildNaiveTimestamp({
+      year: local.year,
+      month: local.month,
+      day: local.day,
+      hour: local.hour,
+      minute: local.minute,
+    });
+  }
+  // For 1m bars (or if needed), floor to timeframe boundary
   const mins = local.hour * 60 + local.minute;
   const alignedMinute = Math.floor(mins / timeframeMinutes) * timeframeMinutes;
   return buildNaiveTimestamp({
@@ -193,11 +205,16 @@ export function buildSequentialTimes(
     if (!parts) return "";
     const minuteOfDay = parts.hour * 60 + parts.minute;
     const hhmm = `${parts.hour.toString().padStart(2, "0")}:${parts.minute.toString().padStart(2, "0")}`;
-    const dateStr = `${parts.month}/${parts.day}`;
+    const dateStr = `${parts.month.toString().padStart(2, "0")}/${parts.day.toString().padStart(2, "0")}`;
+    const fullDateTime = `${dateStr} ${hhmm}`;
+
+    // With left-aligned bars, session open bars have timestamps at session start:
+    // - Night session: 15:00 (session opens at 15:00)
+    // - Day session: 08:45 (session opens at 08:45)
     const isNightOpen = minuteOfDay === NIGHT_START_MIN;
     const isDayOpen = minuteOfDay === DAY_START_MIN;
     const isSessionOpen = isNightOpen || isDayOpen;
-    const sessionPrefix = isNightOpen ? "夜" : isDayOpen ? "日" : "";
+    const sessionPrefix = isNightOpen ? "Night " : isDayOpen ? "Day " : "";
 
     if (stepSeconds >= 86400) {
       return dateStr;
@@ -205,28 +222,28 @@ export function buildSequentialTimes(
 
     // 1h timeframe: label session opens with date+time+marker, every 4h otherwise
     if (stepSeconds > 15 * 60) {
-      if (isSessionOpen) return `${sessionPrefix}${dateStr} ${hhmm}`;
+      if (isSessionOpen) return `${sessionPrefix}${fullDateTime}`;
       // Show every 4 hours on the hour, or bars that land at an even hour boundary
       // (handles 08:00, 12:00, 16:00, 20:00, 00:00 etc.)
-      if (parts.minute === 0 && parts.hour % 4 === 0) return hhmm;
+      if (parts.minute === 0 && parts.hour % 4 === 0) return fullDateTime;
       return "";
     }
 
     // Sub-hourly timeframes: session opens get a session marker prefix
-    if (isSessionOpen) return `${sessionPrefix}${hhmm}`;
+    if (isSessionOpen) return `${sessionPrefix}${fullDateTime}`;
 
     // 15m timeframe: label every hour
     if (stepSeconds > 5 * 60) {
-      return parts.minute === 0 ? hhmm : "";
+      return parts.minute === 0 ? fullDateTime : "";
     }
 
     // 5m timeframe: label every 15 minutes
     if (stepSeconds > 60) {
-      return parts.minute % 15 === 0 ? hhmm : "";
+      return parts.minute % 15 === 0 ? fullDateTime : "";
     }
 
     // 1m timeframe: label every hour
-    return parts.minute === 0 ? hhmm : "";
+    return parts.minute === 0 ? fullDateTime : "";
   };
   return { times, formatTick };
 }
@@ -236,9 +253,12 @@ export function toProfessionalSessionBars(
   timeframeMinutes: number,
 ): OHLCVBar[] {
   const mapped: { bar: OHLCVBar; sessionTs: string; displayTs: string }[] = [];
+
   for (const bar of bars) {
     if (isEmptyBar(bar)) continue;
-    const sessionTs = mapTaipeiSessionTimestamp(bar.timestamp, timeframeMinutes);
+    // For 1m bars: use session-aware timestamps for proper session boundary handling
+    // For 1h+ bars: use calendar time (no session remapping) to avoid deduping bars
+    const sessionTs = timeframeMinutes <= 1 ? mapTaipeiSessionTimestamp(bar.timestamp, timeframeMinutes) : bar.timestamp;
     const displayTs = alignDisplayTimestamp(bar.timestamp, timeframeMinutes);
     if (!sessionTs) continue;
     if (!displayTs) continue;
@@ -258,11 +278,12 @@ export function toProfessionalSessionBars(
     lastTime = t;
   }
   if (dedup.length > 0) {
-    return dedup.map((entry) => ({
+    const result = dedup.map((entry) => ({
       ...entry.bar,
       // Keep display clock in Taipei local session time while preserving session-aware ordering.
       timestamp: entry.displayTs,
     }));
+    return result;
   }
   return bars
     .filter((bar) => !isEmptyBar(bar))

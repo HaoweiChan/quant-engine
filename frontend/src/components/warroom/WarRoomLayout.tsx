@@ -218,6 +218,8 @@ export function WarRoomLayout() {
     fetchOHLCV(symbol, start, today, tf).then((r) => {
       setBarError(null);
       setFallbackSymbol(r.fallback_symbol ?? null);
+      const count417_api = r.bars.filter(b => b.timestamp.includes('2026-04-17') && (b.timestamp.includes('16:') || b.timestamp.includes('17:') || b.timestamp.includes('23:'))).length;
+      console.log(`[DEBUG] API response for ${symbol}: ${r.bars.length} bars, 4/17 evening=${count417_api}`);
       if (incremental && cached.length > 0) {
         // Incremental refresh: only append strictly-newer bars, never replace cached data
         if (r.bars.length > 0) {
@@ -230,6 +232,7 @@ export function WarRoomLayout() {
         // Otherwise keep cached bars untouched
       } else {
         // Full load (initial or timeframe/symbol change)
+        console.log(`[DEBUG] setBars() called with ${r.bars.length} bars`);
         setBars(r.bars);
       }
       if (incremental || r.bars.length === 0) return;

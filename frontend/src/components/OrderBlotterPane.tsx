@@ -38,9 +38,12 @@ function strategyLabel(slug: string | undefined): string {
 function fmtTime(ts: number | string): string {
   try {
     const date = typeof ts === 'string' ? new Date(ts) : new Date(ts * 1000);
-    const dateStr = date.toLocaleDateString(undefined, { year: '2-digit', month: '2-digit', day: '2-digit' });
-    const timeStr = date.toLocaleTimeString(undefined, { hour12: false });
-    return `${dateStr} ${timeStr}`;
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}`;
   } catch {
     return "—";
   }

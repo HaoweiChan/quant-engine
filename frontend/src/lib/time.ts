@@ -71,7 +71,7 @@ export function normalizeToNaiveTaipei(ts: string): string {
     hour12: false,
   }).formatToParts(d);
   const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? "00";
-  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
+  return `${get("year")}/${get("month")}/${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
 }
 
 /**

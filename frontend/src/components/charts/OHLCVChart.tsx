@@ -2,6 +2,7 @@ import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef,
 import { createChart, createSeriesMarkers, type IChartApi, type ISeriesApi, type ISeriesMarkersPluginApi, type LineWidth, CandlestickSeries, HistogramSeries, LineSeries, type Time } from "lightweight-charts";
 import type { OHLCVBar, TradeSignal } from "@/lib/api";
 import { aggregateBars, buildSequentialTimes, toProfessionalSessionBars, SEQ_BASE_EPOCH } from "@/lib/sessionChart";
+import { getTaipeiParts } from "@/lib/sessionChart";
 import { colors } from "@/lib/theme";
 import { RangeSlider } from "./RangeSlider";
 
@@ -216,11 +217,28 @@ export const OHLCVChart = React.memo(forwardRef<OHLCVChartHandle, OHLCVChartProp
       const idx = Math.round((t - SEQ_BASE_EPOCH) / currentStep);
       if (idx < 0 || idx >= barsRef.current.length) { setHoverBar(null); return; }
       const bar = barsRef.current[idx];
-      // Always show full date+time in hover tooltip (MM/DD HH:MM)
+      // Add session markers to hover tooltip
+      const parts = getTaipeiParts(bar.timestamp);
       const tsNorm = bar.timestamp.includes("T") ? bar.timestamp : bar.timestamp.replace(" ", "T");
       const tsClean = tsNorm.slice(0, 16).replace("T", " ").replace(/-/g, "/");
+
+      let timeDisplay = tsClean;
+      if (parts && timeframeMinutes === 60) {
+        const minuteOfDay = parts.hour * 60 + parts.minute;
+        const NIGHT_START_MIN = 15 * 60;  // 15:00
+        const DAY_START_MIN = 8 * 60 + 45;  // 08:45
+        // With left-aligned bars, session open bars are at the session start times
+        const isNightOpen = minuteOfDay === NIGHT_START_MIN;
+        const isDayOpen = minuteOfDay === DAY_START_MIN;
+        if (isNightOpen) {
+          timeDisplay = `Night ${tsClean}`;
+        } else if (isDayOpen) {
+          timeDisplay = `Day ${tsClean}`;
+        }
+      }
+
       setHoverBar({
-        time: tsClean,
+        time: timeDisplay,
         o: bar.open, h: bar.high, l: bar.low, c: bar.close, v: bar.volume,
       });
     });
