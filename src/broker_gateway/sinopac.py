@@ -1,24 +1,33 @@
-"""SinopacGateway — live account state + market data from shioaji (TAIFEX futures)."""
+"""SinopacGateway — trading-side gateway: account state + order placement.
+
+Tick subscription was deliberately removed from this class. The data feed
+(行情／資料) is owned by ``src.api.helpers._start_market_data_subscriber``,
+which logs in with the data-only API key/secret pair stored in GSM as
+``SHIOAJI_API_KEY`` / ``SHIOAJI_API_SECRET`` (resolved via the ``[sinopac]``
+group mapping in ``config/secrets.toml``). Those credentials carry *only*
+行情／資料 permission. Per-account trading credentials live under
+``{ACCOUNT_ID}_API_KEY`` / ``{ACCOUNT_ID}_API_SECRET`` (e.g.
+``1839302_API_KEY``) and need only 帳務 + 交易 permissions; they no
+longer subscribe ticks. This separation makes a leaked trading key
+unable to impersonate the data feed and a leaked data key unable to
+place orders.
+"""
 from __future__ import annotations
 
 import time
 import asyncio
 import structlog
-import threading
 from typing import Any
-from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 
 _TAIPEI_TZ = timezone(timedelta(hours=8))
 
 from src.broker_gateway.abc import BrokerGateway
-from src.broker_gateway.live_bar_store import LiveMinuteBarStore
 from src.broker_gateway.types import AccountSnapshot, Fill, LivePosition, OpenOrder, OrderEvent
 
 logger = structlog.get_logger(__name__)
 
 sj: Any = None
-_SUBSCRIBED_CONTRACTS: list[str] = []
 
 
 def _ensure_shioaji() -> Any:
@@ -64,9 +73,13 @@ class SinopacGateway(BrokerGateway):
         self._connect_error: str | None = None
         self._last_connect_attempt_ts = 0.0
         self._reconnect_interval_secs = 20.0
-        self._tick_loop: asyncio.AbstractEventLoop | None = None
-        self._live_bar_store = LiveMinuteBarStore()
         self._sim_equity: float = 100_000.0
+        # Background reconnect supervisor — when started, polls
+        # ``is_connected`` every ``_reconnect_interval_secs`` and calls
+        # ``_maybe_reconnect_disconnected`` proactively, so a silent
+        # broker disconnect doesn't wait for the next account snapshot.
+        self._reconnect_task: asyncio.Task | None = None
+        self._reconnect_stopped: asyncio.Event | None = None
 
     @property
     def broker_name(self) -> str:
@@ -83,12 +96,22 @@ class SinopacGateway(BrokerGateway):
         api_secret: str | None = None,
         simulation: bool = False,
     ) -> None:
-        """Login to shioaji.
+        """Login to shioaji with trading-only credentials.
 
         Credential resolution order:
-        1. Explicit api_key / api_secret arguments
-        2. Account-ID-based GSM secrets  (ACCOUNT_ID_API_KEY, ACCOUNT_ID_API_SECRET)
-        3. Legacy group-based GSM lookup via secrets.toml [sinopac] section
+        1. Explicit ``api_key`` / ``api_secret`` arguments (test / manual override)
+        2. Account-specific GSM secrets (``{ACCOUNT_ID}_API_KEY`` / ``{ACCOUNT_ID}_API_SECRET``)
+
+        The legacy group-level ``[sinopac]`` fallback was deliberately
+        removed. Those credentials carry **only** market-data permission
+        (行情／資料) and live in GSM as ``SINOPAC_API_KEY`` /
+        ``SINOPAC_API_SECRET``, owned by the standalone subscriber in
+        ``src.api.helpers``. Falling back to them on the trading path
+        masks misconfiguration: the gateway would silently log in with
+        a key that has no 交易 permission, then every order placement
+        would fail at order time instead of at startup. The fail-fast
+        behaviour below — refusing to connect when no per-account
+        creds are present — surfaces the misconfiguration immediately.
         """
         self._account_id = account_id or self._account_id
         self._simulation = simulation
@@ -107,22 +130,12 @@ class SinopacGateway(BrokerGateway):
             candidates.append(("explicit", api_key, api_secret))
         if api_key is None or api_secret is None:
             from src.broker_gateway.registry import load_credentials
-            from src.secrets.manager import get_secret_manager
-            sm = get_secret_manager()
             if account_id:
                 creds = load_credentials(account_id)
                 acct_key = creds.get("api_key")
                 acct_secret = creds.get("api_secret")
                 if acct_key and acct_secret:
                     candidates.append(("account_specific", acct_key, acct_secret))
-            try:
-                group = sm.get_group("sinopac")
-                group_key = group.get("api_key")
-                group_secret = group.get("secret_key")
-                if group_key and group_secret:
-                    candidates.append(("group_fallback", group_key, group_secret))
-            except Exception:
-                pass
         unique_candidates: list[tuple[str, str, str]] = []
         seen_pairs: set[tuple[str, str]] = set()
         for source, key, secret in candidates:
@@ -133,8 +146,14 @@ class SinopacGateway(BrokerGateway):
             unique_candidates.append((source, key, secret))
         if not unique_candidates:
             self._connect_error = (
-                f"No credentials found for account '{account_id}'. "
-                "Enter them in Trading → Accounts."
+                f"No trading credentials found for account '{account_id}'. "
+                f"Set {account_id.upper().replace('-','_')}_API_KEY and "
+                f"{account_id.upper().replace('-','_')}_API_SECRET in GSM "
+                f"(via Trading → Accounts in the dashboard). The data-only "
+                f"SHIOAJI_API_KEY fallback was removed — a key with only "
+                f"行情 permission cannot place orders."
+            ) if account_id else (
+                "No trading credentials supplied and no account_id to look up."
             )
             logger.warning("sinopac_no_credentials", account_id=account_id)
             return
@@ -151,7 +170,10 @@ class SinopacGateway(BrokerGateway):
                     credential_source=source,
                     simulation=simulation,
                 )
-                self._subscribe_market_data()
+                # NOTE: tick subscription is intentionally NOT done here —
+                # the market-data feed is owned by the standalone subscriber
+                # in ``src.api.helpers`` which uses a separate data-only
+                # API key. Trading credentials shouldn't grant data access.
                 return
             except Exception as exc:
                 last_error = exc
@@ -175,108 +197,13 @@ class SinopacGateway(BrokerGateway):
                 )
         self._connect_error = f"Login failed: {last_error}" if last_error else "Login failed"
 
-    def _subscribe_market_data(self) -> None:
-        """Subscribe to near-month TX tick data and bridge to WebSocket broadcaster.
-
-        Skipped in simulation mode — the Sinopac simulation server does not
-        stream real ticks, and the subscription calls block the asyncio event
-        loop for several seconds (they include a time.sleep and contract fetches)
-        which hangs all other concurrent requests.
-        """
-        import time
-        global _SUBSCRIBED_CONTRACTS
-        if not self._api:
-            return
-        if getattr(self, "_simulation", False):
-            return
-        try:
-            from src.api.ws.live_feed import push_tick
-        except ImportError:
-            logger.warning("sinopac_push_tick_unavailable")
-            return
-        try:
-            from src.api.main import get_main_loop
-            loop = get_main_loop()
-            if loop and not loop.is_closed():
-                self._tick_loop = loop
-                logger.info("sinopac_main_loop_captured")
-            else:
-                logger.warning("sinopac_no_event_loop")
-        except Exception:
-            pass
-        # Register tick callback BEFORE subscribing
-        def _on_tick(exchange: Any, tick: Any) -> None:
-            code = getattr(tick, "code", "")
-            price = float(getattr(tick, "close", 0))
-            volume = int(getattr(tick, "volume", 0))
-            if price <= 0:
-                return
-            symbol = "TX" if code.startswith("TXF") else "MTX" if code.startswith("MXF") else "TMF" if code.startswith("TMF") else code
-            raw_ts = getattr(tick, "datetime", None)
-            if isinstance(raw_ts, datetime):
-                tick_timestamp = raw_ts if raw_ts.tzinfo else raw_ts.replace(tzinfo=ZoneInfo("Asia/Taipei"))
-            else:
-                tick_timestamp = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Taipei"))
-            try:
-                self._live_bar_store.ingest_tick(symbol, price, volume, tick_timestamp)
-            except Exception as exc:
-                logger.debug("sinopac_live_bar_upsert_error", symbol=symbol, error=str(exc))
-            try:
-                loop = self._tick_loop
-                if not loop or loop.is_closed():
-                    from src.api.main import get_main_loop
-                    loop = get_main_loop()
-                    self._tick_loop = loop
-                if loop and loop.is_running():
-                    asyncio.run_coroutine_threadsafe(push_tick(symbol, price, volume, tick_timestamp), loop)
-            except Exception as exc:
-                logger.debug("sinopac_tick_push_error", error=str(exc))
-        try:
-            self._api.quote.set_on_tick_fop_v1_callback(_on_tick)
-            logger.info("sinopac_tick_callback_registered")
-        except Exception as exc:
-            logger.warning("sinopac_tick_callback_failed", error=str(exc))
-        # Register event handler to capture subscribe confirmations
-        @self._api.on_event
-        def _on_event(resp_code: int, event_code: int, info: str, event: str) -> None:
-            logger.info("sinopac_event", resp_code=resp_code, event_code=event_code, info=info, msg=event)
-        # Wait for contracts to be fully loaded
-        time.sleep(2)
-        futures_groups = [
-            ("TX", "TXF"),
-            ("MTX", "MXF"),
-            ("TMF", "TMF"),
-        ]
-        for symbol, group_name in futures_groups:
-            if symbol in _SUBSCRIBED_CONTRACTS:
-                continue
-            try:
-                group = getattr(self._api.Contracts.Futures, group_name)
-                candidates = [c for c in group if getattr(c, "code", "")[-2:] not in ("R1", "R2")]
-                if not candidates:
-                    logger.warning("sinopac_no_contracts_found", symbol=symbol)
-                    continue
-                contract = min(candidates, key=lambda c: getattr(c, "delivery_date", "9999"))
-                code = getattr(contract, "code", "?")
-                self._api.quote.subscribe(
-                    contract,
-                    quote_type=sj.constant.QuoteType.Tick,
-                    version=sj.constant.QuoteVersion.v1,
-                )
-                _SUBSCRIBED_CONTRACTS.append(symbol)
-                logger.info("sinopac_tick_subscribed", symbol=symbol, code=code)
-            except Exception as exc:
-                logger.warning("sinopac_tick_subscribe_failed", symbol=symbol, error=str(exc))
-
     def disconnect(self) -> None:
-        global _SUBSCRIBED_CONTRACTS
         if self._api:
             try:
                 self._api.logout()
             except Exception:
                 pass
         self._connected = False
-        _SUBSCRIBED_CONTRACTS.clear()
 
     def _fetch_snapshot(self) -> AccountSnapshot:
         if not self._connected or not self._api:
@@ -438,6 +365,7 @@ class SinopacGateway(BrokerGateway):
         quantity: int,
         order_type: str = "market",
         price: float = 0.0,
+        daytrade: bool = False,
     ) -> dict[str, Any]:
         """Place an order through the Shioaji API.
 
@@ -447,6 +375,9 @@ class SinopacGateway(BrokerGateway):
             quantity: Number of lots
             order_type: "market" or "limit"
             price: Limit price (ignored for market orders)
+            daytrade: When True, sets ``octype=FuturesOCType.DayTrade`` so
+                Sinopac applies 當沖 half-margin BP (account must have 當沖
+                pre-enabled). Default False keeps existing ``Auto`` behaviour.
 
         Returns dict with order_id, status, and contract info.
         """
@@ -461,6 +392,10 @@ class SinopacGateway(BrokerGateway):
             raise ValueError(f"No contracts found for {symbol}")
         contract = min(candidates, key=lambda c: getattr(c, "delivery_date", "9999"))
         action = _sj.constant.Action.Buy if side == "buy" else _sj.constant.Action.Sell
+        octype = (
+            _sj.constant.FuturesOCType.DayTrade if daytrade
+            else _sj.constant.FuturesOCType.Auto
+        )
         if order_type == "market":
             sj_order = self._api.Order(
                 action=action,
@@ -468,7 +403,7 @@ class SinopacGateway(BrokerGateway):
                 quantity=quantity,
                 price_type=_sj.constant.FuturesPriceType.MKT,
                 order_type=_sj.constant.OrderType.IOC,
-                octype=_sj.constant.FuturesOCType.Auto,
+                octype=octype,
                 account=self._api.futopt_account,
             )
         else:
@@ -478,7 +413,7 @@ class SinopacGateway(BrokerGateway):
                 quantity=quantity,
                 price_type=_sj.constant.FuturesPriceType.LMT,
                 order_type=_sj.constant.OrderType.ROD,
-                octype=_sj.constant.FuturesOCType.Auto,
+                octype=octype,
                 account=self._api.futopt_account,
             )
         trade = self._api.place_order(contract, sj_order)
@@ -489,7 +424,7 @@ class SinopacGateway(BrokerGateway):
             "sinopac_order_placed",
             order_id=order_id, symbol=symbol, code=code,
             side=side, quantity=quantity, order_type=order_type,
-            price=price, status=status,
+            price=price, status=status, daytrade=daytrade,
         )
         return {
             "order_id": order_id,
@@ -608,6 +543,66 @@ class SinopacGateway(BrokerGateway):
         self._api = _sj.Shioaji(simulation=getattr(self, "_simulation", False))
         self.connect(account_id=self._account_id, simulation=getattr(self, "_simulation", False))
         logger.info("sinopac_reconnected")
+
+    def start_reconnect_loop(
+        self,
+        loop: asyncio.AbstractEventLoop | None = None,
+        interval_secs: float | None = None,
+    ) -> None:
+        """Start a background task that proactively reconnects on disconnect.
+
+        The on-demand path in ``_fetch_snapshot`` remains as a defensive
+        check, but waiting for the next account snapshot is too slow
+        when a long-running session has no other reason to hit the
+        broker for minutes at a time. This loop closes the gap.
+        """
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        target_loop = loop or asyncio.get_event_loop()
+        if interval_secs is not None and interval_secs > 0:
+            self._reconnect_interval_secs = interval_secs
+        self._reconnect_stopped = asyncio.Event()
+        self._reconnect_task = target_loop.create_task(self._reconnect_loop_body())
+        logger.info(
+            "sinopac_reconnect_loop_started",
+            interval_secs=self._reconnect_interval_secs,
+        )
+
+    def stop_reconnect_loop(self) -> None:
+        if self._reconnect_task is None:
+            return
+        if self._reconnect_stopped is not None:
+            self._reconnect_stopped.set()
+        if not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+        self._reconnect_task = None
+        self._reconnect_stopped = None
+        logger.info("sinopac_reconnect_loop_stopped")
+
+    async def _reconnect_loop_body(self) -> None:
+        try:
+            while True:
+                stopped = self._reconnect_stopped
+                if stopped is not None and stopped.is_set():
+                    return
+                if not self._connected and not getattr(self, "_ip_blocked", False):
+                    try:
+                        self._maybe_reconnect_disconnected()
+                    except Exception:
+                        logger.exception("sinopac_background_reconnect_failed")
+                # Sleep responsively: wake up if stop is requested.
+                if stopped is not None:
+                    try:
+                        await asyncio.wait_for(
+                            stopped.wait(), timeout=self._reconnect_interval_secs,
+                        )
+                        return
+                    except asyncio.TimeoutError:
+                        continue
+                else:
+                    await asyncio.sleep(self._reconnect_interval_secs)
+        except asyncio.CancelledError:
+            pass
 
     def _maybe_reconnect_disconnected(self) -> None:
         if self._connected:

@@ -90,6 +90,33 @@ class LiveMinuteBarStore:
             1: [],
             **{tf: [] for tf, _ in _STREAMING_TFS},
         }
+        # Per-symbol last-tick wall-clock epoch for the feed-staleness
+        # watchdog. Recorded inside ``ingest_tick`` regardless of whether
+        # the tick rolls a bar; the watchdog calls ``is_stale`` to halt
+        # sessions when the broker feed silently drops.
+        self._last_tick_epoch: dict[str, float] = {}
+
+    def last_tick_epoch(self, symbol: str) -> float | None:
+        """Wall-clock epoch of the most recent tick for ``symbol``, or None."""
+        return self._last_tick_epoch.get(symbol)
+
+    def tracked_symbols(self) -> list[str]:
+        """Symbols that have ever received a tick. Used by the watchdog."""
+        return list(self._last_tick_epoch.keys())
+
+    def is_stale(
+        self, symbol: str, now_epoch: float, max_silence_secs: float = 3.0,
+    ) -> bool:
+        """True when ``symbol`` has not received a tick in ``max_silence_secs``.
+
+        Returns False when no tick has ever been recorded — startup before
+        the first tick is not staleness, it's a not-yet-alive condition
+        that the connection-state machine handles separately.
+        """
+        last = self._last_tick_epoch.get(symbol)
+        if last is None:
+            return False
+        return (now_epoch - last) > max_silence_secs
 
     def register_bar_callback(self, callback: BarCompleteCallback) -> None:
         """Subscribe to 1m bar completions. Equivalent to
@@ -107,6 +134,10 @@ class LiveMinuteBarStore:
         if price <= 0:
             return
         local_ts = tick_ts if tick_ts.tzinfo else tick_ts.replace(tzinfo=TAIPEI_TZ)
+        # Record wall-clock arrival time for the staleness watchdog
+        # BEFORE the trading-minute filter, so a feed that's emitting
+        # ticks during the closed window still counts as alive.
+        self._last_tick_epoch[symbol] = local_ts.timestamp()
         minute_ts = (
             local_ts.astimezone(TAIPEI_TZ)
             .replace(second=0, microsecond=0, tzinfo=None)

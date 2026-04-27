@@ -6,6 +6,21 @@ from pathlib import Path
 
 from src.broker_gateway.types import AccountConfig
 
+
+class AccountAlreadyExistsError(ValueError):
+    """Raised when ``save_account`` is called with an id that already exists.
+
+    The caller is expected to either pick a different id or call
+    :meth:`AccountDB.update_account` if a real update was intended. The
+    previous ``INSERT OR REPLACE`` form silently overwrote rows, which
+    is how the original 100k Sinopac account was wiped out when a second
+    Sinopac account was added under the same default id ``sinopac-main``.
+    """
+
+    def __init__(self, account_id: str) -> None:
+        super().__init__(f"account '{account_id}' already exists")
+        self.account_id = account_id
+
 _DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "trading.db"
 
 _SCHEMA = """
@@ -82,16 +97,26 @@ class AccountDB:
             _migrate_drop_demo_trading(conn)
 
     def save_account(self, config: AccountConfig) -> None:
+        """Insert a brand-new account row.
+
+        Raises :class:`AccountAlreadyExistsError` when ``config.id`` is
+        already present. Callers that want to mutate an existing row
+        must call :meth:`update_account` instead — the silent-overwrite
+        path no longer exists at this layer.
+        """
         row = config.to_db_row()
         with self._conn() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO accounts "
-                "(id, broker, display_name, gateway_class, sandbox_mode, "
-                "guards_json, strategies_json) "
-                "VALUES (:id, :broker, :display_name, :gateway_class, "
-                ":sandbox_mode, :guards_json, :strategies_json)",
-                row,
-            )
+            try:
+                conn.execute(
+                    "INSERT INTO accounts "
+                    "(id, broker, display_name, gateway_class, sandbox_mode, "
+                    "guards_json, strategies_json) "
+                    "VALUES (:id, :broker, :display_name, :gateway_class, "
+                    ":sandbox_mode, :guards_json, :strategies_json)",
+                    row,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise AccountAlreadyExistsError(config.id) from exc
 
     def load_all_accounts(self) -> list[AccountConfig]:
         with self._conn() as conn:
@@ -109,4 +134,17 @@ class AccountDB:
         return cursor.rowcount > 0
 
     def update_account(self, config: AccountConfig) -> None:
-        self.save_account(config)
+        """Update an existing account row in place.
+
+        Returns silently if no row matches — callers that need a hard
+        existence check should call :meth:`load_account` first.
+        """
+        row = config.to_db_row()
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE accounts SET broker = :broker, display_name = :display_name, "
+                "gateway_class = :gateway_class, sandbox_mode = :sandbox_mode, "
+                "guards_json = :guards_json, strategies_json = :strategies_json "
+                "WHERE id = :id",
+                row,
+            )
