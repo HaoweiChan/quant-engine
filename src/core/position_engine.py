@@ -92,8 +92,24 @@ class PositionEngine:
         snapshot: MarketSnapshot,
         signal: MarketSignal | None = None,
         account: AccountState | None = None,
+        warmup_mode: bool = False,
     ) -> list[Order]:
         self._high_history.append(snapshot.price)
+
+        # Warmup short-circuit: hydrate policy and stop-history state from
+        # historical bars without emitting orders or mutating the position
+        # ledger. Used by StrategyWarmup to prime indicators (e.g. EMA-144)
+        # before the first live bar arrives.
+        if warmup_mode:
+            self._update_trailing_stops(snapshot)
+            effective_signal = signal if self._mode == "model_assisted" else None
+            state = self.get_state()
+            if not self._positions and self._mode != "halted":
+                self._entry_policy.should_enter(snapshot, effective_signal, state, account)
+            if self._positions and self._mode != "halted":
+                self._add_policy.should_add(snapshot, effective_signal, state)
+            return []
+
         orders: list[Order] = []
 
         # Priority 1: stop-loss check
@@ -431,7 +447,17 @@ class PositionEngine:
         snapshot: MarketSnapshot,
         account: AccountState | None,
     ) -> bool:
-        required_margin = decision.lots * snapshot.margin_per_unit
+        # Strategies that operate under reduced-margin rules (e.g. TAIFEX
+        # 當沖 at ~half the overnight initial margin) declare their real
+        # per-contract margin via decision.metadata["intraday_margin_per_contract"].
+        # When present, this gate uses that value instead of snapshot.margin_per_unit
+        # so the engine doesn't reject entries the broker would happily fill.
+        per_unit = float(
+            (decision.metadata or {}).get(
+                "intraday_margin_per_contract", snapshot.margin_per_unit,
+            )
+        )
+        required_margin = decision.lots * per_unit
         if account is None:
             if not self._config.require_account_for_entry:
                 return True

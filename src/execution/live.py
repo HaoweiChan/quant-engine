@@ -44,6 +44,7 @@ class LiveExecutor(ExecutionEngine):
         loop: asyncio.AbstractEventLoop,
         config: LiveExecutorConfig | None = None,
         rollout_config: Any | None = None,
+        order_store: Any | None = None,
     ) -> None:
         super().__init__()
         self._api = api
@@ -58,6 +59,11 @@ class LiveExecutor(ExecutionEngine):
             degrade_ratio=self._config.quality_breach_ratio,
         )
         self._forced_shadow_mode = False
+        # Persistent order-state store. When unset (legacy / unit-test
+        # callers), the in-memory ``_pending`` dict remains the only
+        # state — survives nothing across a process crash. Production
+        # wiring in LivePipelineManager passes a shared ``OrderStateStore``.
+        self._order_store = order_store
         if hasattr(self._api, "set_order_callback"):
             self._api.set_order_callback(self._on_callback)
 
@@ -255,6 +261,10 @@ class LiveExecutor(ExecutionEngine):
             "order_placed", trade_id=trade_id,
             symbol=order.symbol, side=order.side, lots=order.lots,
         )
+        self._record_state(
+            "placement",
+            order_id=trade_id, order=order,
+        )
 
         future: asyncio.Future[dict[str, Any]] = self._loop.create_future()
         self._pending[trade_id] = future
@@ -274,12 +284,14 @@ class LiveExecutor(ExecutionEngine):
                 order, "cancelled", 0.0, expected_price, 0.0, order.lots, "timeout",
             )
             result.metadata["order_dispatch_ns"] = dispatch_ns
+            self._record_state("cancelled", order_id=trade_id, reason="timeout")
             return result
         finally:
             self._pending.pop(trade_id, None)
 
         if deal.get("error"):
             msg = deal.get("op_msg", "broker_rejection")
+            self._record_state("rejected", order_id=trade_id, reason=msg)
             raise _TransientError(msg) if self._is_transient(deal) else _PermanentError(msg)
 
         fill_price = float(deal.get("price", 0.0))
@@ -292,6 +304,10 @@ class LiveExecutor(ExecutionEngine):
             "order_filled", trade_id=trade_id,
             fill_price=fill_price, slippage=slippage, status=status,
         )
+        self._record_state(
+            "fill", order_id=trade_id, status=status,
+            fill_price=fill_price, fill_qty=fill_qty,
+        )
         result = self._make_result(
             order, status, fill_price, expected_price,
             slippage, fill_qty, remaining_qty=remaining,
@@ -299,6 +315,54 @@ class LiveExecutor(ExecutionEngine):
         result.metadata["order_dispatch_ns"] = dispatch_ns
         result.metadata["broker_ack_ns"] = int(deal.get("ack_ns", monotonic_ns()))
         return result
+
+    def _record_state(self, event: str, **kwargs: Any) -> None:
+        """Write-through to the persistent OrderStateStore (no-op when unwired).
+
+        Centralised so the call sites stay terse and the store stays an
+        optional dependency. Failures are logged and swallowed: a DB
+        write should never block an in-flight live order.
+        """
+        store = self._order_store
+        if store is None:
+            return
+        try:
+            if event == "placement":
+                order: Order = kwargs["order"]
+                store.record_placement(
+                    order_id=kwargs["order_id"],
+                    symbol=order.symbol,
+                    side=order.side,
+                    lots=float(order.lots),
+                    price=order.price,
+                    parent_position_id=order.parent_position_id,
+                    reason=order.reason,
+                )
+            elif event == "fill":
+                fn = (
+                    store.record_filled
+                    if kwargs["status"] == "filled"
+                    else store.record_partial
+                )
+                fn(
+                    order_id=kwargs["order_id"],
+                    fill_price=kwargs["fill_price"],
+                    fill_qty=kwargs["fill_qty"],
+                )
+            elif event == "cancelled":
+                store.record_cancelled(
+                    order_id=kwargs["order_id"],
+                    reason=kwargs.get("reason"),
+                )
+            elif event == "rejected":
+                store.record_rejected(
+                    order_id=kwargs["order_id"],
+                    reason=kwargs.get("reason", "unspecified"),
+                )
+        except Exception:
+            logger.exception(
+                "order_state_write_failed", event=event, **{k: v for k, v in kwargs.items() if k != "order"},
+            )
 
     # ------------------------------------------------------------------
     # Order translation
@@ -318,11 +382,15 @@ class LiveExecutor(ExecutionEngine):
                 quantity=int(order.lots),
                 price_type="MKT" if order.order_type == "market" else "LMT",
                 order_type="IOC" if order.order_type in {"market", "stop"} else "ROD",
-                octype="Auto",
+                octype="DayTrade" if order.daytrade else "Auto",
                 account=getattr(self._api, "futopt_account", None),
             )
 
         action = sj.constant.Action.Buy if order.side == "buy" else sj.constant.Action.Sell
+        octype = (
+            sj.constant.FuturesOCType.DayTrade if order.daytrade
+            else sj.constant.FuturesOCType.Auto
+        )
 
         if order.order_type == "stop":
             return self._api.Order(
@@ -331,7 +399,7 @@ class LiveExecutor(ExecutionEngine):
                 quantity=int(order.lots),
                 price_type=sj.constant.FuturesPriceType.LMT,
                 order_type=sj.constant.OrderType.IOC,
-                octype=sj.constant.FuturesOCType.Auto,
+                octype=octype,
                 account=self._api.futopt_account,
             )
 
@@ -342,7 +410,7 @@ class LiveExecutor(ExecutionEngine):
                 quantity=int(order.lots),
                 price_type=sj.constant.FuturesPriceType.MKT,
                 order_type=sj.constant.OrderType.IOC,
-                octype=sj.constant.FuturesOCType.Auto,
+                octype=octype,
                 account=self._api.futopt_account,
             )
 
@@ -352,7 +420,7 @@ class LiveExecutor(ExecutionEngine):
             quantity=int(order.lots),
             price_type=sj.constant.FuturesPriceType.LMT,
             order_type=sj.constant.OrderType.ROD,
-            octype=sj.constant.FuturesOCType.Auto,
+            octype=octype,
             account=self._api.futopt_account,
         )
 

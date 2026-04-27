@@ -17,6 +17,7 @@ import structlog
 from src.broker_gateway.live_bar_store import LiveMinuteBarStore, MinuteBar
 from src.broker_gateway.live_spread_buffer import LiveSpreadBarBuilder
 from src.core.sizing import PortfolioSizer, SizingConfig
+from src.data.multi_timeframe_router import MultiTimeframeRouter
 from src.execution.live_strategy_runner import LiveStrategyRunner
 from src.trading_session.manager import SessionManager
 from src.trading_session.portfolio_db import LivePortfolioStore
@@ -95,6 +96,12 @@ class LivePipelineManager:
         # disaster-stop fill time.
         self._reconciler: Any | None = None
         self._reconciler_task: asyncio.Task | None = None
+        # Centralized 1m → N-minute aggregation. Each runner subscribes
+        # at its strategy's bar_agg minutes; the legacy per-runner
+        # ``_bar_buffer`` accumulator inside LiveStrategyRunner remains
+        # as a fallback when no router is attached so the runner stays
+        # usable in unit tests / paper-mode smoke runs.
+        self._bar_router = MultiTimeframeRouter()
 
     @property
     def portfolio_sizer(self) -> PortfolioSizer | None:
@@ -205,6 +212,10 @@ class LivePipelineManager:
             return
         self._loop = loop
         self._bar_store.register_bar_callback(self._on_bar_complete)
+        # Fan 1m bars into the resampling router so subscribed runners
+        # see canonical N-minute windows. Attach BEFORE syncing runners
+        # so the first runner created is already wired through.
+        self._bar_store.register_bar_callback(self._bar_router.on_minute_bar)
         self._sync_runners()
         self._startup_aggregate_bars()
         self._started = True
@@ -296,7 +307,13 @@ class LivePipelineManager:
             # Remove runners for sessions that are no longer active
             stale = [sid for sid in self._runners if sid not in active_sessions]
             for sid in stale:
-                del self._runners[sid]
+                runner = self._runners.pop(sid)
+                # Unsubscribe the runner's resampled-bar callback so the
+                # router doesn't fire into a torn-down runner.
+                try:
+                    self._bar_router.unsubscribe(runner._on_resampled_bar)  # noqa: SLF001
+                except Exception:
+                    logger.debug("live_runner_router_unsubscribe_failed", session_id=sid)
                 self._spread_builders.pop(sid, None)
                 logger.info("live_runner_removed", session_id=sid)
             # Create runners for new active sessions
@@ -321,7 +338,9 @@ class LivePipelineManager:
                         equity_budget=effective_eq,
                         sizing_config=self._sizing_config,
                         sizer=self._portfolio_sizer,
+                        bar_router=self._bar_router,
                     )
+                    self._warmup_runner(runner)
                     self._runners[sid] = runner
                     self._maybe_register_spread_builder(sid, session)
                     logger.info(
@@ -333,6 +352,26 @@ class LivePipelineManager:
                     )
                 except Exception:
                     logger.exception("live_runner_create_failed", session_id=sid)
+
+    def _warmup_runner(self, runner: LiveStrategyRunner) -> None:
+        """Hydrate the runner's PositionEngine from historical 1m bars.
+
+        Runs synchronously inside ``_sync_runners`` so the runner is
+        guaranteed to be primed before its first ``on_bar_complete`` call.
+        Failures are logged and swallowed: a runner with cold indicators
+        is preferable to no runner at all (the gap analysis flagged this
+        as the root of "faulty signals", not a hard failure).
+        """
+        try:
+            from src.execution.strategy_warmup import StrategyWarmup
+
+            StrategyWarmup(runner).run()
+        except Exception:
+            logger.exception(
+                "live_runner_warmup_failed",
+                session_id=runner.session_id,
+                strategy=runner.strategy_slug,
+            )
 
     def _maybe_register_spread_builder(self, session_id: str, session: Any) -> None:
         """If the session's strategy has spread metadata, build a
@@ -610,6 +649,19 @@ class LivePipelineManager:
             open=0.0, high=0.0, low=0.0, close=0.0, volume=0,
         )
         for sid, runner in self.iter_runners():
+            # Strategies that declare ``force_flat_at_session_end=False`` in
+            # their META manage their own end-of-session lifecycle (e.g.
+            # intraday_max_long: 當沖 buy at open, sell half at 13:20, ride
+            # the rest into Sinopac's own 留倉 handling). Skipping them here
+            # is the only safe way to honour that intent — the deterministic
+            # safety-net would otherwise close the kept half.
+            if not getattr(runner, "force_flat_at_session_end", True):
+                logger.info(
+                    "force_flat_timer_skipped_meta_optout",
+                    session_id=sid,
+                    strategy=runner.strategy_slug,
+                )
+                continue
             try:
                 results = await runner._force_flat(synthetic_bar)
                 if results:

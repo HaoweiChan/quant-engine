@@ -100,10 +100,15 @@ class Order:
     lots: float
     price: float | None
     stop_price: float | None
-    reason: str  # "entry" | "add_level_2" | "stop_loss" | "trailing_stop" | "circuit_breaker" | "disaster_stop"
+    reason: str  # "entry" | "add_level_2" | "stop_loss" | "trailing_stop" | "circuit_breaker" | "disaster_stop" | "partial_exit"
     metadata: dict[str, Any] = field(default_factory=dict)
     parent_position_id: str | None = None
     order_class: Literal["standard", "disaster_stop", "algo_exit"] = "standard"
+    # When True, the live executor places the shioaji futures order with
+    # ``octype=FuturesOCType.DayTrade`` so Sinopac applies the half-margin
+    # 當沖 buying-power rules. Default False preserves the existing
+    # ``octype=Auto`` behaviour for every other strategy.
+    daytrade: bool = False
 
     def __post_init__(self) -> None:
         if self.lots <= 0:
