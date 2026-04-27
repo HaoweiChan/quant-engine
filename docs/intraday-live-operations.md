@@ -89,3 +89,52 @@ Verify these metrics are present in backtest outputs before enabling micro-live:
 2. Keep runtime running for telemetry and signal validation.
 3. Disable new live submissions until issue is resolved.
 4. Record incident details and resume decision in operations log.
+
+## Orphan Order Recovery (Persistent Order State)
+
+Live order state is now persisted via `src/oms/order_state_store.py` to
+`data/trading.db` (`orders` table). Every state transition (`pending →
+ack → partial → filled | rejected | cancelled`) is committed before
+the next executor action. This means a Python crash mid-order leaves a
+deterministic trail the reconciler can match against the broker.
+
+### On startup
+
+The startup reconciler (existing) now extends its scan to:
+
+1. Read non-terminal rows: `OrderStateStore.list_open()`.
+2. Cross-reference with broker continuity feed:
+   `gateway.get_order_events_since(continuity_cursor)`.
+3. For each non-terminal local row:
+   - **Broker reports it as filled** → record fill, transition to
+     `filled`, surface to operator audit.
+   - **Broker reports it as cancelled / rejected** → record terminal
+     state, no further action.
+   - **Broker reports it as still working** → cancel via
+     `gateway.cancel_order()`, mark local as `cancelled` with reason
+     `startup_orphan_cancel`, surface to operator.
+   - **Broker has no record** → mark local as `rejected` with reason
+     `broker_unknown`, surface to operator.
+4. Block manual resume gate until every non-terminal row resolves.
+
+### Operator workflow when orphans are detected
+
+1. The startup banner lists orphan order_ids and their last known
+   status. Do NOT confirm resume yet.
+2. Inspect each row in `trading.db.orders` to confirm symbol/side/lots
+   match the operator's expectations.
+3. If any row's resolution looks unsafe (broker says filled but local
+   says pending and the strategy didn't intend to enter), open the
+   incident channel before confirming resume.
+4. Use `confirm_resume("<operator_id>")` once every orphan is in a
+   terminal state and the operator accepts the outcome.
+
+### Observability
+
+- Logs: `order_state_pending`, `order_state_transition`,
+  `order_state_fill` per transition; `order_state_write_failed` if the
+  DB write itself errors (executor continues, but flag the row).
+- Periodic operator check: `sqlite3 data/trading.db "SELECT order_id,
+  symbol, side, status, updated_at FROM orders WHERE status NOT IN
+  ('filled','rejected','cancelled') ORDER BY created_at"` should
+  return no rows during quiet windows.

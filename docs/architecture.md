@@ -150,3 +150,25 @@ Final OOS is touched exactly once after all parameters are frozen.
 | TW Futures (TAIFEX) | Sinopac (shioaji) | TaifexAdapter | Phase 1 |
 | US Equities | Schwab (schwab-py) | USEquityAdapter | Phase 4 |
 | Crypto Perpetuals | Binance (python-binance) | CryptoAdapter | Phase 3 |
+
+---
+
+## Time and the `Clock` abstraction
+
+Two distinct uses of "now" exist in this codebase:
+
+1. **Control-flow time** — anything that decides *whether* to act
+   (feed-staleness watchdog, reconnect loop, force-close timer, playback
+   replay). These callers MUST go through `src/core/clock.py`. The
+   default `WallClock()` wraps `datetime.now(UTC)`; tests and
+   `BacktestPlayback` (Phase 6) inject `SimulatedClock` and advance time
+   via `clock.advance()` instead of sleeping.
+2. **Record time** — timestamps written to logs, audit records, fill
+   metadata, and DB rows. These continue to call `datetime.now(UTC)`
+   directly. They are operator-facing wall-clock observations, not
+   control-flow inputs, so they should not be replayable.
+
+Bar-driven evaluation paths (`PositionEngine.on_snapshot`, indicator
+updates, strategy signals) derive time from `snapshot.timestamp`, never
+from a clock. This is what makes `BacktestPlayback` and live trading
+share a code path.
