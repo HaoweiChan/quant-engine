@@ -129,12 +129,36 @@ class Position:
     entry_timestamp: datetime
     direction: Literal["long", "short"] = "long"
     position_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # Aggregate-Position fields (added 2026-04-27 to close MCP-vs-simulator gap).
+    # ``weighted_avg_entry_price`` is the lot-weighted cost basis across all
+    # pyramid adds — strategies and stop policies should read it via
+    # ``pos.weighted_avg_entry_price or pos.entry_price`` so a Position created
+    # without the new field falls back to single-add semantics.
+    weighted_avg_entry_price: float | None = None
+    # ``base_lots`` is the portion of ``lots`` shielded by ``min_hold_lots > 0``
+    # — when a stop fires the engine emits a partial-exit Order for
+    # ``lots - base_lots`` and leaves ``base_lots`` open. 0.0 means "no
+    # shielded base"; pyramiding strategies set it to the initial-entry lot
+    # count so adds compound on top while the base survives stop-outs.
+    base_lots: float = 0.0
+    # ``highest_pyramid_level`` is the cumulative pyramid depth reached over
+    # the position's lifetime. Replaces the pre-aggregate convention of
+    # deriving depth from ``len(self._positions)``.
+    highest_pyramid_level: int = 0
 
     def __post_init__(self) -> None:
         if self.stop_level is None:
             raise ValueError("stop_level must not be None")
         if self.direction not in ("long", "short"):
             raise ValueError("direction must be 'long' or 'short'")
+        if self.weighted_avg_entry_price is not None and self.weighted_avg_entry_price <= 0:
+            raise ValueError("weighted_avg_entry_price must be positive when set")
+        if self.base_lots < 0:
+            raise ValueError("base_lots must be >= 0")
+        if self.base_lots > self.lots:
+            raise ValueError("base_lots must be <= lots")
+        if self.highest_pyramid_level < 0:
+            raise ValueError("highest_pyramid_level must be >= 0")
 
 
 @dataclass

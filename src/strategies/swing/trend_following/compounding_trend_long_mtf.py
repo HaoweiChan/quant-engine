@@ -621,7 +621,20 @@ class _RegimeAwareAdd(AddPolicy):
             return None
 
         regime_cap = int(preset["max_lots"])
-        if engine_state.pyramid_level >= min(regime_cap, self._max_levels):
+        # Aggregate-Position era: positions[0].lots is the cumulative book
+        # size and positions[0].highest_pyramid_level is the depth ever
+        # reached. Both caps gate the add — regime_cap on absolute lots,
+        # max_pyramid_levels on add-count depth.
+        if engine_state.positions:
+            current_lots = int(engine_state.positions[0].lots)
+            current_depth = int(engine_state.positions[0].highest_pyramid_level)
+        else:
+            current_lots = 0
+            current_depth = 0
+        remaining_cap = regime_cap - current_lots
+        if remaining_cap <= 0:
+            return None
+        if current_depth >= self._max_levels:
             return None
         if self._require_h1_gate and not self._hub.h1_gate_passed(snapshot.price):
             return None
@@ -630,26 +643,34 @@ class _RegimeAwareAdd(AddPolicy):
         if account is None or account.margin_available <= 0:
             return None
 
-        # Add ONE lot per snapshot when free margin can fund it. The pyramid
-        # builds from many sequential 1-lot adds across thousands of 5m bars,
-        # which mirrors the simulator's per-bar while-loop without burning a
-        # 50%-of-margin slug per snapshot (which over-pyramids when adds fire
-        # on every bar). add_margin_fraction now scales the *threshold* — adds
-        # only fire when free margin ≥ margin_per_lot / add_margin_fraction,
-        # so 0.50 → require 2 lots' worth of free margin per add.
+        # Batched-lot emission: pyramid as many lots as free margin can fund
+        # in this single bar, capped by the regime's lot ceiling and the
+        # engine's pyramid-depth cap. Mirrors the standalone simulator's
+        # ``while free_cap >= 1.10 * initial_margin: lots += 1`` loop —
+        # without it the engine adds at most 1 lot per snapshot and
+        # under-compounds vs the simulator. ``add_margin_fraction`` scales the
+        # add-buffer threshold (so 0.50 requires 2 lots of free margin per
+        # add — the simulator's preset["add_buffer_mult"]=1.10 equivalent at
+        # production prices).
         mpl = _margin_per_lot(snapshot)
-        threshold = mpl / max(self._add_margin_fraction, 0.05)
-        if account.margin_available < threshold:
+        threshold_per_lot = mpl / max(self._add_margin_fraction, 0.05)
+        if account.margin_available < threshold_per_lot:
+            return None
+
+        n_affordable = int(account.margin_available / threshold_per_lot)
+        n_lots = min(n_affordable, remaining_cap)
+        if n_lots <= 0:
             return None
 
         return AddDecision(
-            lots=1.0,
+            lots=float(n_lots),
             contract_type="large",
             move_existing_to_breakeven=False,
             metadata={
                 "regime": regime,
                 "atr_5m": self._hub.atr_5m,
                 "margin_per_lot": mpl,
+                "batched_add_lots": n_lots,
                 METADATA_STRATEGY_SIZED: True,
             },
         )

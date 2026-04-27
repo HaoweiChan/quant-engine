@@ -117,7 +117,8 @@ class TestAddSizerHook:
         assert add_orders[0].lots == 7.0
 
         state = engine.get_state()
-        assert state.positions[-1].lots == 7.0
+        # Aggregate-Position: lots is the cumulative book size (3.0 entry + 7.0 add).
+        assert state.positions[-1].lots == 3.0 + 7.0
 
         # Spy saw the original (un-sized) decision + positions list with base entry
         # already appended (entry executed at priority 4 before add at priority 5).
@@ -160,7 +161,8 @@ class TestAddSizerHook:
         sig = make_signal(direction=1.0, direction_conf=0.8)
         engine.on_snapshot(make_snapshot(20000.0, specs), sig, make_account())
         state = engine.get_state()
-        assert state.positions[-1].lots == 2.0
+        # Aggregate-Position: lots is the cumulative book size (3.0 entry + 2.0 add).
+        assert state.positions[-1].lots == 3.0 + 2.0
 
     def test_add_sizer_property_setter_roundtrip(self) -> None:
         """Setter/getter/unset roundtrip works."""

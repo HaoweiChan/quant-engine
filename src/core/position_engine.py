@@ -172,6 +172,11 @@ class PositionEngine:
 
     def get_state(self) -> EngineState:
         pnl = self._total_unrealized_pnl(None)
+        # pyramid_level keeps its legacy ``count of position records'' meaning
+        # for backward-compat with existing PyramidAddPolicy callers and
+        # tests. Aggregate-Position era: this is always 0 or 1 per direction
+        # since adds mutate the same Position. For depth-based gating use
+        # ``state.positions[0].highest_pyramid_level`` directly.
         return EngineState(
             positions=tuple(self._positions),
             pyramid_level=len(self._positions),
@@ -311,6 +316,10 @@ class PositionEngine:
                         pyramid_level=pos.pyramid_level,
                         entry_timestamp=pos.entry_timestamp,
                         direction=pos.direction,
+                        position_id=pos.position_id,  # preserve identity
+                        weighted_avg_entry_price=pos.weighted_avg_entry_price,
+                        base_lots=pos.base_lots,
+                        highest_pyramid_level=pos.highest_pyramid_level,
                     )
                 )
             else:
@@ -344,6 +353,11 @@ class PositionEngine:
 
     def _execute_entry(self, decision: EntryDecision, snapshot: MarketSnapshot) -> list[Order]:
         entry_side = "buy" if decision.direction == "long" else "sell"
+        # Aggregate-Position semantics: when ``min_hold_lots > 0``, the entire
+        # initial entry is the shielded base. Pyramid adds will grow ``lots``
+        # but leave ``base_lots`` fixed, so a stop-out partially closes the
+        # adds and leaves the base open (mirrors vol_managed_bnh's overlay).
+        base_lots = decision.lots if self._config.min_hold_lots > 0 else 0.0
         position = Position(
             entry_price=snapshot.price,
             lots=decision.lots,
@@ -352,6 +366,9 @@ class PositionEngine:
             pyramid_level=0,
             entry_timestamp=snapshot.timestamp,
             direction=decision.direction,
+            weighted_avg_entry_price=snapshot.price,
+            base_lots=base_lots,
+            highest_pyramid_level=0,
         )
         self._positions.append(position)
         meta = {**decision.metadata, "urgency": "normal"}
@@ -382,43 +399,61 @@ class PositionEngine:
             if sized is None or sized.lots <= 0:
                 return []
             decision = sized
-        direction = self._positions[0].direction
+
+        # Aggregate-Position: pyramid adds mutate the existing same-direction
+        # Position in place rather than appending a new one. Mirrors the
+        # backtester's ``open_entries[sym]`` weighted-average aggregation
+        # (src/simulator/backtester.py:178). The result is a single Position
+        # per direction whose ``weighted_avg_entry_price`` is the lot-weighted
+        # cost basis and whose ``stop_level`` is shared by the whole book.
+        pos = self._positions[0]
+        direction = pos.direction
         entry_side = "buy" if direction == "long" else "sell"
 
+        # Move-to-breakeven: anchor on the weighted-average cost (true book
+        # cost), falling back to entry_price for legacy Positions that
+        # haven't been migrated yet.
+        anchor_price = pos.weighted_avg_entry_price or pos.entry_price
+        stop_level = pos.stop_level
         if decision.move_existing_to_breakeven:
-            updated: list[Position] = []
-            for pos in self._positions:
-                needs_move = (pos.direction == "long" and pos.stop_level < pos.entry_price) or (
-                    pos.direction == "short" and pos.stop_level > pos.entry_price
-                )
-                if needs_move:
-                    updated.append(
-                        Position(
-                            entry_price=pos.entry_price,
-                            lots=pos.lots,
-                            contract_type=pos.contract_type,
-                            stop_level=pos.entry_price,
-                            pyramid_level=pos.pyramid_level,
-                            entry_timestamp=pos.entry_timestamp,
-                            direction=pos.direction,
-                        )
-                    )
-                else:
-                    updated.append(pos)
-            self._positions = updated
+            needs_move = (
+                (direction == "long" and stop_level < anchor_price)
+                or (direction == "short" and stop_level > anchor_price)
+            )
+            if needs_move:
+                stop_level = anchor_price
 
-        new_stop = self._stop_policy.initial_stop(snapshot.price, direction, snapshot)
-        pyramid_level = len(self._positions)
-        new_position = Position(
-            entry_price=snapshot.price,
-            lots=decision.lots,
-            contract_type=decision.contract_type,
-            stop_level=new_stop,
-            pyramid_level=pyramid_level,
+        # Weighted-average entry price across the now-larger book.
+        prior_avg = pos.weighted_avg_entry_price if pos.weighted_avg_entry_price is not None else pos.entry_price
+        new_total_lots = pos.lots + decision.lots
+        new_avg = (prior_avg * pos.lots + snapshot.price * decision.lots) / new_total_lots
+
+        # New stop from policy is treated as a candidate trail level: take
+        # whichever is more conservative (higher for longs, lower for shorts)
+        # vs the existing aggregate stop. The trail update on subsequent bars
+        # continues to ratchet via _update_trailing_stops.
+        new_stop_from_policy = self._stop_policy.initial_stop(snapshot.price, direction, snapshot)
+        if direction == "long":
+            new_stop = max(stop_level, new_stop_from_policy)
+        else:
+            new_stop = min(stop_level, new_stop_from_policy)
+
+        new_depth = pos.highest_pyramid_level + 1
+        self._positions[0] = Position(
+            entry_price=snapshot.price,        # last add's price (UI / breakeven anchor)
+            lots=new_total_lots,                # aggregate book size
+            contract_type=pos.contract_type,
+            stop_level=new_stop,                # shared trail
+            pyramid_level=new_depth,            # depth reached so far
             entry_timestamp=snapshot.timestamp,
             direction=direction,
+            position_id=pos.position_id,        # preserve identity across adds
+            weighted_avg_entry_price=new_avg,
+            base_lots=pos.base_lots,            # base never grows on adds
+            highest_pyramid_level=new_depth,
         )
-        self._positions.append(new_position)
+        # Order linkage: use the single aggregate position_id for parent.
+        new_position = self._positions[0]
 
         return [
             Order(
@@ -429,8 +464,8 @@ class PositionEngine:
                 lots=decision.lots,
                 price=None,
                 stop_price=None,
-                reason=f"add_level_{pyramid_level + 1}",
-                metadata={"pyramid_level": pyramid_level + 1, "urgency": "normal"},
+                reason=f"add_level_{new_depth}",
+                metadata={"pyramid_level": new_depth, "urgency": "normal"},
                 parent_position_id=new_position.position_id,
             )
         ]
