@@ -228,6 +228,56 @@ def get_bar_agg(slug: str) -> int:
     return 1
 
 
+_PERIOD_PARAM_HINTS: tuple[str, ...] = (
+    "period",
+    "lookback",
+    "window",
+    "bars",
+    "len",
+    "length",
+)
+_DEFAULT_WARMUP_BARS = 200
+_MIN_WARMUP_BARS = 50
+_MAX_WARMUP_BARS = 5000
+
+
+def get_warmup_bars(slug: str, multiplier: float = 3.0) -> int:
+    """Return the number of 1-minute bars required to hydrate indicators.
+
+    Scans PARAM_SCHEMA for period-like int parameters (keys containing
+    "period", "lookback", "window", "bars", "len", "length") and returns
+    `max(default) * bar_agg * multiplier`, clamped to [50, 5000]. The
+    multiplier defaults to 3 because most rolling indicators (EMA, ATR,
+    Bollinger) reach steady state at ~3× their period.
+
+    Strategies that declare ``meta["warmup_bars"]`` override the heuristic.
+    """
+    resolved = _resolve_slug(slug)
+    try:
+        info = get_info(resolved)
+    except KeyError:
+        return _DEFAULT_WARMUP_BARS
+    explicit = info.meta.get("warmup_bars") if info.meta else None
+    if isinstance(explicit, int) and explicit > 0:
+        return min(max(explicit, _MIN_WARMUP_BARS), _MAX_WARMUP_BARS)
+    longest = 0
+    for key, spec in info.param_schema.items():
+        if not any(hint in key for hint in _PERIOD_PARAM_HINTS):
+            continue
+        if spec.get("type") not in (None, "int", "float"):
+            continue
+        default = spec.get("default")
+        try:
+            longest = max(longest, int(default))
+        except (TypeError, ValueError):
+            continue
+    if longest <= 0:
+        return _DEFAULT_WARMUP_BARS
+    bar_agg = max(get_bar_agg(resolved), 1)
+    bars = int(longest * bar_agg * multiplier)
+    return min(max(bars, _MIN_WARMUP_BARS), _MAX_WARMUP_BARS)
+
+
 def get_schema(slug: str) -> dict[str, Any]:
     """Return the full parameter schema for a strategy.
 

@@ -1,0 +1,9 @@
+[params]
+intraday_margin_per_contract = 92000.0
+position_cap = 30
+entry_time = "08:50"
+
+[optimization]
+level = 0
+level_name = "L0_UNOPTIMIZED"
+holding_period = "short_term"
