@@ -174,6 +174,17 @@ PARAM_SCHEMA: dict[str, dict] = {
             "stop-out friction faster than the trend can compound."
         ),
     },
+    "per_bar_margin_pct": {
+        "type": "float", "default": 0.05, "min": 0.005, "max": 0.30,
+        "description": (
+            "Per-bar concentration governor — caps each AddDecision's lot count "
+            "to ``int(equity * per_bar_margin_pct / margin_per_lot)``. With 0.05, "
+            "no single 5m bar can grow margin commitment by more than 5% of "
+            "current equity, preventing runaway concentration that would crystallize "
+            "huge losses on the inevitable adverse tick. As equity compounds the "
+            "cap grows proportionally, so the strategy still scales but never lurches."
+        ),
+    },
 }
 
 STRATEGY_META: dict = {
