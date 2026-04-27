@@ -1,8 +1,11 @@
 """Account management endpoints."""
 from __future__ import annotations
 
+import structlog
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api", tags=["accounts"])
 
@@ -16,7 +19,16 @@ _GATEWAY_CLASSES = {
 
 
 class AccountCreateRequest(BaseModel):
-    id: str | None = None
+    """Account-create payload.
+
+    ``id`` is REQUIRED and must be unique. The previous behaviour of
+    defaulting to ``f"{broker}-main"`` silently clobbered any existing
+    row whose id matched (see ``AccountAlreadyExistsError`` for the
+    incident this guards against). For Sinopac, the convention is to
+    use the 7-digit ``FutureAccount.account_id`` (e.g. ``"1839302"``).
+    """
+
+    id: str
     broker: str
     display_name: str | None = None
     sandbox_mode: bool = False
@@ -25,6 +37,14 @@ class AccountCreateRequest(BaseModel):
     api_key: str | None = None
     api_secret: str | None = None
     password: str | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _id_must_be_non_empty(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("account id is required and cannot be empty")
+        return v
 
 
 class UpdateStrategiesRequest(BaseModel):
@@ -82,8 +102,16 @@ async def get_account(account_id: str) -> dict:
 
 @router.post("/accounts", status_code=201)
 async def create_account(req: AccountCreateRequest) -> dict:
+    """Create a new account. Returns 409 if the id already exists.
+
+    Updates to an existing account go through PATCH endpoints (e.g.
+    ``/accounts/{id}/strategies``) — this endpoint is insert-only so
+    a careless POST cannot wipe an existing row's metadata or credentials.
+    """
+    from src.broker_gateway.account_db import AccountAlreadyExistsError
     from src.broker_gateway.types import AccountConfig
-    account_id = req.id or f"{req.broker}-main"
+
+    account_id = req.id  # validator already enforced non-empty
     config = AccountConfig(
         id=account_id,
         broker=req.broker,
@@ -99,6 +127,14 @@ async def create_account(req: AccountCreateRequest) -> dict:
     )
     try:
         _get_db().save_account(config)
+    except AccountAlreadyExistsError:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"account '{account_id}' already exists. Pick a different id, or "
+                f"PATCH /api/accounts/{account_id}/strategies to update its bindings."
+            ),
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DB error: {exc}")
     # Save credentials (best-effort)
@@ -124,6 +160,44 @@ async def create_account(req: AccountCreateRequest) -> dict:
     }
 
 
+@router.delete("/accounts/{account_id}")
+async def delete_account(account_id: str) -> dict:
+    """Delete an account: removes the DB row, every GSM credential under
+    that id, and the in-memory gateway from ``GatewayRegistry``.
+
+    Idempotent — a 404 means there was nothing to delete in the DB, but
+    we still attempt the GSM + registry cleanup as a defensive sweep.
+    """
+    db = _get_db()
+    existed = db.delete_account(account_id)
+    # Always try to clean credentials and registry, even on 404, in case
+    # a previous failed-add left orphan secrets.
+    cred_warning = ""
+    try:
+        from src.broker_gateway.registry import delete_credentials
+        delete_credentials(account_id)
+    except Exception as exc:
+        cred_warning = f"Credential cleanup partial: {exc}"
+        logger.warning("account_delete_credentials_failed", account_id=account_id, error=str(exc))
+    try:
+        from src.api.helpers import _gateway_registry
+        if _gateway_registry is not None:
+            _gateway_registry.remove(account_id)
+    except Exception as exc:
+        logger.warning("account_delete_gateway_remove_failed", account_id=account_id, error=str(exc))
+    if not existed:
+        raise HTTPException(
+            status_code=404,
+            detail=f"account '{account_id}' not found (any orphan credentials were cleaned anyway)",
+        )
+    logger.info("account_deleted", account_id=account_id)
+    return {
+        "id": account_id,
+        "deleted": True,
+        "credential_warning": cred_warning or None,
+    }
+
+
 @router.patch("/accounts/{account_id}/strategies")
 async def update_strategies(account_id: str, req: UpdateStrategiesRequest) -> dict:
     db = _get_db()
@@ -131,7 +205,7 @@ async def update_strategies(account_id: str, req: UpdateStrategiesRequest) -> di
     if not config:
         raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found")
     config.strategies = req.strategies
-    db.save_account(config)
+    db.update_account(config)
     # Invalidate war room cache so the next poll returns fresh session data
     try:
         from src.api.routes.war_room import invalidate_warroom_cache

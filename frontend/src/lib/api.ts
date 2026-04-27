@@ -282,6 +282,14 @@ export async function createAccount(
   });
 }
 
+export async function deleteAccount(
+  accountId: string,
+): Promise<Record<string, unknown>> {
+  return fetchJSON(`/api/accounts/${encodeURIComponent(accountId)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function fetchWarRoom(): Promise<Record<string, unknown>> {
   return fetchJSON("/api/war-room");
 }

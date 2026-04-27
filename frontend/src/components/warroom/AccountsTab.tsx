@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Sidebar, SectionLabel, ParamInput } from "@/components/Sidebar";
 import { colors } from "@/lib/theme";
-import { createAccount, fetchAccounts, configureTelegram, testTelegram } from "@/lib/api";
+import { createAccount, deleteAccount, fetchAccounts, configureTelegram, testTelegram } from "@/lib/api";
 import type { AccountInfo } from "@/lib/api";
 
 const inputStyle: React.CSSProperties = {
@@ -17,8 +17,9 @@ export function AccountModal({ initial, onClose, onSaved }: {
   onSaved: () => void;
 }) {
   const cred = initial?.credential_status;
+  const isExisting = !!initial?.id;
+  const [accountId, setAccountId] = useState(initial?.id ?? "");
   const [broker, setBroker] = useState(initial?.broker ?? "mock");
-  const [displayName, setDisplayName] = useState(initial?.display_name ?? "");
   const [paperTrading, setPaperTrading] = useState(initial?.sandbox_mode || false);
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
@@ -27,16 +28,26 @@ export function AccountModal({ initial, onClose, onSaved }: {
   const [maxMargin, setMaxMargin] = useState(80);
   const [maxDailyLoss, setMaxDailyLoss] = useState(100000);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
 
   const handleSave = async () => {
+    const trimmedId = accountId.trim();
+    if (!trimmedId) {
+      setError("Account ID is required. For Sinopac, use the 7-digit FutureAccount.account_id (e.g. 1839302).");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
       await createAccount({
-        id: initial?.id ?? undefined,
+        id: trimmedId,
         broker,
-        display_name: displayName || `${broker.charAt(0).toUpperCase() + broker.slice(1)} Account`,
+        // The display name field was removed from the form — accounts are
+        // identified by their id everywhere in the dashboard. We still
+        // send a display_name (the backend AccountConfig requires one)
+        // and the id is the simplest stable label.
+        display_name: trimmedId,
         sandbox_mode: paperTrading,
         api_key: apiKey || undefined,
         api_secret: apiSecret || undefined,
@@ -51,24 +62,51 @@ export function AccountModal({ initial, onClose, onSaved }: {
     setSaving(false);
   };
 
+  const handleDelete = async () => {
+    if (!initial?.id) return;
+    if (!window.confirm(
+      `Delete account "${initial.id}"?\n\n` +
+      `This removes the DB row AND every credential stored in GSM under "${initial.id}". ` +
+      `This cannot be undone.`,
+    )) return;
+    setDeleting(true);
+    setError("");
+    try {
+      await deleteAccount(initial.id);
+      onSaved();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete");
+    }
+    setDeleting(false);
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.6)" }} onClick={onClose}>
       <div className="rounded-lg p-5 w-[420px] max-h-[85vh] overflow-y-auto" style={{ background: colors.sidebar, border: `1px solid ${colors.cardBorder}` }} onClick={(e) => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
           <span className="text-[14px] font-bold" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>
-            {initial ? initial.display_name : "New Account"}
+            {initial ? initial.id : "New Account"}
           </span>
           <button onClick={onClose} className="text-[16px] cursor-pointer border-none bg-transparent" style={{ color: colors.muted }}>&#x2715;</button>
         </div>
         {error && <div className="text-[12px] mb-2 p-2 rounded" style={{ color: colors.red, background: "#221418", fontFamily: "var(--font-mono)" }}>{error}</div>}
         <SectionLabel>CONNECTION</SectionLabel>
         <ParamInput label="Type">
-          <select value={broker} onChange={(e) => setBroker(e.target.value)} className="w-full rounded px-2 py-2 text-[13px]" style={inputStyle}>
+          <select value={broker} onChange={(e) => setBroker(e.target.value)} className="w-full rounded px-2 py-2 text-[13px]" style={inputStyle} disabled={isExisting}>
             {BROKER_OPTIONS.map((b) => <option key={b} value={b}>{b}</option>)}
           </select>
         </ParamInput>
-        <ParamInput label="Display Name">
-          <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="My Account" className="w-full rounded px-2 py-2 text-[13px]" style={inputStyle} />
+        <ParamInput label="Account ID *">
+          <input
+            type="text"
+            value={accountId}
+            onChange={(e) => setAccountId(e.target.value)}
+            placeholder={broker === "sinopac" ? "e.g. 1839302 (FutureAccount.account_id)" : "Required, must be unique"}
+            className="w-full rounded px-2 py-2 text-[13px]"
+            style={inputStyle}
+            disabled={isExisting}
+          />
         </ParamInput>
         <div className="flex gap-4 mb-2">
           <label className="flex items-center gap-1.5 text-[12px] cursor-pointer" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
@@ -92,13 +130,25 @@ export function AccountModal({ initial, onClose, onSaved }: {
         <ParamInput label="Max Margin %"><input type="number" value={maxMargin} min={1} max={100} onChange={(e) => setMaxMargin(Number(e.target.value))} className="w-full rounded px-2 py-2 text-[13px]" style={inputStyle} /></ParamInput>
         <ParamInput label="Max Daily Loss ($)"><input type="number" value={maxDailyLoss} min={1000} step={10000} onChange={(e) => setMaxDailyLoss(Number(e.target.value))} className="w-full rounded px-2 py-2 text-[13px]" style={inputStyle} /></ParamInput>
         <div className="flex gap-2 mt-4">
-          <button onClick={handleSave} disabled={saving} className="flex-1 py-2.5 rounded text-[13px] font-semibold cursor-pointer border-none text-white" style={{ background: "#2A7A4A", fontFamily: "var(--font-mono)" }}>
+          <button onClick={handleSave} disabled={saving || deleting} className="flex-1 py-2.5 rounded text-[13px] font-semibold cursor-pointer border-none text-white" style={{ background: "#2A7A4A", fontFamily: "var(--font-mono)", opacity: (saving || deleting) ? 0.6 : 1 }}>
             {saving ? "Saving..." : "Save"}
           </button>
           <button onClick={onClose} className="px-4 py-2.5 rounded text-[13px] cursor-pointer" style={{ background: colors.card, color: colors.muted, border: `1px solid ${colors.cardBorder}`, fontFamily: "var(--font-mono)" }}>
             Cancel
           </button>
         </div>
+        {isExisting && (
+          <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${colors.cardBorder}` }}>
+            <button
+              onClick={handleDelete}
+              disabled={saving || deleting}
+              className="w-full py-2 rounded text-[12px] cursor-pointer border-none text-white"
+              style={{ background: "#7A2A2A", fontFamily: "var(--font-mono)", opacity: (saving || deleting) ? 0.6 : 1 }}
+            >
+              {deleting ? "Deleting..." : "Delete Account (and credentials in GSM)"}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -199,7 +249,7 @@ export function AccountsTab() {
             </div>
             {accounts.map((a) => (
               <div key={a.id} onClick={() => setModal({ show: true, account: a })} className="flex items-center px-3 py-3 cursor-pointer hover:opacity-80" style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
-                <span className="flex-[2] text-[14px] font-medium" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{a.display_name || a.id}</span>
+                <span className="flex-[2] text-[14px] font-medium" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{a.id}</span>
                 <span className="flex-1 text-[13px]" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>{a.broker}</span>
                 <span className="w-24 text-center text-[13px]" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>
                   {a.guards ? Object.values(a.guards).filter((v) => v > 0).length : "—"}

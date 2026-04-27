@@ -745,21 +745,15 @@ def _start_market_data_subscriber() -> None:
 
     logger = logging.getLogger(__name__)
 
-    # Skip standalone subscriber when a sinopac gateway is already logged in
-    # with the same person_id. Shioaji allows one session per person_id; a
-    # second login returns 451 "Too Many Connections" and the subscriber
-    # would reconnect-spam every 30s. The gateway's own tick callback already
-    # feeds the shared bar store (see _init_war_room).
-    try:
-        if _gateway_registry is not None:
-            for _aid in _gateway_registry.list_accounts():
-                _gw = _gateway_registry.get_gateway(_aid)
-                if _gw is not None and getattr(_gw, "broker_name", "") == "Sinopac" and getattr(_gw, "is_connected", False):
-                    logger.info("market_data_subscriber: skipped (sinopac gateway already subscribed)")
-                    _market_data_subscriber = "gateway_owned"
-                    return
-    except Exception:
-        pass
+    # Trading-side SinopacGateway no longer subscribes ticks (since the
+    # Sinopac credential refactor). The data feed is owned exclusively by
+    # this standalone subscriber, which logs in with the data-only key
+    # pair stored in GSM as SHIOAJI_API_KEY / SHIOAJI_API_SECRET (resolved
+    # via the [sinopac] group mapping in config/secrets.toml; permission =
+    # 行情/資料 only). Trading credentials per-account live under
+    # {ACCOUNT_ID}_API_KEY / {ACCOUNT_ID}_API_SECRET and need only
+    # 帳務 + 交易. Running both logins in parallel is fine — shioaji
+    # limits one session per API key, not per person_id.
 
     try:
         import shioaji as sj
@@ -1039,24 +1033,13 @@ def _init_war_room() -> None:
     )
     _account_equity_store = AccountEquityStore()
     _portfolio_equity_store = PortfolioEquityStore()
-    # Reuse the sinopac gateway's existing bar store as the shared store when
-    # available. The gateway creates its own store at connect() time and pushes
-    # live ticks into it; if the LivePipeline held a *different* store, strategy
-    # runners never see completed bars (ticks dead-end in the gateway's private
-    # store). Sharing the instance keeps the one-session-per-person_id shioaji
-    # constraint intact — no separate market-data subscriber needed.
-    _live_bar_store = None
-    try:
-        for _gw in _gateway_registry.list_accounts():
-            _cand = _gateway_registry.get_gateway(_gw)
-            _cand_store = getattr(_cand, "_live_bar_store", None)
-            if _cand_store is not None:
-                _live_bar_store = _cand_store
-                break
-    except Exception:
-        _live_bar_store = None
-    if _live_bar_store is None:
-        _live_bar_store = LiveMinuteBarStore()
+    # The shared bar store is owned by helpers.py and shared with both the
+    # standalone market-data subscriber (which writes ticks into it) and
+    # the LivePipeline (which reads completed bars from it). Trading-side
+    # SinopacGateway instances no longer hold a private bar store — the
+    # Sinopac credential refactor moved the entire data feed onto a
+    # separate API key managed by ``_start_market_data_subscriber``.
+    _live_bar_store = LiveMinuteBarStore()
     # Seed mock accounts with synthetic equity history (idempotent).
     _warroom_seed_enabled = os.environ.get("QUANT_WARROOM_SEED") == "1"
     try:
