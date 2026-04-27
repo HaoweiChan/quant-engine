@@ -211,8 +211,11 @@ class PositionEngine:
         # Phase 1: per-position trigger detection.
         triggered: list[int] = []
         for i, pos in enumerate(self._positions):
-            # min_hold_lots: skip base position (level 0) so it acts as permanent B&H
-            if self._config.min_hold_lots > 0 and pos.pyramid_level == 0:
+            # min_hold_lots shield: skip when there are no lots beyond the
+            # shielded base. Aggregate-Position era — instead of "is this the
+            # level-0 Position?" (which only worked when each add spawned a
+            # new Position) we ask "are all current lots part of the base?".
+            if self._config.min_hold_lots > 0 and pos.base_lots >= pos.lots:
                 continue
             same_bar_entry = pos.entry_timestamp == snapshot.timestamp
             if intrabar and not same_bar_entry:
@@ -236,7 +239,10 @@ class PositionEngine:
                 triggered.append(i)
 
         # Phase 2: whole-book expansion. The first triggered position decides
-        # which direction's book to flatten; min_hold_lots still shields level 0.
+        # which direction's book to flatten; min_hold_lots still shields the
+        # base (a position with all lots in the base is excluded from the
+        # sweep entirely; one with adds above the base will be partial-exited
+        # in Phase 3).
         if whole_book and triggered:
             direction = self._positions[triggered[0]].direction
             triggered_set = set(triggered)
@@ -245,16 +251,31 @@ class PositionEngine:
                     continue
                 if pos.direction != direction:
                     continue
-                if self._config.min_hold_lots > 0 and pos.pyramid_level == 0:
+                if self._config.min_hold_lots > 0 and pos.base_lots >= pos.lots:
                     continue
                 triggered.append(j)
             triggered.sort()
 
-        # Phase 3: emit one exit Order per triggered position.
+        # Phase 3: emit one exit Order per triggered position. When
+        # min_hold_lots > 0 and pos.base_lots > 0 the exit is PARTIAL — close
+        # only the lots above the shielded base, leaving the base open with
+        # lots = base_lots. Mirrors vol_managed_bnh's overlay-on-permanent-base
+        # model under aggregate-Position semantics.
         orders: list[Order] = []
+        partial_exits: dict[int, float] = {}  # idx -> exit_lots
         for i in triggered:
             pos = self._positions[i]
-            reason = "trailing_stop" if self._is_trailing(pos, snapshot) else "stop_loss"
+            is_partial = (
+                self._config.min_hold_lots > 0
+                and pos.base_lots > 0
+                and pos.base_lots < pos.lots
+            )
+            exit_lots = (pos.lots - pos.base_lots) if is_partial else pos.lots
+            if is_partial:
+                partial_exits[i] = exit_lots
+                reason = "partial_exit"
+            else:
+                reason = "trailing_stop" if self._is_trailing(pos, snapshot) else "stop_loss"
             close_side = "sell" if pos.direction == "long" else "buy"
             metadata: dict[str, object] = {
                 "pyramid_level": pos.pyramid_level,
@@ -273,7 +294,7 @@ class PositionEngine:
                     side=close_side,
                     symbol=snapshot.contract_specs.symbol,
                     contract_type=pos.contract_type,
-                    lots=pos.lots,
+                    lots=exit_lots,
                     price=None,
                     stop_price=None,
                     reason=reason,
@@ -282,8 +303,25 @@ class PositionEngine:
                     order_class="algo_exit",
                 )
             )
+        # Mutate partial-exit positions in place; pop full-exit positions.
         for i in reversed(triggered):
-            self._positions.pop(i)
+            if i in partial_exits:
+                pos = self._positions[i]
+                self._positions[i] = Position(
+                    entry_price=pos.entry_price,
+                    lots=pos.base_lots,
+                    contract_type=pos.contract_type,
+                    stop_level=pos.stop_level,
+                    pyramid_level=pos.pyramid_level,
+                    entry_timestamp=pos.entry_timestamp,
+                    direction=pos.direction,
+                    position_id=pos.position_id,
+                    weighted_avg_entry_price=pos.weighted_avg_entry_price,
+                    base_lots=pos.base_lots,
+                    highest_pyramid_level=pos.highest_pyramid_level,
+                )
+            else:
+                self._positions.pop(i)
         return orders
 
     def _is_trailing(self, pos: Position, snapshot: MarketSnapshot) -> bool:
