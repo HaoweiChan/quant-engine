@@ -597,11 +597,13 @@ class _RegimeAwareAdd(AddPolicy):
         max_pyramid_levels: int,
         add_margin_fraction: float,
         require_h1_gate: bool,
+        per_bar_margin_pct: float = 0.05,
     ) -> None:
         self._hub = hub
         self._max_levels = max_pyramid_levels
         self._add_margin_fraction = add_margin_fraction
         self._require_h1_gate = require_h1_gate
+        self._per_bar_margin_pct = per_bar_margin_pct
 
     def should_add(
         self,
@@ -621,7 +623,20 @@ class _RegimeAwareAdd(AddPolicy):
             return None
 
         regime_cap = int(preset["max_lots"])
-        if engine_state.pyramid_level >= min(regime_cap, self._max_levels):
+        # Aggregate-Position era: positions[0].lots is the cumulative book
+        # size and positions[0].highest_pyramid_level is the depth ever
+        # reached. Both caps gate the add — regime_cap on absolute lots,
+        # max_pyramid_levels on add-count depth.
+        if engine_state.positions:
+            current_lots = int(engine_state.positions[0].lots)
+            current_depth = int(engine_state.positions[0].highest_pyramid_level)
+        else:
+            current_lots = 0
+            current_depth = 0
+        remaining_cap = regime_cap - current_lots
+        if remaining_cap <= 0:
+            return None
+        if current_depth >= self._max_levels:
             return None
         if self._require_h1_gate and not self._hub.h1_gate_passed(snapshot.price):
             return None
@@ -630,26 +645,49 @@ class _RegimeAwareAdd(AddPolicy):
         if account is None or account.margin_available <= 0:
             return None
 
-        # Add ONE lot per snapshot when free margin can fund it. The pyramid
-        # builds from many sequential 1-lot adds across thousands of 5m bars,
-        # which mirrors the simulator's per-bar while-loop without burning a
-        # 50%-of-margin slug per snapshot (which over-pyramids when adds fire
-        # on every bar). add_margin_fraction now scales the *threshold* — adds
-        # only fire when free margin ≥ margin_per_lot / add_margin_fraction,
-        # so 0.50 → require 2 lots' worth of free margin per add.
+        # Batched-lot emission with concentration governor.
+        #
+        # Naive batched emission ``n = int(margin_available / threshold)`` lets
+        # the book balloon to 200+ lots once equity has grown — a single
+        # adverse move then crystallizes a catastrophic loss because there's
+        # no per-bar friction to slow the pyramid. The standalone simulator
+        # gets away with this only because its stop fires on intra-bar low
+        # pierce at ``stop_level - 1 tick``, capping per-cycle losses to ~one
+        # ATR. Production fills are noisier (bps slippage + impact +
+        # latency), so we need stricter pacing.
+        #
+        # Two governors stacked here:
+        #   1. **Per-bar cap** = ``equity * per_bar_margin_pct / mpl``. With
+        #      0.05 default, no single bar can grow margin commitment by
+        #      more than 5% of current equity. As equity compounds the cap
+        #      grows proportionally, so the strategy still scales but never
+        #      lurches.
+        #   2. **Free-margin affordability** = ``margin_available / threshold``
+        #      (the existing add-buffer logic). Prevents hitting the broker's
+        #      maintenance margin on the next adverse tick.
+        # The minimum of the two is taken, so growth is throttled by whichever
+        # is tighter on this bar.
         mpl = _margin_per_lot(snapshot)
-        threshold = mpl / max(self._add_margin_fraction, 0.05)
-        if account.margin_available < threshold:
+        threshold_per_lot = mpl / max(self._add_margin_fraction, 0.05)
+        if account.margin_available < threshold_per_lot:
+            return None
+
+        n_affordable = int(account.margin_available / threshold_per_lot)
+        per_bar_cap = max(1, int(account.equity * self._per_bar_margin_pct / mpl))
+        n_lots = min(n_affordable, remaining_cap, per_bar_cap)
+        if n_lots <= 0:
             return None
 
         return AddDecision(
-            lots=1.0,
+            lots=float(n_lots),
             contract_type="large",
             move_existing_to_breakeven=False,
             metadata={
                 "regime": regime,
                 "atr_5m": self._hub.atr_5m,
                 "margin_per_lot": mpl,
+                "batched_add_lots": n_lots,
+                "per_bar_cap": per_bar_cap,
                 METADATA_STRATEGY_SIZED: True,
             },
         )
@@ -734,6 +772,7 @@ def create_compounding_trend_long_mtf_engine(
     add_margin_fraction: float = 0.50,
     min_initial_stop_pct: float = 0.020,
     require_h1_gate: bool = True,
+    per_bar_margin_pct: float = 0.05,
     session_id: str | None = None,  # noqa: ARG001 - accepted for runner parity
 ) -> PositionEngine:
     """Build a PositionEngine wired with the compounding_trend_long_mtf strategy."""
@@ -758,6 +797,7 @@ def create_compounding_trend_long_mtf_engine(
             max_pyramid_levels=max_pyramid_levels,
             add_margin_fraction=add_margin_fraction,
             require_h1_gate=require_h1_gate,
+            per_bar_margin_pct=per_bar_margin_pct,
         ),
         stop_policy=_RegimeAwareStop(hub),
         # Strategy-engine semantics: pyramid adds form a single book that
