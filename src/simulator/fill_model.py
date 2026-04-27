@@ -25,7 +25,13 @@ class MarketImpactFillModel(FillModel):
         self._rng = Random(self._params.seed)
 
     def simulate(self, order: Order, bar: dict[str, float], timestamp: datetime) -> Fill:
-        close = bar["close"]
+        # Honor a stop-fill override from the engine: PositionEngine sets
+        # metadata['fill_price_override'] = stop_level ± min_tick when
+        # EngineConfig.stop_fill_at_level=True so trail/stop exits mark from the
+        # actual trigger price, not the (often much worse) bar close.
+        # Spread/impact/latency/commission still stack on top below.
+        override = order.metadata.get("fill_price_override") if order.metadata else None
+        close = float(override) if override is not None else bar["close"]
         volume = bar.get("volume", 0.0)
         sigma = bar.get("daily_atr", 0.0) / close if close > 0 else 0.0
 

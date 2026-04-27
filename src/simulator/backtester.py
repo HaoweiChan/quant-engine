@@ -11,6 +11,7 @@ from src.core.position_engine import PositionEngine, create_pyramid_engine
 from src.core.sizing import PortfolioSizer, SizingConfig
 from src.core.types import (
     METADATA_EXPOSURE_MULTIPLIER,
+    METADATA_STRATEGY_SIZED,
     AccountState,
     AddDecision,
     EntryDecision,
@@ -347,6 +348,29 @@ class BacktestRunner:
             snapshot: MarketSnapshot,
             account: AccountState | None,
         ) -> EntryDecision | None:
+            # Strategy-sized opt-out: when the strategy already did account-aware
+            # sizing (e.g. compounding_trend_long pulls margin headroom from the
+            # _AccountHub), trust ``decision.lots`` and only enforce the
+            # margin-cap safety rail. Never inflate, only trim if the request
+            # would breach equity * portfolio_margin_cap. See
+            # ``METADATA_STRATEGY_SIZED`` docstring in src/core/types.py.
+            if decision.metadata.get(METADATA_STRATEGY_SIZED):
+                equity_for_cap = account.equity if account is not None else initial_equity
+                margin_cap = equity_for_cap * sizer._config.portfolio_margin_cap
+                requested_margin = decision.lots * snapshot.margin_per_unit
+                if requested_margin > margin_cap and snapshot.margin_per_unit > 0:
+                    capped_lots = float(int(margin_cap / snapshot.margin_per_unit))
+                    if capped_lots < 1:
+                        return None
+                    return EntryDecision(
+                        lots=capped_lots,
+                        contract_type=decision.contract_type,
+                        initial_stop=decision.initial_stop,
+                        direction=decision.direction,
+                        metadata={**decision.metadata, "sizer": "strategy_sized_capped"},
+                    )
+                return decision
+
             equity = account.equity if account is not None else initial_equity
             stop_dist = abs(snapshot.price - decision.initial_stop)
             result = sizer.size_entry(
@@ -371,6 +395,25 @@ class BacktestRunner:
             positions: list[Position],
         ) -> AddDecision | None:
             from src.core.sizing import _base_position_lots
+
+            # Strategy-sized opt-out: trust ``decision.lots`` and only enforce
+            # margin-cap safety. Mirrors ``_size_entry`` behaviour.
+            if decision.metadata.get(METADATA_STRATEGY_SIZED):
+                margin_cap = initial_equity * sizer._config.portfolio_margin_cap
+                existing_margin = sum(p.lots * snapshot.margin_per_unit for p in positions)
+                requested_margin = decision.lots * snapshot.margin_per_unit
+                if existing_margin + requested_margin > margin_cap and snapshot.margin_per_unit > 0:
+                    headroom = max(0.0, margin_cap - existing_margin)
+                    capped_lots = float(int(headroom / snapshot.margin_per_unit))
+                    if capped_lots < 1:
+                        return None
+                    return AddDecision(
+                        lots=capped_lots,
+                        contract_type=decision.contract_type,
+                        move_existing_to_breakeven=decision.move_existing_to_breakeven,
+                        metadata={**decision.metadata, "sizer": "strategy_sized_capped"},
+                    )
+                return decision
 
             is_multiplier = bool(decision.metadata.get(METADATA_EXPOSURE_MULTIPLIER, False))
             base_lots = _base_position_lots(positions) if is_multiplier else 0.0

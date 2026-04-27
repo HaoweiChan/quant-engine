@@ -90,91 +90,86 @@ and Risk Auditor sign-off before implementation begins.
    `compose_param_schema()` to inherit indicator parameter definitions into their
    `PARAM_SCHEMA`. Do not duplicate indicator math inside strategy files.
 
-7. **Intraday strategies go flat at session close**: Any strategy operating on 1m or 5m
-   bars must close all positions by the last bar of each session. No overnight or
-   inter-session carries. This is enforced in the backtest engine and must be enforced
-   in live execution. See the Intraday Position and Benchmark Rules section below.
+7. **Intraday-holding strategies go flat at session close**: The classifier is the
+   strategy's declared **`holding_period`** (or equivalently `stop_architecture ==
+   INTRADAY`), **not** the bar timeframe it consumes. A strategy that declares
+   `holding_period == SHORT_TERM` (or `stop_architecture == INTRADAY`) must close
+   all positions by the last bar of each session — no overnight or inter-session
+   carries. A strategy that declares `holding_period == SWING` may consume 5m or
+   1m bars for execution responsiveness while holding positions across sessions.
+   This is enforced in `_compute_force_flat_indices` (src/mcp_server/facade.py),
+   which short-circuits to a single end-of-window flat for SWING strategies and
+   produces session-boundary flats only for intraday ones. The same rule must be
+   honored in live execution. See the Position and Benchmark Rules section below.
 
 ---
 
-## Intraday Position and Benchmark Rules
+## Position and Benchmark Rules
 
-These rules apply to every strategy that trades on 1m or 5m bars. They are not optional.
+The dispatch rule for both session-close behavior and the B&H benchmark is the
+strategy's declared `holding_period` (via `stop_architecture` in `STRATEGY_META`).
+The bar timeframe a strategy consumes is an *execution* concern, not a *holding*
+concern — a SWING strategy can consume 5m bars for fast stop reaction while
+holding positions across sessions.
 
-### End-of-Session Flat Rule
-All open positions must be closed at or before the last bar of each session:
+### End-of-Session Flat Rule (intraday-holding strategies only)
+Strategies declaring `holding_period == SHORT_TERM` (or `stop_architecture ==
+INTRADAY`) must close all positions by the last bar of each session:
 - Night session: close by 04:59 (last 1m bar before 05:00)
 - Day session: close by 13:44 (last 1m bar before 13:45)
 
-This is implemented as a forced exit in the backtest engine's session-close handler.
-In live trading, the Live Systems Engineer's order router must issue a market order
-to flatten any open position when the session-close signal fires.
+This is implemented as a forced exit in the backtest engine's session-close
+handler (`_compute_force_flat_indices` in `src/mcp_server/facade.py`). For SWING
+strategies the same function short-circuits to a single end-of-window flat so
+positions roll across sessions naturally. In live trading, the Live Systems
+Engineer's order router must apply the same rule: flatten on session-close
+signal *only* when the running strategy is intraday-holding.
 
-**Why this rule exists**: Holding overnight introduces gap risk that is structurally
-different from the intraday risk the strategy was designed for. Carrying positions
-across session boundaries also invalidates the session-scoped indicators (VWAP, OR)
-and makes performance attribution ambiguous.
+**Why intraday-holding strategies must flatten**: Holding overnight introduces
+gap risk that is structurally different from the intraday risk the strategy was
+designed for. Carrying positions across session boundaries also invalidates the
+session-scoped indicators (VWAP, OR) and makes performance attribution ambiguous.
 
-### Intraday Benchmark Definition
-The correct benchmark for an intraday strategy is **not** buy-and-hold over the
-full study period. It is the **intraday buy-and-hold**: buy the first bar of each
-session, sell the last bar of the same session, repeat for every session in the
-study period.
+**Why SWING strategies on 5m bars are allowed to hold**: The 5m bar source is
+purely for execution responsiveness (faster stop fills, finer add/cut timing).
+The strategy's risk model and indicator universe are designed around the swing
+horizon — overnight gaps are an expected part of the regime, not a violation
+of it.
 
+### Benchmark Selection
+The benchmark is dispatched off `is_intraday_strategy(slug)` (which itself reads
+`stop_architecture`):
+
+| holding_period | benchmark | rationale |
+| --- | --- | --- |
+| SHORT_TERM (intraday) | **Intraday B&H** — buy each session open, sell each session close | matches the strategy's holding universe; isolates intraday alpha from gap moves |
+| MEDIUM_TERM, SWING | **Daily-bar B&H** — cumulative close-to-close return over the study window | matches the swing holding horizon; includes the gap risk the swing strategy is paid to take |
+
+The dispatch is implemented around line 1202 of `src/mcp_server/facade.py`:
+
+```python
+if intraday:
+    # Intraday B&H: lock in equity at each session boundary, restart from
+    # session open. Same holding universe as the strategy.
+    bnh_eq_vals = _compute_intraday_bnh(raw, initial_equity)
+else:
+    # Daily-bar B&H: cumulative close-to-close return over the full window.
+    closes = np.array([b.close for b in raw], dtype=float)
+    bnh_returns = np.diff(closes) / closes[:-1]
+    bnh_eq = initial_equity * np.cumprod(np.concatenate([[1.0], 1 + bnh_returns]))
 ```
-Intraday B&H return for session S:
-  r_S = (close_of_last_bar_S - open_of_first_bar_S) / open_of_first_bar_S
-
-Cumulative intraday B&H:
-  product of (1 + r_S) for all sessions in the study period
-```
-
-This benchmark answers the question: "Could I have done better by just holding
-the index for the same intraday windows my strategy was active?" It uses the
-identical holding universe as the strategy — no overnight positions, no session
-gap exposure — making it a fair comparison.
-
-**What the standard buy-and-hold benchmark measures instead**: Total return including
-overnight gaps, weekend gaps, and cross-session moves. An intraday strategy that
-avoids bad overnight gaps will look worse against this benchmark than it deserves,
-and a strategy that catches morning gaps will look better than it deserves.
 
 ### Reporting Requirement
 Every backtest report must include both:
 1. Strategy cumulative return and Sharpe
-2. Intraday B&H cumulative return and Sharpe for the same sessions
+2. Benchmark cumulative return and Sharpe for the same window, dispatched per
+   the table above
 
-The strategy's Sharpe must exceed the intraday B&H Sharpe to be considered
-to have demonstrated edge. A strategy with lower Sharpe than intraday B&H is
-not adding value over a passive intraday hold.
-
-### Implementation in Backtest Engine
-The simulator must compute the intraday benchmark automatically alongside strategy results:
-
-```python
-def compute_intraday_bnh(bars: list[Bar]) -> BenchmarkResult:
-    """
-    For each session in bars, compute open-to-close return.
-    Combine across sessions as a daily return series.
-    """
-    sessions: dict[str, list[Bar]] = group_bars_by_session(bars)
-    session_returns = []
-    for sid, session_bars in sorted(sessions.items()):
-        if len(session_bars) < 2:
-            continue
-        entry = session_bars[0].open
-        exit_ = session_bars[-1].close
-        session_returns.append((exit_ - entry) / entry)
-
-    equity = np.cumprod([1 + r for r in session_returns])
-    sharpe = annualized_sharpe(session_returns)
-    return BenchmarkResult(
-        label="Intraday B&H",
-        cumulative_return=equity[-1] - 1,
-        sharpe=sharpe,
-        session_returns=session_returns,
-    )
-```
+The strategy's Sharpe must exceed its appropriate benchmark Sharpe to be
+considered to have demonstrated edge. A SWING strategy that under-performs
+daily-bar B&H is not adding value over a passive long; an intraday strategy
+that under-performs intraday B&H is not adding value over a passive
+session-by-session hold.
 
 ---
 

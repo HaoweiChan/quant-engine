@@ -76,12 +76,31 @@ def _normalize_params_for_hash(params: dict[str, Any]) -> str:
     return json.dumps({k: _norm(v) for k, v in params.items()}, sort_keys=True)
 
 
-def _compute_force_flat_indices(timestamps: list) -> set[int]:
+def _compute_force_flat_indices(timestamps: list, slug: str | None = None) -> set[int]:
     """Compute the set of bar indices where force-flat (session close) should occur.
 
     Adds an index whenever the session ID changes between consecutive bars, and
     always adds the final bar index so the last open position is closed.
+
+    The classifier for whether a strategy needs session-close liquidation is
+    ``holding_period`` (via ``is_intraday_strategy(slug)``), not the bar
+    timeframe. A SWING strategy that consumes 5m bars holds positions across
+    sessions; an INTRADAY strategy on the same bars flattens at session close.
+
+    When ``slug`` is provided and the strategy is non-intraday (SWING /
+    long-horizon), this returns an empty set as a defense-in-depth guard so
+    callers that forget to gate the call still produce correct behavior. The
+    final bar index is still added in all cases so the runner can close any
+    residual position at the end of the test window.
     """
+    if not timestamps:
+        return set()
+
+    if slug is not None:
+        from src.strategies.registry import is_intraday_strategy
+        if not is_intraday_strategy(slug):
+            return {len(timestamps) - 1}
+
     from src.data.session_utils import session_id as _session_id
 
     indices: set[int] = set()
@@ -880,7 +899,7 @@ def run_backtest_for_mcp(
     # Intraday mode: compute session boundaries for force-close
     force_flat_indices: set[int] | None = None
     if is_intraday and len(timestamps) > 1:
-        force_flat_indices = _compute_force_flat_indices(timestamps)
+        force_flat_indices = _compute_force_flat_indices(timestamps, slug=resolved_slug)
     result = runner.run(bars, timestamps=timestamps, force_flat_indices=force_flat_indices)
     out = _format_backtest_result(
         result,
@@ -1192,7 +1211,7 @@ def run_backtest_realdata_for_mcp(
     # Intraday mode: compute session boundaries for force-close
     force_flat_indices: set[int] | None = None
     if intraday and len(timestamps) > 1:
-        force_flat_indices = _compute_force_flat_indices(timestamps)
+        force_flat_indices = _compute_force_flat_indices(timestamps, slug=resolved_slug)
 
     result = runner.run(bars, timestamps=timestamps, force_flat_indices=force_flat_indices)
 
@@ -1899,7 +1918,7 @@ def run_sweep_for_mcp(
     from src.strategies.registry import is_intraday_strategy
     sweep_force_flat: set[int] | None = None
     if is_intraday_strategy(resolved_slug) and len(timestamps) > 1:
-        sweep_force_flat = _compute_force_flat_indices(timestamps)
+        sweep_force_flat = _compute_force_flat_indices(timestamps, slug=resolved_slug)
 
     adapter = _get_adapter()
     # Sweep writes a NEW pin with hash == current file hash. If we pinned to an
@@ -2505,7 +2524,7 @@ def run_walk_forward_for_mcp(
         )
         is_force_flat: set[int] | None = None
         if is_intraday:
-            is_force_flat = _compute_force_flat_indices(is_ts)
+            is_force_flat = _compute_force_flat_indices(is_ts, slug=resolved_slug)
         is_result = is_runner.run(is_bars, timestamps=is_ts, force_flat_indices=is_force_flat)
         is_sharpe = is_result.metrics.get("sharpe", 0.0)
 
@@ -2519,7 +2538,7 @@ def run_walk_forward_for_mcp(
         )
         oos_force_flat: set[int] | None = None
         if is_intraday:
-            oos_force_flat = _compute_force_flat_indices(oos_ts)
+            oos_force_flat = _compute_force_flat_indices(oos_ts, slug=resolved_slug)
         oos_result = oos_runner.run(oos_bars, timestamps=oos_ts, force_flat_indices=oos_force_flat)
         oos_sharpe = oos_result.metrics.get("sharpe", 0.0)
         oos_mdd = oos_result.metrics.get("max_drawdown_pct", 0.0)

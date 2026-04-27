@@ -299,6 +299,23 @@ class EngineConfig:
     require_account_for_entry: bool = False
     min_hold_lots: float = 0.0
     pyramid_risk_level: int = 0
+    # Engine semantics for stop triggering & exit. Default off so every existing
+    # strategy keeps byte-identical behaviour; pyramiding swing strategies opt
+    # in via their factory (see compounding_trend_long_mtf).
+    intrabar_stop_check: bool = False
+    """When True, trigger stops on intra-bar pierce (snapshot.bar_low for longs,
+    bar_high for shorts) instead of close-only. Falls back to snapshot.price if
+    the snapshot doesn't carry OHLC. Same-bar entries are excluded from the
+    intra-bar check (the wick happened before entry)."""
+    whole_book_exit_on_stop: bool = False
+    """When True, the first triggered position causes every same-direction
+    position to flatten on the same bar (subject to min_hold_lots, which still
+    shields pyramid_level 0)."""
+    stop_fill_at_level: bool = False
+    """When True, stop-exit Orders carry metadata['fill_price_override'] set to
+    pos.stop_level - min_tick (longs) / + min_tick (shorts). The fill model
+    uses that value as the base price; spread/impact/latency/commission still
+    stack on top, so this stays realistic vs live execution."""
 
     def __post_init__(self) -> None:
         if self.max_loss <= 0:
@@ -309,6 +326,11 @@ class EngineConfig:
             raise ValueError("disaster_atr_mult must be positive")
         if self.pyramid_risk_level not in _RISK_LEVEL_PRESETS:
             raise ValueError(f"pyramid_risk_level must be 0-3, got {self.pyramid_risk_level}")
+        if self.stop_fill_at_level and not self.intrabar_stop_check:
+            raise ValueError(
+                "stop_fill_at_level requires intrabar_stop_check=True; "
+                "the override price is meaningless when triggering on the close"
+            )
 
 
 class RiskAction(Enum):

@@ -193,7 +193,14 @@ def get_info(slug: str) -> StrategyInfo:
 def is_intraday_strategy(slug: str) -> bool:
     """Return True if the strategy requires intraday session-close liquidation.
 
-    Checks StopArchitecture metadata first, then falls back to slug prefix.
+    Checks StopArchitecture metadata first; falls back to ``short_term/`` slug
+    prefix when metadata is missing or unresolvable.
+
+    Audit (2026-04): every current ``medium_term/`` strategy declares
+    ``stop_architecture = StopArchitecture.SWING`` explicitly, so the fallback
+    no longer treats them as intraday. ``short_term/`` strategies are still
+    treated as intraday by default — that prefix carries an unambiguous
+    semantic. See ``docs/risk-auditor-signoff-holding-period-dispatch.md``.
     """
     resolved = _resolve_slug(slug)
     try:
@@ -204,7 +211,7 @@ def is_intraday_strategy(slug: str) -> bool:
             return False
     except KeyError:
         pass
-    return resolved.startswith(("short_term/", "medium_term/"))
+    return resolved.startswith("short_term/")
 
 
 _SIGNAL_TF_TO_BAR_AGG: dict[str, int] = {

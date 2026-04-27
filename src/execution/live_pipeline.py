@@ -654,7 +654,9 @@ class LivePipelineManager:
             # intraday_max_long: 當沖 buy at open, sell half at 13:20, ride
             # the rest into Sinopac's own 留倉 handling). Skipping them here
             # is the only safe way to honour that intent — the deterministic
-            # safety-net would otherwise close the kept half.
+            # safety-net would otherwise close the kept half. SWING strategies
+            # that consume 5m bars are also covered by this opt-out path —
+            # their STRATEGY_META declares force_flat_at_session_end=False.
             if not getattr(runner, "force_flat_at_session_end", True):
                 logger.info(
                     "force_flat_timer_skipped_meta_optout",

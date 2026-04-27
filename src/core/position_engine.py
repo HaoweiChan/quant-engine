@@ -198,40 +198,85 @@ class PositionEngine:
     # -- private: stop-loss check (Priority 1) --
 
     def _check_stops(self, snapshot: MarketSnapshot) -> list[Order]:
-        orders: list[Order] = []
+        intrabar = self._config.intrabar_stop_check
+        whole_book = self._config.whole_book_exit_on_stop
+        fill_at_level = self._config.stop_fill_at_level
+        min_tick = snapshot.contract_specs.min_tick
+
+        # Phase 1: per-position trigger detection.
         triggered: list[int] = []
         for i, pos in enumerate(self._positions):
             # min_hold_lots: skip base position (level 0) so it acts as permanent B&H
             if self._config.min_hold_lots > 0 and pos.pyramid_level == 0:
                 continue
-            hit = (
-                snapshot.price <= pos.stop_level
-                if pos.direction == "long"
-                else snapshot.price >= pos.stop_level
-            )
-            if hit:
-                reason = "trailing_stop" if self._is_trailing(pos, snapshot) else "stop_loss"
-                close_side = "sell" if pos.direction == "long" else "buy"
-                orders.append(
-                    Order(
-                        order_type="market",
-                        side=close_side,
-                        symbol=snapshot.contract_specs.symbol,
-                        contract_type=pos.contract_type,
-                        lots=pos.lots,
-                        price=None,
-                        stop_price=None,
-                        reason=reason,
-                        metadata={
-                            "pyramid_level": pos.pyramid_level,
-                            "urgency": "immediate",
-                            "entry_price": pos.entry_price,
-                        },
-                        parent_position_id=pos.position_id,
-                        order_class="algo_exit",
+            same_bar_entry = pos.entry_timestamp == snapshot.timestamp
+            if intrabar and not same_bar_entry:
+                if pos.direction == "long":
+                    trigger_price = (
+                        snapshot.bar_low if snapshot.bar_low is not None else snapshot.price
                     )
+                    hit = trigger_price <= pos.stop_level
+                else:
+                    trigger_price = (
+                        snapshot.bar_high if snapshot.bar_high is not None else snapshot.price
+                    )
+                    hit = trigger_price >= pos.stop_level
+            else:
+                hit = (
+                    snapshot.price <= pos.stop_level
+                    if pos.direction == "long"
+                    else snapshot.price >= pos.stop_level
                 )
+            if hit:
                 triggered.append(i)
+
+        # Phase 2: whole-book expansion. The first triggered position decides
+        # which direction's book to flatten; min_hold_lots still shields level 0.
+        if whole_book and triggered:
+            direction = self._positions[triggered[0]].direction
+            triggered_set = set(triggered)
+            for j, pos in enumerate(self._positions):
+                if j in triggered_set:
+                    continue
+                if pos.direction != direction:
+                    continue
+                if self._config.min_hold_lots > 0 and pos.pyramid_level == 0:
+                    continue
+                triggered.append(j)
+            triggered.sort()
+
+        # Phase 3: emit one exit Order per triggered position.
+        orders: list[Order] = []
+        for i in triggered:
+            pos = self._positions[i]
+            reason = "trailing_stop" if self._is_trailing(pos, snapshot) else "stop_loss"
+            close_side = "sell" if pos.direction == "long" else "buy"
+            metadata: dict[str, object] = {
+                "pyramid_level": pos.pyramid_level,
+                "urgency": "immediate",
+                "entry_price": pos.entry_price,
+            }
+            if fill_at_level:
+                # Fill at the stop level (worst-case for the trader): one tick
+                # below for longs, one tick above for shorts. The fill model
+                # still adds spread/impact/latency/commission on top.
+                offset = min_tick if pos.direction == "long" else -min_tick
+                metadata["fill_price_override"] = pos.stop_level - offset
+            orders.append(
+                Order(
+                    order_type="market",
+                    side=close_side,
+                    symbol=snapshot.contract_specs.symbol,
+                    contract_type=pos.contract_type,
+                    lots=pos.lots,
+                    price=None,
+                    stop_price=None,
+                    reason=reason,
+                    metadata=metadata,
+                    parent_position_id=pos.position_id,
+                    order_class="algo_exit",
+                )
+            )
         for i in reversed(triggered):
             self._positions.pop(i)
         return orders

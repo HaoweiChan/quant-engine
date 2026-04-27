@@ -493,12 +493,13 @@ class LiveStrategyRunner:
             return []
         self._bar_count += 1
         # Session boundary check: force flat if new session started.
-        # Strategies opting out of session-end-flat (intraday_max_long)
-        # also opt out of this gap-detected boundary close — the kept
-        # half is already reconciled at the broker; force-flatting here
-        # would double-close it. The bar still falls through to the
-        # rest of the per-bar pipeline so half-exit / stop checks /
-        # strategy eval all run normally on the new session.
+        # Strategies opting out of session-end-flat (intraday_max_long,
+        # SWING strategies on 5m bars) also opt out of this gap-detected
+        # boundary close — the kept half is already reconciled at the broker;
+        # force-flatting here would double-close it. The bar still falls
+        # through to the rest of the per-bar pipeline so half-exit / stop
+        # checks / strategy eval all run normally on the new session. The
+        # gate uses self._meta_force_flat (cached from STRATEGY_META at init).
         if self._last_bar_ts is not None and is_new_session(self._last_bar_ts, bar.timestamp):
             self._bar_buffer.clear()
             if self._meta_force_flat:
@@ -511,6 +512,8 @@ class LiveStrategyRunner:
         # opt out of this safety-net flatten so they can keep half a position
         # overnight (e.g. intraday_max_long: 當沖 buy at open, sell half at
         # 13:20, ride the rest into Sinopac's own end-of-session handling).
+        # SWING strategies that consume 5m bars (compounding_trend_long_mtf)
+        # also declare force_flat_at_session_end=False in their META.
         if self._meta_force_flat and self._is_session_close_bar(bar.timestamp):
             self._bar_buffer.clear()
             return await self._force_flat(bar)
