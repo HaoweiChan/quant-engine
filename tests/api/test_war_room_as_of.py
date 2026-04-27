@@ -154,26 +154,18 @@ class TestWarRoomAsOf:
 
         assert called == [], "_load_mock_as_of must NOT be called when as_of is None"
 
-    def test_cache_bypass_with_as_of(self):
-        """_load_mock_as_of does not read or write _WARROOM_CACHE."""
-        import src.api.routes.war_room as wr_mod
-
-        # Pre-populate the cache with a sentinel.
-        wr_mod._WARROOM_CACHE["data"] = {"sentinel": True}
-        wr_mod._WARROOM_CACHE["ts"] = 9_999_999_999.0
-
+    def test_as_of_loads_from_database(self):
+        """_load_mock_as_of loads data from database directly."""
         db = _create_test_db(snapshots=[_SNAP_T1])
 
         with patch("src.api.routes.war_room._mock_db_path") as mock_path, \
              patch("src.api.routes.war_room.sqlite3.connect", return_value=db):
             mock_path.return_value.exists.return_value = True
-            _load_mock_as_of("mock-dev", "2025-01-01T09:30:00")
+            result = _load_mock_as_of("mock-dev", "2025-01-01T09:30:00")
 
-        # Cache must be untouched after the as_of call.
-        assert wr_mod._WARROOM_CACHE["data"] == {"sentinel": True}
-
-        # Restore cache state so it doesn't pollute other tests.
-        wr_mod.invalidate_warroom_cache()
+        # Should load data from database
+        assert result is not None
+        assert result["equity"] == 1000.0
 
 
 # ===========================================================================
