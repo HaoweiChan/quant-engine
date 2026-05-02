@@ -1,0 +1,67 @@
+[Unit]
+Description=Quant Engine on-VPS self-watchdog (auto-restart on health failure)
+Documentation=file://__PROJECT_DIR__/.claude/plans/our-prod-server-constantly-expressive-whistle.md
+# Wait for the API to come up first; we don't want to spam restarts during boot.
+After=network-online.target quant-engine-api.service
+Wants=network-online.target
+Requires=quant-engine-api.service
+
+[Service]
+Type=simple
+# Must run as root to call `systemctl restart quant-engine-api.service`.
+# All other privileged operations are denied below.
+User=root
+
+WorkingDirectory=__PROJECT_DIR__
+
+# Telegram credentials live in __PROJECT_DIR__/.env (or any file the operator
+# chooses). The leading `-` makes this optional so the watchdog still runs
+# (alert-less) if the file is missing.
+EnvironmentFile=-__PROJECT_DIR__/.env
+
+# Watchdog tuning. Override any of these in the EnvironmentFile if needed.
+Environment=WATCHDOG_TARGET_UNIT=quant-engine-api.service
+Environment=WATCHDOG_HEALTH_URL=http://127.0.0.1:8000/api/health
+Environment=WATCHDOG_INTERVAL_S=30
+Environment=WATCHDOG_FAILURE_THRESHOLD=3
+Environment=WATCHDOG_HTTP_TIMEOUT_S=10
+Environment=WATCHDOG_RESTART_COOLDOWN_S=300
+
+# stdlib-only Python script — system python is fine.
+ExecStart=/usr/bin/python3 __PROJECT_DIR__/scripts/vps_self_watchdog.py
+
+# Restart limits — if the watchdog itself crashloops, stop and let an
+# operator look at it instead of masking a deeper problem.
+Restart=on-failure
+RestartSec=15
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+# Resource caps — the script is tiny.
+MemoryMax=64M
+CPUQuota=5%
+
+# Hardening — the watchdog only needs to make HTTP requests and call
+# `systemctl restart`. Lock everything else down.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Logs go to journald — `journalctl -u quant-vps-self-watchdog -f` to follow.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=quant-vps-self-watchdog
+
+[Install]
+WantedBy=multi-user.target
