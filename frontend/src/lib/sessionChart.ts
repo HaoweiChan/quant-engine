@@ -29,12 +29,16 @@ function hasExplicitZone(ts: string): boolean {
 }
 
 function formatNaiveTimestamp(date: Date): string {
+  // ISO-style dashes so downstream consumers that re-parse this string via
+  // `new Date(ts.replace(" ", "T") + "Z")` get a valid epoch. Slash separators
+  // produce `Invalid Date` after the T-insertion+Z-append, which silently
+  // collapsed every chart-marker match to bar[0] (see ChartStack signal mapping).
   const yyyy = date.getUTCFullYear().toString().padStart(4, "0");
   const mm = (date.getUTCMonth() + 1).toString().padStart(2, "0");
   const dd = date.getUTCDate().toString().padStart(2, "0");
   const hh = date.getUTCHours().toString().padStart(2, "0");
   const min = date.getUTCMinutes().toString().padStart(2, "0");
-  return `${yyyy}/${mm}/${dd} ${hh}:${min}:00`;
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}:00`;
 }
 
 function isEmptyBar(bar: OHLCVBar): boolean {

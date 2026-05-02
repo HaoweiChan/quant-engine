@@ -399,26 +399,17 @@ export function PortfolioCard({
         </div>
       )}
 
-      {/* Detailed allocation editor: live portfolios only, read-only.
-          Paper portfolios are sandbox bubbles — no real money to carve up,
-          so we render `Allocation: —` instead of the slider. */}
-      {portfolio.mode === "live" && members.length >= 2 && (
+      {/* Per-strategy allocation editor. Live portfolios are read-only
+          (weights come from the original optimization). Paper portfolios
+          are interactive — users can rebalance the seed equity across
+          strategies in the sandbox. */}
+      {members.length >= 2 && (
         <div className="px-2 pb-2">
-          <AllocationSlider sessions={members} onCommit={onAction} readOnly />
-        </div>
-      )}
-      {portfolio.mode === "paper" && members.length >= 2 && (
-        <div
-          className="mx-2 mb-2 text-[11px] px-2 py-1.5 rounded"
-          style={{
-            background: colors.card,
-            border: `1px solid ${colors.cardBorder}`,
-            color: colors.muted,
-            fontFamily: "var(--font-mono)",
-          }}
-          title="Paper portfolio — no allocation of real money"
-        >
-          Allocation: —
+          <AllocationSlider
+            sessions={members}
+            onCommit={onAction}
+            readOnly={portfolio.mode === "live"}
+          />
         </div>
       )}
 
