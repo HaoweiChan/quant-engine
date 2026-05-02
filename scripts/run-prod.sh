@@ -1,6 +1,28 @@
 #!/usr/bin/env bash
-# Production runner — requires main branch. Starts backend on :8000 and
-# built frontend on :5173. Use run-dev.sh for any non-main branch.
+# DEPRECATED FOR DAILY OPS — DO NOT USE TO START THE PRODUCTION SERVER.
+#
+# Production is now supervised by systemd via:
+#   sudo systemctl start  quant-engine-api.service
+#   sudo systemctl status quant-engine-api.service
+#   sudo journalctl -u quant-engine-api.service -f
+#
+# The systemd unit (scripts/deploy/quant-engine-api.service) is the single
+# authority for the prod uvicorn process. Running this script in parallel
+# creates a dual-supervision race: a vite preview OOM here will fire the
+# EXIT trap below and tear down the systemd-managed backend, producing the
+# "dashboard goes blank / 502" symptom.
+#
+# FastAPI itself serves the dashboard bundle from QUANT_FRONTEND_DIST
+# (see src/api/main.py:171-183), so the vite preview server below is
+# redundant in production. Caddy reverse-proxies to uvicorn on :8000 and
+# the dashboard is reachable directly from there.
+#
+# This script is retained ONLY for one-shot manual recovery on a host
+# where systemd is unavailable. Build the frontend with `cd frontend &&
+# npm run build` and let systemd / Caddy handle serving.
+#
+# Original purpose (kept for reference): production runner that starts
+# uvicorn on :8000 and the vite preview server on :5173 in tandem.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -48,7 +70,8 @@ export PATH="$(dirname "$NODE_BIN"):$PATH"
 kill_port() {
   local port=$1
   local pid
-  pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP '(?<=pid=)\d+' | head -1)
+  # `|| true` swallows pipefail when grep matches nothing (port already free).
+  pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP '(?<=pid=)\d+' | head -1 || true)
   if [[ -n "$pid" ]]; then
     echo "  [cleanup] Killed stale process $pid on :$port"
     kill "$pid" 2>/dev/null || true

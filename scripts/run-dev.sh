@@ -45,7 +45,8 @@ export PATH="$(dirname "$NODE_BIN"):$PATH"
 kill_port() {
   local port=$1
   local pid
-  pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP '(?<=pid=)\d+' | head -1)
+  # `|| true` swallows pipefail when grep matches nothing (port already free).
+  pid=$(ss -tlnp "sport = :$port" 2>/dev/null | grep -oP '(?<=pid=)\d+' | head -1 || true)
   if [[ -n "$pid" ]]; then
     echo "  [cleanup] Killed stale process $pid on :$port"
     kill "$pid" 2>/dev/null || true
@@ -63,7 +64,12 @@ echo
 echo "[1/2] Starting backend on :$BACKEND_PORT (with --reload)..."
 kill_port "$BACKEND_PORT"
 mkdir -p data/logs
-uv run uvicorn src.api.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload >> data/logs/backend.log 2>&1 &
+# Skip live broker init in dev — prod owns the shioaji session, and a second
+# login with the same credentials gets rejected ("production permission" /
+# "Too Many Connections"), spinning the lifespan startup forever and
+# leaving the dev backend stuck before HTTP becomes available.
+QUANT_SKIP_BROKER_INIT="${QUANT_SKIP_BROKER_INIT:-1}" \
+  uv run uvicorn src.api.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload >> data/logs/backend.log 2>&1 &
 BACKEND_PID=$!
 trap 'kill $BACKEND_PID 2>/dev/null || true' EXIT
 
