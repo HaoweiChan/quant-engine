@@ -1,5 +1,6 @@
 [Unit]
 Description=Quant Engine API (FastAPI + dashboard static files)
+Documentation=file://__PROJECT_DIR__/.claude/plans/our-prod-server-constantly-expressive-whistle.md
 After=network-online.target
 Wants=network-online.target
 
@@ -7,12 +8,51 @@ Wants=network-online.target
 Type=simple
 User=__SERVICE_USER__
 WorkingDirectory=__PROJECT_DIR__
+
+# FastAPI itself serves the React bundle from this path. See src/api/main.py:171-183.
+# This is why no separate vite/Caddy static server is needed in production.
 Environment=QUANT_FRONTEND_DIST=__PROJECT_DIR__/frontend/dist
+
+# Marks this host as production. src/research/ray_client.py refuses to init
+# Ray when this is set, so heavy compute can never accidentally land here.
+Environment=QUANT_HOST_ROLE=production
+
 EnvironmentFile=-__PROJECT_DIR__/.env
+
 ExecStart=__UV_BIN__ run uvicorn src.api.main:app --host 127.0.0.1 --port 8000
+
+# Restart hardening — survive transient failures, but stop the loop if we are
+# crashing structurally (10 restarts in 10 minutes => give up and page).
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+# Memory hardening — keep this process alive when the box is under pressure.
+# MemoryHigh throttles via cgroup pressure (soft); MemoryMax is the hard cap.
+# OOMScoreAdjust=-500 makes the kernel prefer to kill almost anything else
+# (Cursor remote, MCP servers, build processes) before touching uvicorn.
+MemoryHigh=3G
+MemoryMax=4G
+OOMScoreAdjust=-500
+
+# If a child of uvicorn OOMs (e.g. a one-off subprocess), don't tear down
+# the whole unit — let the parent decide how to recover.
+OOMPolicy=continue
+
+# Send stdout/stderr to journald. journalctl -u quant-engine-api -f replaces
+# tailing data/logs/backend.log; the unbounded backend.log file will stop
+# growing once this is in place.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=quant-engine-api
+
+# Process lifecycle: SIGTERM first, give the lifespan shutdown 20s to flush
+# pending broker IO + reconciler state, then KillMode=mixed terminates the
+# remaining process group.
 TimeoutStopSec=20
+KillMode=mixed
+KillSignal=SIGTERM
 
 [Install]
 WantedBy=multi-user.target

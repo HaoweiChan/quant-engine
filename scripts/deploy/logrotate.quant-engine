@@ -1,0 +1,38 @@
+# Logrotate config for the quant-engine VPS.
+#
+# Install at /etc/logrotate.d/quant-engine (owned by root):
+#
+#     sudo install -m 0644 \
+#       __PROJECT_DIR__/scripts/deploy/logrotate.quant-engine \
+#       /etc/logrotate.d/quant-engine
+#     sudo sed -i 's|__PROJECT_DIR__|/home/openclaw/.openclaw/workspace/quant-engine|g' \
+#       /etc/logrotate.d/quant-engine
+#     sudo logrotate --debug /etc/logrotate.d/quant-engine   # dry-run validation
+#
+# Verify with:
+#     sudo logrotate -v -f /etc/logrotate.d/quant-engine     # force a rotation
+#
+# After Phase 3 of the stability plan, the FastAPI uvicorn no longer writes
+# to data/logs/backend.log (its stdout/stderr go to journald). This config
+# still covers the file in case any legacy writer is left, and rotates the
+# shioaji SDK log which writes directly to disk.
+#
+# `copytruncate` is required for the shioaji SDK because that SDK opens its
+# log file once at startup and never reopens it on a SIGHUP. Without
+# copytruncate, the rotated file would still be held open by shioaji and
+# the new logs would go nowhere.
+
+__PROJECT_DIR__/data/logs/*.log
+__PROJECT_DIR__/data/logs/*.out
+{
+    weekly
+    rotate 4
+    maxsize 50M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0644 openclaw openclaw
+    su openclaw openclaw
+}
