@@ -1,0 +1,76 @@
+[Unit]
+Description=Quant Engine Ray cluster head (research-only, runs on WSL)
+Documentation=file://__PROJECT_DIR__/.claude/plans/our-prod-server-constantly-expressive-whistle.md
+After=network-online.target
+Wants=network-online.target
+
+# This is a SYSTEMD-USER unit intended for the WSL host (Linux on Windows).
+# It is NOT installed on the prod VPS. Live trading must remain unaware of
+# the Ray cluster — see src/research/ray_client.py for the prod-host guard.
+#
+# Install on WSL:
+#     mkdir -p ~/.config/systemd/user
+#     install -m 0644 \
+#         scripts/deploy/quant-ray-head.service \
+#         ~/.config/systemd/user/quant-ray-head.service
+#     sed -i "s|__PROJECT_DIR__|$HOME/quant-engine|g; \
+#             s|__VENV_BIN__|$HOME/quant-engine/.venv-ray/bin|g; \
+#             s|__RAY_TAILSCALE_IP__|$(tailscale ip -4 | head -1)|g" \
+#         ~/.config/systemd/user/quant-ray-head.service
+#     loginctl enable-linger "$USER"      # keeps user services running w/o login session
+#     systemctl --user daemon-reload
+#     systemctl --user enable --now quant-ray-head.service
+
+[Service]
+Type=simple
+WorkingDirectory=__PROJECT_DIR__
+
+# Generate the token once with `openssl rand -hex 32 > ~/.config/quant-engine/ray-token`
+# and chmod 600. The same path goes in the VPS-side env for any research script
+# that submits jobs over the tailnet.
+Environment=QUANT_RAY_TOKEN_PATH=%h/.config/quant-engine/ray-token
+
+# Bind ONLY to the Tailscale interface. Anything on 0.0.0.0 is a security risk
+# because Ray's protocol allows arbitrary code execution by design.
+Environment=RAY_NODE_IP_ADDRESS=__RAY_TAILSCALE_IP__
+
+# Keep two cores free on the WSL box so the rest of the system stays usable.
+# Override RAY_NUM_CPUS in an EnvironmentFile if you want a different split.
+Environment=RAY_DASHBOARD_HOST=127.0.0.1
+Environment=RAY_DASHBOARD_PORT=8265
+Environment=RAY_PORT=6379
+Environment=RAY_CLIENT_SERVER_PORT=10001
+
+ExecStart=/bin/bash -c '\
+    NUM_CPUS=$$(($(nproc) - 2)); \
+    [ $$NUM_CPUS -lt 1 ] && NUM_CPUS=1; \
+    exec __VENV_BIN__/ray start --head \
+        --node-ip-address="$${RAY_NODE_IP_ADDRESS}" \
+        --port="$${RAY_PORT}" \
+        --ray-client-server-port="$${RAY_CLIENT_SERVER_PORT}" \
+        --dashboard-host="$${RAY_DASHBOARD_HOST}" \
+        --dashboard-port="$${RAY_DASHBOARD_PORT}" \
+        --redis-password="$$(cat $${QUANT_RAY_TOKEN_PATH})" \
+        --num-cpus=$$NUM_CPUS \
+        --block \
+'
+
+# `ray start --block` keeps the head process in the foreground so systemd
+# treats it as a normal long-running service. On stop, ray gracefully
+# shuts down the head and any local workers.
+ExecStop=__VENV_BIN__/ray stop --force
+
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+# Resource caps tuned for a developer WSL2 box. Tighten or relax as needed.
+MemoryMax=8G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=quant-ray-head
+
+[Install]
+WantedBy=default.target
