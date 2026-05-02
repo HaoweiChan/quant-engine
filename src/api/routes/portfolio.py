@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import numpy as np
@@ -14,6 +15,39 @@ from src.core.portfolio_merger import PortfolioMerger, PortfolioMergerInput
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
+
+_TAIPEI_TZ = timezone(timedelta(hours=8))
+
+
+def _daily_timestamps_from_bar_epochs(
+    bar_epochs: list[int], target_len: int,
+) -> list[int]:
+    """Down-sample bar-level epochs to one entry per unique calendar day.
+
+    Mirrors the per-day grouping used to compute true_daily_returns in the
+    MCP facade (`src/mcp_server/facade.py` line ~1257), which keys by the
+    first 10 chars of the timestamp string — i.e. calendar date in Taipei
+    local time. Truncates/pads to ``target_len`` so the returned series
+    matches `PortfolioMerger.merged_equity_curve` exactly. Falls back to
+    the input unchanged for trivially short inputs.
+    """
+    if len(bar_epochs) < 2 or target_len <= 0:
+        return list(bar_epochs)[:target_len] if target_len > 0 else []
+    daily: dict[str, int] = {}
+    for epoch in bar_epochs:
+        dt = datetime.fromtimestamp(int(epoch), tz=_TAIPEI_TZ)
+        day = dt.strftime("%Y-%m-%d")
+        daily[day] = int(epoch)
+    series = list(daily.values())
+    if len(series) >= target_len:
+        return series[:target_len]
+    # Pad with the last known epoch + 1 day per missing slot so the chart
+    # still receives strictly-increasing timestamps.
+    last = series[-1] if series else int(bar_epochs[0])
+    while len(series) < target_len:
+        last += 86_400
+        series.append(last)
+    return series
 
 
 class StrategyEntry(BaseModel):
@@ -150,11 +184,22 @@ async def run_portfolio_backtest(req: PortfolioBacktestRequest) -> dict:
         n_strategies=len(req.strategies),
         n_days=merged.metrics.get("n_days", 0),
     )
-    # Derive top-level timestamps/tf from the first strategy (shared bar grid)
+    # Derive top-level timestamps/tf from the first strategy (shared bar grid).
+    # PortfolioMerger.merged_equity_curve is at DAILY granularity (one entry per
+    # trading day plus an initial-equity prefix). The bt result's
+    # equity_timestamps array, in contrast, is bar-level (often 1-min). Indexing
+    # `timestamps[0..N_days]` against bar-level epochs collapses the x-axis to
+    # the first N_days minutes of data — visible as an "hours-only" axis on a
+    # half-year backtest. Down-sample to one epoch per unique date and prepend
+    # the (first - 1s) sentinel to align with the initial-equity prefix in the
+    # merged curve.
     first_bt = bt_results[0] if bt_results else {}
-    top_eq_ts = first_bt.get("equity_timestamps", [])
-    if hasattr(top_eq_ts, "tolist"):
-        top_eq_ts = top_eq_ts.tolist()
+    bar_eq_ts = first_bt.get("equity_timestamps", [])
+    if hasattr(bar_eq_ts, "tolist"):
+        bar_eq_ts = bar_eq_ts.tolist()
+    daily_ts = _daily_timestamps_from_bar_epochs(
+        bar_eq_ts, target_len=len(merged.merged_equity_curve),
+    )
     return {
         "individual": individual_summaries,
         "merged_equity_curve": merged.merged_equity_curve,
@@ -162,7 +207,7 @@ async def run_portfolio_backtest(req: PortfolioBacktestRequest) -> dict:
         "merged_metrics": merged.metrics,
         "correlation_matrix": merged.correlation_matrix,
         "strategy_slugs": [e.slug for e in req.strategies],
-        "equity_timestamps": top_eq_ts,
+        "equity_timestamps": daily_ts,
         "timeframe_minutes": first_bt.get("timeframe_minutes", 1),
     }
 
