@@ -177,6 +177,36 @@ async def update_initial_equity(portfolio_id: str, body: InitialEquityRequest) -
     return _portfolio_to_dict(portfolio, members=mgr.list_members(portfolio_id))
 
 
+@router.post("/{portfolio_id}/repair-allocations")
+async def repair_allocations(portfolio_id: str) -> dict:
+    """Rebalance a portfolio's member shares to equal weights when invalid.
+
+    A portfolio is invalid when its member equity_shares sum > 1.0 (the
+    design invariant) or when every member is at the default 1.0
+    (legacy state from sessions attached without a follow-up batch
+    weight update). Returns the new member shares and a `rebalanced`
+    flag indicating whether any write occurred.
+    """
+    mgr = _get_manager()
+    portfolio = mgr.get_portfolio(portfolio_id)
+    if portfolio is None:
+        raise HTTPException(
+            status_code=404, detail=f"Portfolio '{portfolio_id}' not found",
+        )
+    members_before = mgr.list_members(portfolio_id)
+    before_shares = {m.session_id: m.equity_share for m in members_before}
+    members_after = mgr.rebalance_equal_weights(portfolio_id)
+    after_shares = {m.session_id: m.equity_share for m in members_after}
+    rebalanced = before_shares != after_shares
+    return {
+        "portfolio_id": portfolio_id,
+        "rebalanced": rebalanced,
+        "before": before_shares,
+        "after": after_shares,
+        **_portfolio_to_dict(portfolio, members=members_after),
+    }
+
+
 @router.post("/{portfolio_id}/flip-mode")
 async def flip_mode(portfolio_id: str, body: FlipModeRequest) -> dict:
     """Atomically flip portfolio mode after precondition scan.

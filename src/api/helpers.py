@@ -1031,6 +1031,21 @@ def _init_war_room() -> None:
         store=_live_portfolio_store,
         session_manager=_session_manager,
     )
+    # Boot-time rebalance of portfolios whose members violate the
+    # sum(equity_share)<=1.0 invariant. Disabled by PORTFOLIO_REPAIR_ON_BOOT=0.
+    if os.environ.get("PORTFOLIO_REPAIR_ON_BOOT", "1") != "0":
+        import structlog as _sl
+        _boot_log = _sl.get_logger(__name__)
+        try:
+            repaired = _live_portfolio_manager.repair_invalid_portfolios()
+            if repaired:
+                _boot_log.warning(
+                    "portfolio_boot_repair_summary",
+                    count=len(repaired),
+                    portfolios=[r["portfolio_id"] for r in repaired],
+                )
+        except Exception:
+            _boot_log.exception("portfolio_boot_repair_failed")
     _account_equity_store = AccountEquityStore()
     _portfolio_equity_store = PortfolioEquityStore()
     # The shared bar store is owned by helpers.py and shared with both the

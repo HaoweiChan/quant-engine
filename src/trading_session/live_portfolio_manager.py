@@ -22,6 +22,10 @@ logger = structlog.get_logger(__name__)
 
 ExecutionMode = Literal["paper", "live"]
 
+# Tolerance for floating-point sum-of-shares comparisons. Matches the
+# epsilon used by SessionManager.set_equity_shares_batch.
+_SUM_EPS = 1e-6
+
 
 class PortfolioFlipError(Exception):
     """Raised when a portfolio mode flip fails its precondition check.
@@ -158,6 +162,10 @@ class LivePortfolioManager:
             portfolio_id=portfolio_id,
             session_id=session_id,
         )
+        # Restore sum(equity_share)==1.0 for the portfolio. Callers wanting
+        # explicit weights (load-saved-portfolio flow) override afterwards
+        # via batchUpdateEquityShare.
+        self._rebalance_to_equal_weights(portfolio_id)
         return session
 
     def detach_session(self, session_id: str) -> TradingSession:
@@ -238,6 +246,108 @@ class LivePortfolioManager:
                     portfolio_id=portfolio_id,
                 )
         return portfolio
+
+    # ------------------------------------------------------------------
+    # Allocation invariant
+    # ------------------------------------------------------------------
+
+    def rebalance_equal_weights(self, portfolio_id: str) -> list[TradingSession]:
+        """Set every portfolio member's equity_share to 1/n.
+
+        Idempotent — already-equal portfolios skip the DB write. The last
+        share absorbs rounding remainder so the sum is exactly 1.0.
+
+        Raises:
+            ValueError: if portfolio_id is unknown.
+        """
+        portfolio = self._store.get(portfolio_id)
+        if portfolio is None:
+            raise ValueError(f"Portfolio not found: {portfolio_id}")
+        return self._rebalance_to_equal_weights(portfolio_id)
+
+    def repair_invalid_portfolios(self) -> list[dict]:
+        """Scan all portfolios and rebalance those whose member shares are invalid.
+
+        A portfolio is considered invalid when:
+          * sum(equity_share) > 1.0 + _SUM_EPS, OR
+          * len(members) > 1 and every member's equity_share == 1.0
+            (legacy default-share state — sessions were attached without a
+            follow-up batch update)
+
+        Returns one dict per repaired portfolio with portfolio_id, name,
+        before-shares, after-shares. Valid portfolios are left untouched.
+        """
+        repaired: list[dict] = []
+        for portfolio in self._store.load_all():
+            members = self.list_members(portfolio.portfolio_id)
+            if len(members) < 2:
+                continue
+            shares = [m.equity_share for m in members]
+            total = sum(shares)
+            all_one = all(abs(s - 1.0) < _SUM_EPS for s in shares)
+            if total <= 1.0 + _SUM_EPS and not all_one:
+                continue
+            before = {m.session_id: m.equity_share for m in members}
+            updated = self._rebalance_to_equal_weights(portfolio.portfolio_id)
+            after = {m.session_id: m.equity_share for m in updated}
+            repaired.append({
+                "portfolio_id": portfolio.portfolio_id,
+                "name": portfolio.name,
+                "before": before,
+                "after": after,
+            })
+            logger.warning(
+                "portfolio_allocation_repaired",
+                portfolio_id=portfolio.portfolio_id,
+                name=portfolio.name,
+                before=before,
+                after=after,
+            )
+        return repaired
+
+    def _rebalance_to_equal_weights(
+        self, portfolio_id: str,
+    ) -> list[TradingSession]:
+        """Internal: rebalance helper used by attach + repair paths.
+
+        Bypasses SessionManager.set_equity_shares_batch's account-level sum
+        guard because rebalancing AWAY from an invalid state (e.g. 3×1.0)
+        would otherwise be rejected by the very invariant we are trying
+        to restore. The portfolio-local sum is exactly 1.0 after the
+        rebalance, so the global account invariant remains satisfied for
+        any account whose only oversubscribed portfolio is this one.
+        """
+        members = self.list_members(portfolio_id)
+        n = len(members)
+        if n == 0:
+            logger.warning(
+                "portfolio_rebalance_empty",
+                portfolio_id=portfolio_id,
+            )
+            return []
+        # Equal-weight shares with last-absorbs-remainder so sum is exact.
+        base_share = round(1.0 / n, 4)
+        shares = [base_share] * (n - 1)
+        shares.append(round(1.0 - base_share * (n - 1), 4))
+        # Idempotency: skip the write if every member is already at target.
+        already_equal = all(
+            abs(member.equity_share - target) < _SUM_EPS
+            for member, target in zip(members, shares)
+        )
+        if already_equal:
+            return members
+        session_db = self._sessions._session_db  # pyright: ignore[reportPrivateUsage]
+        for member, share in zip(members, shares):
+            member.equity_share = share
+            if session_db is not None:
+                session_db.update_equity_share(member.session_id, share)
+        logger.info(
+            "portfolio_rebalanced_equal_weights",
+            portfolio_id=portfolio_id,
+            n=n,
+            shares={m.session_id: s for m, s in zip(members, shares)},
+        )
+        return members
 
     # ------------------------------------------------------------------
     # Helpers
