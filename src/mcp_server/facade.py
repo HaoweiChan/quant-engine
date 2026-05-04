@@ -1518,12 +1518,28 @@ def _mc_single_path(args: tuple) -> tuple[float, float, float]:
     factory, _ = resolve_factory_by_hash(
         strategy_name, strategy_hash=strategy_hash, strategy_code=strategy_code,
     )
-    engine_factory = lambda: factory(**strategy_params)  # noqa: E731
+    # Pop sizer-related keys before passing to factory (mirrors _build_runner)
+    merged = dict(strategy_params)
+    _risk_per_trade = float(merged.pop("risk_per_trade", 0.02))
+    _margin_cap = float(merged.pop("margin_cap", 0.50))
+    _max_lots_override = merged.pop("max_lots", None)
+    merged.pop("slippage_bps", None)
+    merged.pop("commission_bps", None)
+    merged.pop("commission_fixed_per_contract", None)
+    merged.pop("bar_agg", None)
+    engine_factory = lambda: factory(**merged)  # noqa: E731
     adapter = _get_adapter()
     from src.core.sizing import default_sizing_config
+    sizing_cfg = default_sizing_config(
+        initial_equity=2_000_000.0,
+        risk_per_trade=_risk_per_trade,
+        margin_cap=_margin_cap,
+    )
+    if _max_lots_override is not None:
+        sizing_cfg.max_lots = int(_max_lots_override)
     runner = BacktestRunner(
         engine_factory, adapter,
-        sizing_config=default_sizing_config(initial_equity=2_000_000.0),
+        sizing_config=sizing_cfg,
     )
     bars, timestamps = _bars_from_path(path_array, path_config, timeframe, bar_agg)
     result = runner.run(bars, timestamps=timestamps)
@@ -1761,12 +1777,28 @@ def _run_mc_with_runner(
             strategy_hash=_mc_pin_hash,
             strategy_code=_mc_pin_code,
         )
-        engine_factory = lambda: factory(**strategy_params)  # noqa: E731
+        # Pop sizer-related keys before passing to factory (mirrors _build_runner)
+        _sp_merged = dict(strategy_params)
+        _sp_rpt = float(_sp_merged.pop("risk_per_trade", 0.02))
+        _sp_mc = float(_sp_merged.pop("margin_cap", 0.50))
+        _sp_ml = _sp_merged.pop("max_lots", None)
+        _sp_merged.pop("slippage_bps", None)
+        _sp_merged.pop("commission_bps", None)
+        _sp_merged.pop("commission_fixed_per_contract", None)
+        _sp_merged.pop("bar_agg", None)
+        engine_factory = lambda: factory(**_sp_merged)  # noqa: E731
         adapter = _get_adapter()
         from src.core.sizing import default_sizing_config
+        _sp_sizing = default_sizing_config(
+            initial_equity=2_000_000.0,
+            risk_per_trade=_sp_rpt,
+            margin_cap=_sp_mc,
+        )
+        if _sp_ml is not None:
+            _sp_sizing.max_lots = int(_sp_ml)
         runner = BacktestRunner(
             engine_factory, adapter,
-            sizing_config=default_sizing_config(initial_equity=2_000_000.0),
+            sizing_config=_sp_sizing,
         )
         results_list = []
         for i in range(n_paths):
@@ -1893,6 +1925,7 @@ def run_sweep_for_mcp(
     meta_bar_agg = get_bar_agg(resolved_slug)
     sweep_bar_agg = int(clamped_base.pop("bar_agg", meta_bar_agg))
     sweep_params = {k: v for k, v in sweep_params.items() if k != "bar_agg"}
+    sweep_spread_meta = None
 
     if mode == "production_intent":
         if not (symbol and start and end):
