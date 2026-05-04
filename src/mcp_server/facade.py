@@ -1609,32 +1609,71 @@ def _classify_hardware() -> dict[str, Any]:
 _HW = _classify_hardware()
 _MAX_MC_WORKERS = _HW["mc_workers"]
 
-# Pre-initialize a process pool using fork context BEFORE asyncio.run() is called.
-# Workers are forked from a clean process (no asyncio locks), so they can't inherit
-# a locked event loop.  Using a persistent pool also avoids per-call forkserver
-# startup overhead and the signal-handling edge cases that caused hangs.
-# The pool is created lazily on first use but that first use always happens at
-# module import time (triggered by server.py's register_tools call, before asyncio).
+# Worker-pool dispatch:
+#   1. QUANT_HOST_ROLE=production -> raise. Heavy compute is forbidden on the
+#      trading VPS (defense in depth on top of QUANT_RAY_ADDRESS not being set).
+#   2. QUANT_RAY_ADDRESS is set and reachable -> return a Ray-backed RayPool
+#      that mimics ProcessPoolExecutor's submit()/map() surface.
+#   3. Otherwise (dev/CI/laptop) -> fall back to a local ProcessPoolExecutor
+#      using fork context, preserving the original "fork before asyncio starts"
+#      invariant. Fork is safe here: the process has no background threads yet
+#      (module import is single-threaded), so no asyncio lock can be inherited
+#      in a locked state.
 import multiprocessing as _mp
+import os as _os
 from concurrent.futures import ProcessPoolExecutor as _ProcessPoolExecutor
+from typing import Any as _Any
 
-_WORKER_POOL: _ProcessPoolExecutor | None = None
+_WORKER_POOL: _Any | None = None
 
 
-def _get_worker_pool() -> _ProcessPoolExecutor:
-    """Return the module-level process pool, creating it on first call.
+def _get_worker_pool() -> _Any:
+    """Return the module-level worker pool, creating it on first call.
 
-    Uses 'fork' context because this is called before asyncio starts.  Fork is
-    safe here: the process has no background threads yet (module import is
-    single-threaded), so no asyncio lock can be inherited in a locked state.
+    Returned object exposes ``.submit(fn, *args)`` (yielding a
+    ``concurrent.futures.Future`` compatible with ``as_completed()``) and
+    ``.map(fn, iterable)``. Concrete type is either ``ProcessPoolExecutor``
+    or :class:`src.research.ray_executor.RayPool` depending on environment.
     """
     global _WORKER_POOL
-    if _WORKER_POOL is None:
-        ctx = _mp.get_context("fork")
-        _WORKER_POOL = _ProcessPoolExecutor(max_workers=_MAX_MC_WORKERS, mp_context=ctx)
-        # Warm up one worker immediately so the first real call pays no startup cost.
-        # submit() is non-blocking; the future is never awaited here.
-        _WORKER_POOL.submit(int, 0)
+    if _WORKER_POOL is not None:
+        return _WORKER_POOL
+
+    role = (_os.getenv("QUANT_HOST_ROLE") or "").strip().lower()
+    if role == "production":
+        raise RuntimeError(
+            "heavy compute is disabled on the production host "
+            "(QUANT_HOST_ROLE=production). Run research workloads on the WSL "
+            "Ray cluster (set QUANT_RAY_ADDRESS) instead."
+        )
+
+    # Try Ray first if explicitly configured. We import lazily so that hosts
+    # without ray installed (like the prod VPS) never try to import it.
+    if (_os.getenv("QUANT_RAY_ADDRESS") or "").strip():
+        try:
+            from src.research.ray_client import RayUnavailable, get_research_ray
+            from src.research.ray_executor import RayPool
+
+            ray_module = get_research_ray()
+            _WORKER_POOL = RayPool(ray_module, max_workers=_MAX_MC_WORKERS)
+            return _WORKER_POOL
+        except (ImportError, RayUnavailable) as exc:
+            # Fall through to local ProcessPoolExecutor. The user explicitly
+            # asked for Ray (set QUANT_RAY_ADDRESS) but it's not reachable —
+            # log loudly so they notice instead of silently using local CPUs.
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "QUANT_RAY_ADDRESS=%s is set but Ray is unreachable (%s). "
+                "Falling back to local ProcessPoolExecutor.",
+                _os.getenv("QUANT_RAY_ADDRESS"),
+                exc,
+            )
+
+    ctx = _mp.get_context("fork")
+    _WORKER_POOL = _ProcessPoolExecutor(max_workers=_MAX_MC_WORKERS, mp_context=ctx)
+    # Warm up one worker immediately so the first real call pays no startup cost.
+    # submit() is non-blocking; the future is never awaited here.
+    _WORKER_POOL.submit(int, 0)
     return _WORKER_POOL
 
 
@@ -2171,12 +2210,40 @@ def _get_stress_bar_agg(slug: str) -> int:
         return 1
 
 
-def run_stress_for_mcp(
-    scenarios: list[str] | None = None,
-    strategy_params: dict[str, Any] | None = None,
-    strategy: str = "pyramid",
-) -> dict[str, Any]:
-    """Run stress test scenarios."""
+def _run_single_sensitivity_grid_point(
+    args: tuple[str, float, str, dict[str, Any]],
+) -> tuple[str, float, float]:
+    """Worker: run one (param_name, grid_value) backtest for sensitivity check.
+
+    Module-level so it's picklable for ProcessPoolExecutor and serializable for
+    Ray. Returns the inputs alongside the sharpe so results can be regrouped
+    by param after the parallel map() completes.
+    """
+    param_name, grid_val, slug, test_params = args
+    result = run_backtest_for_mcp(
+        scenario="strong_bull",
+        strategy=slug,
+        strategy_params=test_params,
+        n_bars=252,
+        timeframe="daily",
+    )
+    sharpe = float(result.get("metrics", {}).get("sharpe", 0.0))
+    return param_name, grid_val, sharpe
+
+
+def _run_single_stress_scenario(args: tuple) -> dict[str, Any]:
+    """Worker: run one stress scenario end-to-end.
+
+    Module-level so the worker pool (Ray remote or fork-pool subprocess) can
+    pickle / serialize it. Self-contained imports; no closure state.
+
+    args = (slug, merged_params, scenario_name, bar_agg, pin_hash, pin_code)
+    """
+    slug, merged_params, scenario_name, bar_agg, pin_hash, pin_code = args
+
+    from src.adapters.taifex import TaifexAdapter
+    from src.core.sizing import default_sizing_config
+    from src.simulator.backtester import BacktestRunner
     from src.simulator.stress import (
         _generate_scenario_prices,
         _prices_to_bars,
@@ -2184,23 +2251,76 @@ def run_stress_for_mcp(
         flash_crash_scenario,
         gap_down_scenario,
         liquidity_crisis_scenario,
-
         slow_bleed_scenario,
         vol_regime_shift_scenario,
     )
 
-    all_scenarios = {
+    scenario_factories = {
         "gap_down": gap_down_scenario,
         "slow_bleed": slow_bleed_scenario,
         "flash_crash": flash_crash_scenario,
         "vol_regime_shift": vol_regime_shift_scenario,
         "liquidity_crisis": liquidity_crisis_scenario,
     }
+    scenario_obj = scenario_factories[scenario_name]()
 
-    names = scenarios or list(all_scenarios.keys())
+    factory, _ = resolve_factory_by_hash(
+        slug, strategy_hash=pin_hash, strategy_code=pin_code,
+    )
+    engine_factory = lambda: factory(**merged_params)  # noqa: E731
+    runner = BacktestRunner(
+        engine_factory, TaifexAdapter(),
+        sizing_config=default_sizing_config(initial_equity=2_000_000.0),
+    )
+
+    prices = _generate_scenario_prices(scenario_obj, 20000.0)
+    # bar_agg is the per-bar minutes count from the strategy registry. The
+    # TAIFEX session is ~1065 trading minutes/day. For an intraday strategy
+    # (bar_agg in 1..1064) we get N bars per synthetic day. For a daily-bar
+    # strategy (bar_agg >= 1065 — e.g. compounding_trend_long has bar_agg=1440)
+    # the integer division 1065 // bar_agg is 0, which would divide-by-zero
+    # in _prices_to_intraday_bars; treat those as one-bar-per-price (daily).
+    if bar_agg > 1:
+        bars_per_day = 1065 // bar_agg
+    else:
+        bars_per_day = 0
+    if bars_per_day >= 1:
+        bars, timestamps = _prices_to_intraday_bars(prices, bars_per_day)
+    else:
+        bars, timestamps = _prices_to_bars(prices)
+    result = runner.run(bars, timestamps=timestamps)
+
+    return {
+        "scenario": scenario_obj.name,
+        "final_pnl": result.equity_curve[-1] - result.equity_curve[0],
+        "max_drawdown": result.metrics.get("max_drawdown_pct", 0.0),
+        "circuit_breaker_triggered": any(
+            f.reason == "circuit_breaker" for f in result.trade_log
+        ),
+        "stops_triggered": [
+            f.reason for f in result.trade_log if "stop" in f.reason.lower()
+        ],
+    }
+
+
+def run_stress_for_mcp(
+    scenarios: list[str] | None = None,
+    strategy_params: dict[str, Any] | None = None,
+    strategy: str = "pyramid",
+) -> dict[str, Any]:
+    """Run stress test scenarios.
+
+    Each scenario is independent; when 2+ scenarios are requested they run in
+    parallel via the shared worker pool (Ray on WSL, ProcessPoolExecutor
+    elsewhere, or refused on the production host).
+    """
+    all_scenarios = {
+        "gap_down", "slow_bleed", "flash_crash", "vol_regime_shift", "liquidity_crisis",
+    }
+    names = scenarios or sorted(all_scenarios)
     invalid = [n for n in names if n not in all_scenarios]
     if invalid:
-        return {"error": f"Unknown scenarios: {invalid}. Available: {list(all_scenarios.keys())}"}
+        return {"error": f"Unknown scenarios: {invalid}. Available: {sorted(all_scenarios)}"}
 
     resolved_slug = resolve_strategy_slug(strategy)
     clamped_params, param_warnings = ({} if strategy_params is None else strategy_params), []
@@ -2209,53 +2329,30 @@ def run_stress_for_mcp(
 
         clamped_params, param_warnings = validate_and_clamp(resolved_slug, strategy_params)
 
-    adapter = _get_adapter()
-    results = []
+    merged = dict(clamped_params)
+    if "max_loss" not in merged:
+        merged["max_loss"] = 500_000
 
-    for name in names:
-        scenario_obj = all_scenarios[name]()
-        from src.simulator.backtester import BacktestRunner
+    # Pin-aware: resolve once in the parent so every worker uses the same source.
+    pin_hash: str | None = None
+    pin_code: str | None = None
+    if _pin_enabled():
+        active_hash, active_code, _ = _fetch_active_pin(resolved_slug)
+        if active_hash and active_code:
+            _maybe_warn_drift(resolved_slug, active_hash)
+            pin_hash, pin_code = active_hash, active_code
 
-        # Stress test mirrors what is (or would be) live-trading, so auto-pin.
-        factory, _ = resolve_factory_by_hash(resolved_slug)
-        merged = dict(clamped_params)
-        if "max_loss" not in merged:
-            merged["max_loss"] = 500_000
-        engine_factory = lambda: factory(**merged)  # noqa: E731
-        from src.core.sizing import default_sizing_config
-        runner = BacktestRunner(
-            engine_factory, adapter,
-            sizing_config=default_sizing_config(initial_equity=2_000_000.0),
-        )
-        prices = _generate_scenario_prices(scenario_obj, 20000.0)
-        bar_agg = _get_stress_bar_agg(resolved_slug)
-        if bar_agg > 1:
-            bars_per_day = 1065 // bar_agg
-            bars, timestamps = _prices_to_intraday_bars(prices, bars_per_day)
-        else:
-            bars, timestamps = _prices_to_bars(prices)
-        result = runner.run(bars, timestamps=timestamps)
-        cb_triggered = any(f.reason == "circuit_breaker" for f in result.trade_log)
-        stops = [f.reason for f in result.trade_log if "stop" in f.reason.lower()]
-        from src.simulator.types import StressResult
+    bar_agg = _get_stress_bar_agg(resolved_slug)
+    work_items = [
+        (resolved_slug, merged, name, bar_agg, pin_hash, pin_code)
+        for name in names
+    ]
 
-        stress_result = StressResult(
-            scenario_name=scenario_obj.name,
-            final_pnl=result.equity_curve[-1] - result.equity_curve[0],
-            max_drawdown=result.metrics.get("max_drawdown_pct", 0.0),
-            circuit_breaker_triggered=cb_triggered,
-            stops_triggered=stops,
-            equity_curve=result.equity_curve,
-        )
-        results.append(
-            {
-                "scenario": stress_result.scenario_name,
-                "final_pnl": stress_result.final_pnl,
-                "max_drawdown": stress_result.max_drawdown,
-                "circuit_breaker_triggered": stress_result.circuit_breaker_triggered,
-                "stops_triggered": stress_result.stops_triggered,
-            }
-        )
+    if len(work_items) <= 1:
+        results = [_run_single_stress_scenario(work_items[0])] if work_items else []
+    else:
+        pool = _get_worker_pool()
+        results = list(pool.map(_run_single_stress_scenario, work_items))
 
     return {"strategy": strategy, "results": results, "param_warnings": param_warnings}
 
@@ -2645,57 +2742,68 @@ def run_sensitivity_check_for_mcp(
             "per_param": [],
         }
 
-    # Step 2: For each parameter, generate perturbation grid and run backtests
-    sensitivity_results = []
+    # Step 2: Build a flat list of (param, grid_val) work items across ALL parameters,
+    # then dispatch them through the shared worker pool. The original nested
+    # loop ran 5 params × 5 grid points = 25 backtests serially; the flat layout
+    # lets every backtest run on its own Ray worker / process at once.
     pct_range = perturbation_pct / 100.0
+    grids_by_param: dict[str, list[float]] = {}
+    work_items: list[tuple[str, float, str, dict[str, Any]]] = []
 
     for param_name, param_value in best_params.items():
         if param_name not in param_defs:
             continue  # Skip unknown params
 
         param_def = param_defs[param_name]
-        is_integer = param_def.get("type") == "int"
-        min_bound = param_def.get("min")
-        max_bound = param_def.get("max")
-
-        # Generate grid
         grid = generate_perturbation_grid(
             current_value=float(param_value),
             pct_range=pct_range,
             n_steps=n_steps,
-            is_integer=is_integer,
-            min_bound=float(min_bound) if min_bound is not None else None,
-            max_bound=float(max_bound) if max_bound is not None else None,
+            is_integer=param_def.get("type") == "int",
+            min_bound=float(param_def["min"]) if param_def.get("min") is not None else None,
+            max_bound=float(param_def["max"]) if param_def.get("max") is not None else None,
         )
-
-        # Run backtest for each grid point (using a quick synthetic test)
-        sharpe_values = []
-        baseline_sharpe = None
-
+        grids_by_param[param_name] = grid
         for grid_val in grid:
             test_params = {**best_params, param_name: grid_val}
-            result = run_backtest_for_mcp(
-                scenario="strong_bull",
-                strategy=resolved_slug,
-                strategy_params=test_params,
-                n_bars=252,
-                timeframe="daily",
-            )
-            sharpe = result.get("metrics", {}).get("sharpe", 0.0)
-            sharpe_values.append(float(sharpe))
+            work_items.append((param_name, grid_val, resolved_slug, test_params))
 
-            # Capture baseline (the original value)
-            if abs(grid_val - float(param_value)) < 1e-6:
-                baseline_sharpe = float(sharpe)
+    if not work_items:
+        return {
+            "strategy": strategy,
+            "perturbation_pct": perturbation_pct,
+            "n_steps": n_steps,
+            "passed": True,
+            "likely_overfit": False,
+            "per_param": [],
+            "max_degradation_pct": 0.0,
+        }
 
+    if len(work_items) <= 1:
+        flat_results = [_run_single_sensitivity_grid_point(work_items[0])]
+    else:
+        pool = _get_worker_pool()
+        flat_results = list(pool.map(_run_single_sensitivity_grid_point, work_items))
+
+    # Re-group flat results back into per-parameter lists, preserving the
+    # original grid order (pool.map() returns results in input order, so the
+    # subsequence per param is already correctly ordered).
+    sharpe_by_param: dict[str, list[float]] = {p: [] for p in grids_by_param}
+    baseline_by_param: dict[str, float | None] = {p: None for p in grids_by_param}
+    for param_name, grid_val, sharpe in flat_results:
+        sharpe_by_param[param_name].append(sharpe)
+        if abs(grid_val - float(best_params[param_name])) < 1e-6:
+            baseline_by_param[param_name] = sharpe
+
+    sensitivity_results = []
+    for param_name, grid in grids_by_param.items():
+        baseline_sharpe = baseline_by_param[param_name]
         if baseline_sharpe is None:
             baseline_sharpe = float(best_params[param_name])
-
-        # Analyze this parameter
         sen_result = analyze_param_sensitivity(
             param_name=param_name,
             grid_values=grid,
-            sharpe_values=sharpe_values,
+            sharpe_values=sharpe_by_param[param_name],
             baseline_sharpe=baseline_sharpe,
         )
         sensitivity_results.append(sen_result)
@@ -2977,8 +3085,6 @@ def run_portfolio_optimization_for_mcp(
     """
     from dataclasses import asdict
 
-    import numpy as np
-
     if len(strategies) < 2:
         return {"error": "Need at least 2 strategies for portfolio optimization"}
     if len(strategies) > 5:
@@ -2992,36 +3098,17 @@ def run_portfolio_optimization_for_mcp(
     if commission_fixed_per_contract:
         cost_params["commission_fixed_per_contract"] = commission_fixed_per_contract
 
-    daily_returns: dict[str, Any] = {}
-    bt_errors: list[str] = []
-    for entry in strategies:
-        slug = entry["slug"]
-        params = entry.get("params")
-        merged_params = dict(params or {})
-        merged_params.update(cost_params)
-        resolved = resolve_strategy_slug(slug)
-        try:
-            bt = run_backtest_realdata_for_mcp(
-                symbol=symbol,
-                start=start,
-                end=end,
-                strategy=resolved,
-                strategy_params=merged_params if merged_params else params,
-                initial_equity=initial_equity,
-            )
-        except Exception as exc:
-            bt_errors.append(f"{slug}: {exc}")
-            continue
-        if "error" in bt:
-            bt_errors.append(f"{slug}: {bt['error']}")
-            continue
-        dr = bt.get("daily_returns", [])
-        if hasattr(dr, "tolist"):
-            dr = dr.tolist()
-        if not dr:
-            bt_errors.append(f"{slug}: no daily returns produced")
-            continue
-        daily_returns[slug] = np.array(dr, dtype=np.float64)
+    # Each strategy's backtest is independent — dispatch through the shared
+    # worker pool (Ray on WSL, ProcessPoolExecutor elsewhere). The helper
+    # already merges cost_params via its extra_params arg.
+    daily_returns, bt_errors = _collect_portfolio_daily_returns(
+        strategies=strategies,
+        symbol=symbol,
+        start=start,
+        end=end,
+        initial_equity=initial_equity,
+        extra_params=cost_params or None,
+    )
 
     if bt_errors:
         return {"error": f"Backtest failures: {'; '.join(bt_errors)}"}
@@ -3076,48 +3163,86 @@ def run_portfolio_optimization_for_mcp(
 # Portfolio-level MCP tools (walk-forward, risk report, promotion)
 # ---------------------------------------------------------------------------
 
+def _run_single_portfolio_backtest(
+    args: tuple[str, dict[str, Any] | None, str, str, str, float, dict[str, Any] | None],
+) -> tuple[str, list[float] | None, str | None]:
+    """Worker: real-data backtest for one portfolio strategy slot.
+
+    Module-level so it's picklable for ProcessPoolExecutor and serializable
+    for Ray. Returns ``(slug, daily_returns_list_or_None, error_str_or_None)``
+    so the parent can re-assemble the final {slug: array} mapping while
+    preserving error messages.
+
+    args = (slug, params, symbol, start, end, initial_equity, extra_params)
+    """
+    slug, params, symbol, start, end, initial_equity, extra_params = args
+
+    merged: dict[str, Any] | None
+    if extra_params:
+        merged = dict(params or {})
+        merged.update(extra_params)
+    else:
+        merged = params
+
+    resolved = resolve_strategy_slug(slug)
+    try:
+        bt = run_backtest_realdata_for_mcp(
+            symbol=symbol,
+            start=start,
+            end=end,
+            strategy=resolved,
+            strategy_params=merged,
+            initial_equity=initial_equity,
+        )
+    except Exception as exc:  # noqa: BLE001 - surface backtest failures to caller
+        return slug, None, f"{slug}: {exc}"
+    if "error" in bt:
+        return slug, None, f"{slug}: {bt['error']}"
+    dr = bt.get("daily_returns", [])
+    if hasattr(dr, "tolist"):
+        dr = dr.tolist()
+    if not dr:
+        return slug, None, f"{slug}: no daily returns produced"
+    return slug, dr, None
+
+
 def _collect_portfolio_daily_returns(
     strategies: list[dict[str, Any]],
     symbol: str,
     start: str,
     end: str,
     initial_equity: float,
+    extra_params: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Backtest each strategy on real data; return {slug: daily_returns_array}.
+    """Backtest each strategy on real data; return ({slug: daily_returns_array}, errors).
 
-    Mirrors the inner loop of ``run_portfolio_optimization_for_mcp`` so
-    downstream portfolio tools share the same return-source semantics.
+    Each strategy's backtest is independent, so we dispatch them through the
+    shared worker pool — typically 2-5 strategies in a portfolio, all running
+    in parallel on the WSL Ray cluster.
     """
     import numpy as np
 
+    work_items = [
+        (entry["slug"], entry.get("params"), symbol, start, end, initial_equity, extra_params)
+        for entry in strategies
+    ]
+    if not work_items:
+        return {}, []
+
+    if len(work_items) == 1:
+        flat = [_run_single_portfolio_backtest(work_items[0])]
+    else:
+        pool = _get_worker_pool()
+        flat = list(pool.map(_run_single_portfolio_backtest, work_items))
+
     daily_returns: dict[str, Any] = {}
     errors: list[str] = []
-    for entry in strategies:
-        slug = entry["slug"]
-        params = entry.get("params")
-        resolved = resolve_strategy_slug(slug)
-        try:
-            bt = run_backtest_realdata_for_mcp(
-                symbol=symbol,
-                start=start,
-                end=end,
-                strategy=resolved,
-                strategy_params=params,
-                initial_equity=initial_equity,
-            )
-        except Exception as exc:
-            errors.append(f"{slug}: {exc}")
+    for slug, dr_list, err in flat:
+        if err is not None:
+            errors.append(err)
             continue
-        if "error" in bt:
-            errors.append(f"{slug}: {bt['error']}")
-            continue
-        dr = bt.get("daily_returns", [])
-        if hasattr(dr, "tolist"):
-            dr = dr.tolist()
-        if not dr:
-            errors.append(f"{slug}: no daily returns produced")
-            continue
-        daily_returns[slug] = np.array(dr, dtype=np.float64)
+        if dr_list:
+            daily_returns[slug] = np.array(dr_list, dtype=np.float64)
     return daily_returns, errors
 
 

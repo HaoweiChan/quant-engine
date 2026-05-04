@@ -6,10 +6,18 @@
         "run",
         "--extra",
         "mcp",
+        "--extra",
+        "research",
         "python",
         "-m",
         "src.mcp_server.server"
-      ]
+      ],
+      "env": {
+        "QUANT_RAY_ADDRESS": "ray://100.69.9.67:10001",
+        "QUANT_RAY_TOKEN_PATH": "/home/openclaw/.config/quant-engine/ray-token",
+        "QUANT_RAY_NAMESPACE": "quant-research",
+        "QUANT_RAY_INIT_TIMEOUT_S": "15"
+      }
     }
   }
 }

@@ -33,6 +33,14 @@ dependencies = [
 [project.optional-dependencies]
 taifex = ["shioaji>=1.0"]
 mcp = ["mcp>=1.26"]
+# Ray client for offloading heavy compute (parameter sweeps, Monte Carlo,
+# walk-forward, etc.) to a remote Ray cluster on WSL. The trading process
+# never imports ray (the prod-host guard in src/research/ray_client.py
+# refuses); only the MCP backtest server uses it. Pin matches the WSL
+# Ray head — see scripts/setup-wsl-ray.sh::RAY_VERSION. Ray's client and
+# server must agree on the minor version or ray.init() rejects the
+# connection.
+research = ["ray==2.35.0"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
