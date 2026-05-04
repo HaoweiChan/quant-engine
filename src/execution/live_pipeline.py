@@ -241,8 +241,10 @@ class LivePipelineManager:
     def _startup_aggregate_bars(self) -> None:
         """Catch up on any 1m bars that may exist before live aggregator started.
 
-        Collects all unique symbols from active runners and calls incremental_update()
-        to ensure 5m and 1h bars are available for War Room charts.
+        Collects all unique symbols from active runners and runs incremental
+        aggregation over the last 7 days only. A full rebuild (since=None)
+        would load millions of 1m bars and block startup for minutes; the
+        bounded lookback keeps startup under a few seconds.
         """
         try:
             symbols: set[str] = {
@@ -251,12 +253,14 @@ class LivePipelineManager:
             }
             if not symbols:
                 return
+            from datetime import datetime, timedelta
             from src.data.aggregator import incremental_update
             from src.data.db import Database, DEFAULT_DB_PATH
             db = Database(f"sqlite:///{DEFAULT_DB_PATH}")
+            since = datetime.now() - timedelta(days=7)
             for symbol in symbols:
                 try:
-                    results = incremental_update(db, symbol, since=None)
+                    results = incremental_update(db, symbol, since=since)
                     logger.info(
                         "startup_aggregation_complete",
                         symbol=symbol,
@@ -339,6 +343,7 @@ class LivePipelineManager:
                         sizing_config=self._sizing_config,
                         sizer=self._portfolio_sizer,
                         bar_router=self._bar_router,
+                        event_loop=self._loop,
                     )
                     self._warmup_runner(runner)
                     self._runners[sid] = runner

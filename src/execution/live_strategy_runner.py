@@ -557,17 +557,18 @@ class LiveStrategyRunner:
             return
         loop = self._event_loop
         if loop is None or loop.is_closed():
-            # Fall back to in-thread call if no loop (e.g. unit tests).
             try:
-                asyncio.get_event_loop().run_until_complete(
-                    self._dispatch_resampled(bar)
-                )
+                from src.api.main import get_main_loop
+                loop = get_main_loop()
+                self._event_loop = loop
             except Exception:
-                logger.exception(
-                    "live_runner_resampled_dispatch_failed",
-                    session_id=self.session_id,
-                    bar_ts=bar.timestamp.isoformat(),
-                )
+                pass
+        if loop is None or loop.is_closed():
+            logger.warning(
+                "live_runner_resampled_no_loop",
+                session_id=self.session_id,
+                bar_ts=bar.timestamp.isoformat(),
+            )
             return
         try:
             asyncio.run_coroutine_threadsafe(self._dispatch_resampled(bar), loop)
