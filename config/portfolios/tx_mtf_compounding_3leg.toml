@@ -1,0 +1,34 @@
+# Portfolio config: tx_mtf_compounding_3leg
+# Last saved: 2026-04-28T17:10:39.771274+08:00
+
+[portfolio]
+name = "tx_mtf_compounding_3leg"
+symbol = "TX"
+
+[[portfolio.strategies]]
+slug = "swing/trend_following/compounding_trend_long_mtf"
+weight = 0.3333
+
+[[portfolio.strategies]]
+slug = "short_term/trend_following/night_session_long"
+weight = 0.3333
+
+[[portfolio.strategies]]
+slug = "medium_term/trend_following/donchian_trend_strength"
+weight = 0.3333
+
+[portfolio.kelly]
+fraction = 0.5
+
+[optimization]
+level = 2
+level_name = "L2_VALIDATED"
+achieved_at = "2026-04-28T17:10:39.771157+08:00"
+warnings = ["advisory: weight_drift_cv=0.6334 > ceiling 0.3"]
+
+[optimization.gate_results]
+combined_sharpe = 2.8783
+aggregate_oos_sharpe = 2.66526
+worst_fold_oos_mdd = 0.13867
+weight_drift_cv = 0.6334
+correlation_stability = 0.7138
