@@ -850,6 +850,10 @@ def _start_market_data_subscriber() -> None:
         global _market_data_subscriber, _subscriber_tick_count, _subscriber_last_tick_ts
         tick_loop = None
 
+        # Delay subscriber start to let gateway connections settle and avoid
+        # Sinopac "Too Many Connections" (status 451) from concurrent logins.
+        time.sleep(15)
+
         # Track last tick timestamp for session boundary detection
         _last_tick_ts_for_session: datetime | None = None
 

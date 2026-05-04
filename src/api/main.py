@@ -60,14 +60,19 @@ log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     global _main_loop
     _main_loop = asyncio.get_running_loop()
-    # Eagerly initialize broker gateways in prod; skip in dev to avoid
-    # shioaji C++ crashes when IP is not whitelisted.
+    # Initialize broker gateways + live pipeline in a background thread so
+    # the API starts accepting requests immediately.  War-room routes use
+    # lazy init (_init_war_room guard) so they'll block only on first call
+    # if the background init hasn't finished yet.
     if os.getenv("QUANT_SKIP_BROKER_INIT") != "1":
-        try:
-            from src.api.helpers import _init_war_room
-            _init_war_room()
-        except Exception:
-            pass  # non-fatal: dashboard still works, just no live feed until retry
+        async def _bg_war_room_init() -> None:
+            try:
+                from src.api.helpers import _init_war_room
+                await asyncio.to_thread(_init_war_room)
+            except Exception:
+                log.exception("bg_war_room_init_failed")
+
+        asyncio.create_task(_bg_war_room_init())
 
     # Startup gap repair: backfill missing bars from last 3 days
     if os.getenv("QUANT_SKIP_BROKER_INIT") != "1":
