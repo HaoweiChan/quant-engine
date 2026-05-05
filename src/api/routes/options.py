@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/options", tags=["options"])
 
 
 def _get_db() -> Database:
-    return Database(DB_PATH)
+    return Database(f"sqlite:///{DB_PATH}")
 
 
 @router.get("/screener")
