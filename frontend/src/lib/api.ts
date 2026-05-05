@@ -868,6 +868,7 @@ export async function deleteLivePortfolio(portfolioId: string): Promise<{ portfo
 export interface OptionStrike {
   strike: number;
   option_type: "C" | "P";
+  contract_code: string;
   bid: number | null;
   ask: number | null;
   last: number | null;
@@ -920,4 +921,59 @@ export async function fetchIVHistory(days?: number): Promise<{ days: number; his
 
 export async function triggerOptionsCrawl(): Promise<{ status: string; quotes_stored: number }> {
   return fetchJSON("/api/options/crawl", { method: "POST" });
+}
+
+export interface TradingAccount {
+  gateway_id: string;
+  account_id: string;
+  broker_id: string;
+  label: string;
+}
+
+export interface OptionOrderResult {
+  status: string;
+  order_id: string;
+  contract_code: string;
+  strike: number;
+  option_type: string;
+  expiry: string;
+  side: string;
+  quantity: number;
+  order_type: string;
+  price: number;
+}
+
+export interface OptionPosition {
+  gateway_id: string;
+  contract_code: string;
+  strike: number;
+  option_type: string;
+  expiry: string;
+  side: string;
+  quantity: number;
+  avg_price: number;
+  status: string;
+}
+
+export async function fetchTradingAccounts(): Promise<TradingAccount[]> {
+  return fetchJSON("/api/options/accounts");
+}
+
+export async function placeOptionOrder(params: {
+  account_id: string;
+  contract_code: string;
+  side: string;
+  quantity: number;
+  price: number;
+  order_type?: string;
+}): Promise<OptionOrderResult> {
+  return fetchJSON("/api/options/order", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+}
+
+export async function fetchOptionPositions(): Promise<OptionPosition[]> {
+  return fetchJSON("/api/options/positions");
 }

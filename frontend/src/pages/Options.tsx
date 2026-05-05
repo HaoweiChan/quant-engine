@@ -1,8 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatCard, StatRow } from "@/components/StatCard";
-import { fetchOptionsScreener, triggerOptionsCrawl } from "@/lib/api";
-import type { ScreenerResult, ExpirySlice } from "@/lib/api";
+import {
+  fetchOptionsScreener,
+  triggerOptionsCrawl,
+  fetchTradingAccounts,
+  placeOptionOrder,
+  fetchOptionPositions,
+} from "@/lib/api";
+import type { ScreenerResult, ExpirySlice, OptionStrike, TradingAccount, OptionPosition } from "@/lib/api";
 import { colors } from "@/lib/theme";
 
 
@@ -103,6 +109,379 @@ function VolBar({ intensity, side }: { intensity: number; side: "call" | "put" }
   );
 }
 
+// --- Smart price guidance ---
+
+interface PriceGuidance {
+  suggested: number;
+  rangeMin: number;
+  rangeMax: number;
+  midpoint: number;
+  spread: number;
+  spreadPct: number;
+  note: string;
+}
+
+function computePriceGuidance(bid: number | null, ask: number | null, side: "buy" | "sell"): PriceGuidance {
+  const b = bid ?? 0;
+  const a = ask ?? 0;
+  const mid = (b + a) / 2;
+  const spread = a - b;
+  const spreadPct = mid > 0 ? (spread / mid) * 100 : 0;
+  if (b <= 0 || a <= 0) {
+    return { suggested: 0, rangeMin: 0, rangeMax: 0, midpoint: 0, spread: 0, spreadPct: 0, note: "No bid/ask available" };
+  }
+  // For buying: start at midpoint, acceptable up to ask
+  // For selling: start at midpoint, acceptable down to bid
+  const tickSize = mid >= 50 ? 1 : mid >= 10 ? 0.5 : 0.1;
+  const roundTick = (v: number) => Math.round(v / tickSize) * tickSize;
+  if (side === "buy") {
+    const suggested = roundTick(mid + spread * 0.15); // slightly above mid for faster fill
+    return { suggested, rangeMin: b, rangeMax: a, midpoint: mid, spread, spreadPct, note: "Mid+15% of spread. Bid = patient, Ask = aggressive." };
+  }
+  const suggested = roundTick(mid - spread * 0.15); // slightly below mid
+  return { suggested, rangeMin: b, rangeMax: a, midpoint: mid, spread, spreadPct, note: "Mid-15% of spread. Ask = patient, Bid = aggressive." };
+}
+
+// --- Order Dialog ---
+
+interface OrderTarget {
+  strike: OptionStrike;
+  side: "buy" | "sell";
+  expiry: string;
+}
+
+function OrderDialog({
+  target,
+  accounts,
+  selectedAccount,
+  onAccountChange,
+  onClose,
+  onSubmit,
+}: {
+  target: OrderTarget;
+  accounts: TradingAccount[];
+  selectedAccount: string;
+  onAccountChange: (id: string) => void;
+  onClose: () => void;
+  onSubmit: (order: { account_id: string; contract_code: string; side: string; quantity: number; price: number }) => void;
+}) {
+  const { strike, side, expiry } = target;
+  const guidance = computePriceGuidance(strike.bid, strike.ask, side);
+  const [price, setPrice] = useState(guidance.suggested);
+  const [quantity, setQuantity] = useState(1);
+  const [confirming, setConfirming] = useState(false);
+  const sideColor = side === "buy" ? colors.green : colors.red;
+  const sideLabel = side === "buy" ? "BUY" : "SELL";
+  const typeLabel = strike.option_type === "C" ? "Call" : "Put";
+
+  const priceInRange = price >= guidance.rangeMin && price <= guidance.rangeMax;
+  const priceWarn = !priceInRange && price > 0;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ background: "rgba(0,0,0,0.7)" }}
+      onClick={onClose}
+    >
+      <div
+        className="rounded-lg p-5 w-[420px]"
+        style={{ background: "#1a1d28", border: `2px solid ${sideColor}55`, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <span
+              className="text-[13px] font-bold px-2 py-0.5 rounded"
+              style={{ color: "#fff", background: sideColor, fontFamily: "var(--font-mono)" }}
+            >
+              {sideLabel}
+            </span>
+            <span className="text-[13px] font-bold" style={{ color: colors.text, fontFamily: "var(--font-mono)" }}>
+              {strike.strike} {typeLabel}
+            </span>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-[16px] px-2 py-0.5"
+            style={{ color: colors.muted, background: "transparent", border: "none", cursor: "pointer" }}
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Contract info */}
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] mb-4" style={{ fontFamily: "var(--font-mono)" }}>
+          <span style={{ color: colors.muted }}>Contract</span>
+          <span style={{ color: colors.text }}>{strike.contract_code}</span>
+          <span style={{ color: colors.muted }}>Expiry</span>
+          <span style={{ color: colors.text }}>{expiry}</span>
+          <span style={{ color: colors.muted }}>Bid / Ask</span>
+          <span style={{ color: colors.text }}>{fmt(strike.bid)} / {fmt(strike.ask)}</span>
+          <span style={{ color: colors.muted }}>Spread</span>
+          <span style={{ color: guidance.spreadPct > 10 ? colors.orange : colors.text }}>
+            {fmt(guidance.spread)} ({guidance.spreadPct.toFixed(1)}%)
+          </span>
+          <span style={{ color: colors.muted }}>IV</span>
+          <span style={{ color: colors.text }}>{strike.iv !== null ? pct(strike.iv) : "—"}</span>
+          <span style={{ color: colors.muted }}>Delta</span>
+          <span style={{ color: colors.text }}>{strike.delta !== null ? fmt(strike.delta, 3) : "—"}</span>
+        </div>
+
+        {/* Price guidance */}
+        <div
+          className="rounded p-3 mb-4 text-[11px]"
+          style={{ background: "#141620", border: "1px solid #353849", fontFamily: "var(--font-mono)" }}
+        >
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-bold" style={{ color: colors.gold }}>Price Guidance</span>
+            <span style={{ color: colors.muted }}>{guidance.note}</span>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="flex-1">
+              <div className="flex justify-between text-[10px] mb-1">
+                <span style={{ color: colors.green }}>Bid {fmt(guidance.rangeMin)}</span>
+                <span style={{ color: colors.blue }}>Mid {fmt(guidance.midpoint)}</span>
+                <span style={{ color: colors.red }}>Ask {fmt(guidance.rangeMax)}</span>
+              </div>
+              {/* Visual price bar */}
+              <div className="relative h-[8px] rounded-full" style={{ background: "#2a2d3a" }}>
+                {guidance.rangeMax > guidance.rangeMin && (
+                  <div
+                    className="absolute top-0 h-full rounded-full"
+                    style={{
+                      background: `linear-gradient(to right, ${colors.green}66, ${colors.blue}66, ${colors.red}66)`,
+                      width: "100%",
+                    }}
+                  />
+                )}
+                {/* Suggested marker */}
+                {guidance.rangeMax > guidance.rangeMin && (
+                  <div
+                    className="absolute top-[-3px] w-[14px] h-[14px] rounded-full border-2"
+                    style={{
+                      left: `${Math.min(Math.max(((guidance.suggested - guidance.rangeMin) / (guidance.rangeMax - guidance.rangeMin)) * 100, 0), 100)}%`,
+                      transform: "translateX(-50%)",
+                      background: colors.gold,
+                      borderColor: "#1a1d28",
+                    }}
+                  />
+                )}
+              </div>
+              <div className="text-[10px] mt-1 text-center" style={{ color: colors.gold }}>
+                Suggested: {fmt(guidance.suggested)}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Account selector */}
+        <div className="mb-3">
+          <label className="block text-[10px] mb-1" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+            Trading Account
+          </label>
+          <select
+            value={selectedAccount}
+            onChange={(e) => onAccountChange(e.target.value)}
+            className="w-full text-[12px] px-2 py-1.5 rounded"
+            style={{
+              fontFamily: "var(--font-mono)",
+              background: "#141620",
+              color: colors.text,
+              border: "1px solid #353849",
+              outline: "none",
+            }}
+          >
+            <option value="">Select account…</option>
+            {accounts.map((a) => (
+              <option key={a.gateway_id} value={a.gateway_id}>{a.label}</option>
+            ))}
+          </select>
+          {accounts.length === 0 && (
+            <div className="text-[10px] mt-1" style={{ color: colors.orange }}>
+              No trading accounts connected. Connect an account in the Trading tab first.
+            </div>
+          )}
+        </div>
+
+        {/* Price + quantity inputs */}
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div>
+            <label className="block text-[10px] mb-1" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+              Limit Price
+            </label>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              value={price}
+              onChange={(e) => setPrice(parseFloat(e.target.value) || 0)}
+              className="w-full text-[12px] px-2 py-1.5 rounded"
+              style={{
+                fontFamily: "var(--font-mono)",
+                background: "#141620",
+                color: priceWarn ? colors.orange : colors.text,
+                border: `1px solid ${priceWarn ? colors.orange : "#353849"}`,
+                outline: "none",
+              }}
+            />
+            {priceWarn && (
+              <div className="text-[10px] mt-0.5" style={{ color: colors.orange }}>
+                Outside bid-ask range
+              </div>
+            )}
+          </div>
+          <div>
+            <label className="block text-[10px] mb-1" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
+              Quantity (lots)
+            </label>
+            <input
+              type="number"
+              min="1"
+              max="100"
+              value={quantity}
+              onChange={(e) => setQuantity(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+              className="w-full text-[12px] px-2 py-1.5 rounded"
+              style={{
+                fontFamily: "var(--font-mono)",
+                background: "#141620",
+                color: colors.text,
+                border: "1px solid #353849",
+                outline: "none",
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Confirm / Submit */}
+        {!confirming ? (
+          <button
+            onClick={() => setConfirming(true)}
+            disabled={!selectedAccount || price <= 0}
+            className="w-full text-[12px] px-3 py-2 rounded font-bold"
+            style={{
+              fontFamily: "var(--font-mono)",
+              background: !selectedAccount || price <= 0 ? "#353849" : sideColor,
+              color: !selectedAccount || price <= 0 ? colors.muted : "#fff",
+              border: "none",
+              cursor: !selectedAccount || price <= 0 ? "not-allowed" : "pointer",
+              opacity: !selectedAccount || price <= 0 ? 0.5 : 1,
+            }}
+          >
+            {sideLabel} {quantity} × {strike.strike}{typeLabel[0]} @ {fmt(price)}
+          </button>
+        ) : (
+          <div className="flex gap-2">
+            <button
+              onClick={() => setConfirming(false)}
+              className="flex-1 text-[12px] px-3 py-2 rounded"
+              style={{
+                fontFamily: "var(--font-mono)",
+                background: "#353849",
+                color: colors.text,
+                border: "none",
+                cursor: "pointer",
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() =>
+                onSubmit({
+                  account_id: selectedAccount,
+                  contract_code: strike.contract_code,
+                  side,
+                  quantity,
+                  price,
+                })
+              }
+              className="flex-1 text-[12px] px-3 py-2 rounded font-bold"
+              style={{
+                fontFamily: "var(--font-mono)",
+                background: sideColor,
+                color: "#fff",
+                border: `2px solid ${sideColor}`,
+                cursor: "pointer",
+              }}
+            >
+              CONFIRM {sideLabel}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- Toast ---
+
+function Toast({ message, type, onDone }: { message: string; type: "ok" | "error"; onDone: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onDone, 5000);
+    return () => clearTimeout(t);
+  }, [onDone]);
+  const bg = type === "ok" ? "#0d3320" : "#3a1515";
+  const border = type === "ok" ? colors.green : colors.red;
+  return (
+    <div
+      className="fixed bottom-6 right-6 z-50 text-[12px] px-4 py-3 rounded-lg shadow-lg"
+      style={{ background: bg, color: colors.text, border: `1px solid ${border}`, fontFamily: "var(--font-mono)", maxWidth: 400 }}
+    >
+      {message}
+    </div>
+  );
+}
+
+// --- Positions Panel ---
+
+function PositionsPanel({ positions }: { positions: OptionPosition[] }) {
+  if (positions.length === 0) return null;
+  return (
+    <div
+      className="rounded-[6px] p-4 mb-4"
+      style={{ background: "var(--color-qe-card)", border: "1px solid var(--color-qe-card-border)" }}
+    >
+      <h3
+        className="text-[13px] font-semibold m-0 mb-3"
+        style={{ color: colors.gold, fontFamily: "var(--font-mono)" }}
+      >
+        Open Positions
+      </h3>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="text-[10px]" style={{ color: colors.muted }}>Contract</TableHead>
+            <TableHead className="text-[10px]" style={{ color: colors.muted }}>Strike</TableHead>
+            <TableHead className="text-[10px]" style={{ color: colors.muted }}>Type</TableHead>
+            <TableHead className="text-[10px]" style={{ color: colors.muted }}>Expiry</TableHead>
+            <TableHead className="text-[10px]" style={{ color: colors.muted }}>Side</TableHead>
+            <TableHead className="text-right text-[10px]" style={{ color: colors.muted }}>Qty</TableHead>
+            <TableHead className="text-right text-[10px]" style={{ color: colors.muted }}>Avg Price</TableHead>
+            <TableHead className="text-[10px]" style={{ color: colors.muted }}>Account</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {positions.map((p, i) => {
+            const sideColor = p.side.toLowerCase().includes("buy") ? colors.green : colors.red;
+            return (
+              <TableRow key={`${p.contract_code}-${i}`}>
+                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{p.contract_code}</TableCell>
+                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{p.strike}</TableCell>
+                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{p.option_type}</TableCell>
+                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{p.expiry}</TableCell>
+                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: sideColor }}>{p.side}</TableCell>
+                <TableCell className="text-right text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{p.quantity}</TableCell>
+                <TableCell className="text-right text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{fmt(p.avg_price)}</TableCell>
+                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>{p.gateway_id}</TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 // --- Help Modal ---
 
 function HelpModal({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -130,96 +509,44 @@ function HelpModal({ open, onClose }: { open: boolean; onClose: () => void }) {
             ✕
           </button>
         </div>
-
         <div className="space-y-4 text-[12px]" style={{ color: colors.text, fontFamily: "var(--font-mono)", lineHeight: 1.7 }}>
-          {/* Regime */}
           <div>
             <h4 className="text-[13px] font-bold mb-1" style={{ color: colors.gold }}>Vol Regime Banner</h4>
             <p style={{ color: colors.muted }}>
-              Shows the overall implied volatility environment based on IV Rank (where current IV sits relative to
-              its 252-day range).
+              Shows the overall implied volatility environment based on IV Rank.
             </p>
             <table className="w-full mt-1">
               <tbody>
-                <tr><td style={{ color: colors.green }} className="pr-3 py-0.5">LOW VOL</td><td style={{ color: colors.muted }}>IV Rank &lt; 20% — options are historically cheap. Buy premium: straddles, strangles, debit spreads.</td></tr>
-                <tr><td style={{ color: colors.blue }} className="pr-3 py-0.5">NORMAL</td><td style={{ color: colors.muted }}>IV Rank 20–50% — no vol edge. Focus on directional plays.</td></tr>
-                <tr><td style={{ color: colors.orange }} className="pr-3 py-0.5">HIGH VOL</td><td style={{ color: colors.muted }}>IV Rank 50–80% — options are expensive. Sell premium: credit spreads, iron condors.</td></tr>
-                <tr><td style={{ color: colors.red }} className="pr-3 py-0.5">EXTREME</td><td style={{ color: colors.muted }}>IV Rank &gt; 80% — sell premium aggressively. Short strangles, wide iron condors.</td></tr>
+                <tr><td style={{ color: colors.green }} className="pr-3 py-0.5">LOW VOL</td><td style={{ color: colors.muted }}>IV Rank &lt; 20% — buy premium: straddles, strangles, debit spreads.</td></tr>
+                <tr><td style={{ color: colors.blue }} className="pr-3 py-0.5">NORMAL</td><td style={{ color: colors.muted }}>IV Rank 20–50% — directional plays.</td></tr>
+                <tr><td style={{ color: colors.orange }} className="pr-3 py-0.5">HIGH VOL</td><td style={{ color: colors.muted }}>IV Rank 50–80% — sell premium: credit spreads, iron condors.</td></tr>
+                <tr><td style={{ color: colors.red }} className="pr-3 py-0.5">EXTREME</td><td style={{ color: colors.muted }}>IV Rank &gt; 80% — sell premium aggressively.</td></tr>
               </tbody>
             </table>
           </div>
-
-          {/* VRP */}
           <div>
-            <h4 className="text-[13px] font-bold mb-1" style={{ color: colors.gold }}>VRP Signal (Variance Risk Premium)</h4>
+            <h4 className="text-[13px] font-bold mb-1" style={{ color: colors.gold }}>VRP Signal</h4>
+            <table className="w-full mt-1">
+              <tbody>
+                <tr><td style={{ color: colors.red }} className="pr-3 py-0.5">SELL VOL</td><td style={{ color: colors.muted }}>IV ≫ RV — options overpriced. Sell premium.</td></tr>
+                <tr><td style={{ color: colors.green }} className="pr-3 py-0.5">BUY VOL</td><td style={{ color: colors.muted }}>IV ≪ RV — options underpriced. Buy premium.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <h4 className="text-[13px] font-bold mb-1" style={{ color: colors.gold }}>Click to Trade</h4>
             <p style={{ color: colors.muted }}>
-              Compares implied vol (what the market expects) vs realized vol (what actually happened). The gap reveals
-              if options are over/under-priced.
+              Click any Bid or Ask price to open an order dialog. Clicking Bid opens a SELL order, clicking Ask opens a BUY order.
+              The dialog suggests an optimal limit price based on the bid-ask spread and shows the acceptable price range.
             </p>
-            <table className="w-full mt-1">
-              <tbody>
-                <tr><td style={{ color: colors.red }} className="pr-3 py-0.5">SELL VOL</td><td style={{ color: colors.muted }}>IV ≫ RV (VRP &gt; 5%) — options overpriced. Sell premium.</td></tr>
-                <tr><td style={{ color: colors.orange }} className="pr-3 py-0.5">MILD RICH</td><td style={{ color: colors.muted }}>IV &gt; RV (VRP 2–5%) — slightly expensive. Lean toward selling.</td></tr>
-                <tr><td style={{ color: colors.muted }} className="pr-3 py-0.5">FAIR</td><td style={{ color: colors.muted }}>IV ≈ RV — no vol mispricing. Use directional thesis.</td></tr>
-                <tr><td style={{ color: "#8bc34a" }} className="pr-3 py-0.5">MILD CHEAP</td><td style={{ color: colors.muted }}>IV &lt; RV — slightly cheap. Lean toward buying.</td></tr>
-                <tr><td style={{ color: colors.green }} className="pr-3 py-0.5">BUY VOL</td><td style={{ color: colors.muted }}>IV ≪ RV (VRP &lt; -3%) — options underpriced. Buy premium.</td></tr>
-              </tbody>
-            </table>
           </div>
-
-          {/* Colors */}
           <div>
-            <h4 className="text-[13px] font-bold mb-1" style={{ color: colors.gold }}>Strike-Level Colors</h4>
-            <table className="w-full mt-1">
-              <tbody>
-                <tr><td style={{ color: colors.green }} className="pr-3 py-0.5">Green IV</td><td style={{ color: colors.muted }}>This strike's IV is below ATM IV — relatively cheap. Good buy candidate.</td></tr>
-                <tr><td style={{ color: colors.red }} className="pr-3 py-0.5">Red IV</td><td style={{ color: colors.muted }}>This strike's IV is above ATM IV — relatively expensive. Good sell candidate.</td></tr>
-                <tr><td style={{ color: colors.gold }} className="pr-3 py-0.5">Gold row</td><td style={{ color: colors.muted }}>At-the-money (ATM) strike — your reference point for all comparisons.</td></tr>
-              </tbody>
-            </table>
-            <p className="mt-1" style={{ color: colors.muted }}>Volume bars show relative trading activity. Trade where liquidity is highest (tallest bars).</p>
-          </div>
-
-          {/* Combos */}
-          <div>
-            <h4 className="text-[13px] font-bold mb-1" style={{ color: colors.gold }}>Signal Combinations → Trade Ideas</h4>
-            <table className="w-full mt-1">
-              <tbody>
-                <tr>
-                  <td className="pr-3 py-1 align-top" style={{ color: colors.green }}>LOW VOL + BUY VOL</td>
-                  <td style={{ color: colors.muted }}>Strong buy signal. Buy straddles/strangles, long gamma. Options are historically and comparatively cheap.</td>
-                </tr>
-                <tr>
-                  <td className="pr-3 py-1 align-top" style={{ color: colors.red }}>HIGH VOL + SELL VOL</td>
-                  <td style={{ color: colors.muted }}>Strong sell signal. Iron condors, credit spreads, short strangles. Options are both expensive and overpriced.</td>
-                </tr>
-                <tr>
-                  <td className="pr-3 py-1 align-top" style={{ color: colors.orange }}>High 25Δ Skew</td>
-                  <td style={{ color: colors.muted }}>Put skew is steep — puts expensive vs calls. Sell put spreads or buy call spreads for positive skew carry.</td>
-                </tr>
-                <tr>
-                  <td className="pr-3 py-1 align-top" style={{ color: colors.blue }}>NORMAL + FAIR</td>
-                  <td style={{ color: colors.muted }}>No vol edge. Focus on directional thesis (bullish/bearish) rather than vol plays.</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          {/* Buttons */}
-          <div>
-            <h4 className="text-[13px] font-bold mb-1" style={{ color: colors.gold }}>Buttons</h4>
-            <table className="w-full mt-1">
-              <tbody>
-                <tr>
-                  <td className="pr-3 py-0.5" style={{ color: colors.text }}>Fetch Live</td>
-                  <td style={{ color: colors.muted }}>Calls the broker API (Shioaji) to crawl a fresh options chain snapshot from the exchange, stores it in DB, then reloads. Requires broker connection.</td>
-                </tr>
-                <tr>
-                  <td className="pr-3 py-0.5" style={{ color: colors.text }}>Reload</td>
-                  <td style={{ color: colors.muted }}>Re-reads cached data from the database without calling the broker. Use to refresh after someone else crawled data.</td>
-                </tr>
-              </tbody>
-            </table>
+            <h4 className="text-[13px] font-bold mb-1" style={{ color: colors.gold }}>Price Guidance</h4>
+            <p style={{ color: colors.muted }}>
+              Suggested price = midpoint ± 15% of spread (toward the aggressive side for faster fill).
+              The bar shows bid → mid → ask range. Stay inside the range for immediate fills;
+              going outside means your order may not fill or is overpaying.
+            </p>
           </div>
         </div>
       </div>
@@ -227,7 +554,46 @@ function HelpModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   );
 }
 
-function ExpiryPanel({ slice, underlying }: { slice: ExpirySlice; underlying: number }) {
+// --- Clickable Price Cell ---
+
+function PriceCell({
+  value,
+  side,
+  optionType,
+  onClick,
+}: {
+  value: number | null;
+  side: "bid" | "ask";
+  optionType: "C" | "P";
+  onClick: () => void;
+}) {
+  if (value === null || value === 0) return <span style={{ color: colors.muted }}>—</span>;
+  const hoverColor = side === "bid" ? colors.red : colors.green;
+  return (
+    <span
+      className="cursor-pointer hover:underline block w-full h-full"
+      style={{ color: colors.text, transition: "color 0.15s" }}
+      onMouseEnter={(e) => (e.currentTarget.style.color = hoverColor)}
+      onMouseLeave={(e) => (e.currentTarget.style.color = colors.text)}
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      title={side === "bid" ? `Sell ${optionType === "C" ? "Call" : "Put"} @ ${fmt(value)}` : `Buy ${optionType === "C" ? "Call" : "Put"} @ ${fmt(value)}`}
+    >
+      {fmt(value)}
+    </span>
+  );
+}
+
+// --- Expiry Panel ---
+
+function ExpiryPanel({
+  slice,
+  underlying,
+  onClickPrice,
+}: {
+  slice: ExpirySlice;
+  underlying: number;
+  onClickPrice: (strike: OptionStrike, side: "buy" | "sell", expiry: string) => void;
+}) {
   const calls = slice.strikes.filter((s) => s.option_type === "C");
   const puts = slice.strikes.filter((s) => s.option_type === "P");
   const strikeSet = [...new Set([...calls.map((c) => c.strike), ...puts.map((p) => p.strike)])].sort(
@@ -316,11 +682,23 @@ function ExpiryPanel({ slice, underlying }: { slice: ExpirySlice; underlying: nu
                   <TableCell className="text-right text-[11px]" style={{ ...mono, color: colors.muted }}>
                     {c ? fmt(c.delta, 3) : "—"}
                   </TableCell>
-                  <TableCell className="text-right text-[11px]" style={mono}>
-                    {c ? fmt(c.bid) : "—"}
+                  {/* Call Bid — click to SELL call */}
+                  <TableCell
+                    className="text-right text-[11px] cursor-pointer hover:bg-[#ffffff08]"
+                    style={mono}
+                    onClick={c && c.bid ? () => onClickPrice(c, "sell", slice.expiry) : undefined}
+                    title={c?.bid ? `Sell Call @ ${fmt(c.bid)}` : undefined}
+                  >
+                    {c ? <PriceCell value={c.bid} side="bid" optionType="C" onClick={() => {}} /> : "—"}
                   </TableCell>
-                  <TableCell className="text-right text-[11px]" style={mono}>
-                    {c ? fmt(c.ask) : "—"}
+                  {/* Call Ask — click to BUY call */}
+                  <TableCell
+                    className="text-right text-[11px] cursor-pointer hover:bg-[#ffffff08]"
+                    style={mono}
+                    onClick={c && c.ask ? () => onClickPrice(c, "buy", slice.expiry) : undefined}
+                    title={c?.ask ? `Buy Call @ ${fmt(c.ask)}` : undefined}
+                  >
+                    {c ? <PriceCell value={c.ask} side="ask" optionType="C" onClick={() => {}} /> : "—"}
                   </TableCell>
                   <TableCell
                     className="text-center text-[11px] font-bold"
@@ -333,11 +711,23 @@ function ExpiryPanel({ slice, underlying }: { slice: ExpirySlice; underlying: nu
                     {atm && <span className="text-[8px] mr-1" style={{ color: colors.gold }}>ATM</span>}
                     {strike}
                   </TableCell>
-                  <TableCell className="text-right text-[11px]" style={mono}>
-                    {p ? fmt(p.bid) : "—"}
+                  {/* Put Bid — click to SELL put */}
+                  <TableCell
+                    className="text-right text-[11px] cursor-pointer hover:bg-[#ffffff08]"
+                    style={mono}
+                    onClick={p && p.bid ? () => onClickPrice(p, "sell", slice.expiry) : undefined}
+                    title={p?.bid ? `Sell Put @ ${fmt(p.bid)}` : undefined}
+                  >
+                    {p ? <PriceCell value={p.bid} side="bid" optionType="P" onClick={() => {}} /> : "—"}
                   </TableCell>
-                  <TableCell className="text-right text-[11px]" style={mono}>
-                    {p ? fmt(p.ask) : "—"}
+                  {/* Put Ask — click to BUY put */}
+                  <TableCell
+                    className="text-right text-[11px] cursor-pointer hover:bg-[#ffffff08]"
+                    style={mono}
+                    onClick={p && p.ask ? () => onClickPrice(p, "buy", slice.expiry) : undefined}
+                    title={p?.ask ? `Buy Put @ ${fmt(p.ask)}` : undefined}
+                  >
+                    {p ? <PriceCell value={p.ask} side="ask" optionType="P" onClick={() => {}} /> : "—"}
                   </TableCell>
                   <TableCell className="text-right text-[11px]" style={{ ...mono, color: colors.muted }}>
                     {p ? fmt(p.delta, 3) : "—"}
@@ -363,23 +753,48 @@ function ExpiryPanel({ slice, underlying }: { slice: ExpirySlice; underlying: nu
   );
 }
 
+// --- Main Component ---
+
 export function Options() {
   const [data, setData] = useState<ScreenerResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [crawling, setCrawling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [accounts, setAccounts] = useState<TradingAccount[]>([]);
+  const [selectedAccount, setSelectedAccount] = useState("");
+  const [orderTarget, setOrderTarget] = useState<OrderTarget | null>(null);
+  const [positions, setPositions] = useState<OptionPosition[]>([]);
+  const [toast, setToast] = useState<{ message: string; type: "ok" | "error" } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     setError(null);
     fetchOptionsScreener()
       .then(setData)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  };
+  }, []);
 
-  useEffect(() => { load(); }, []);
+  const loadAccounts = useCallback(() => {
+    fetchTradingAccounts()
+      .then((accts) => {
+        setAccounts(accts);
+        if (accts.length > 0 && !selectedAccount) setSelectedAccount(accts[0].gateway_id);
+      })
+      .catch(() => {});
+  }, [selectedAccount]);
+
+  const loadPositions = useCallback(() => {
+    fetchOptionPositions().then(setPositions).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    load();
+    loadAccounts();
+    loadPositions();
+  }, [load, loadAccounts, loadPositions]);
 
   const handleCrawl = async () => {
     setCrawling(true);
@@ -396,6 +811,27 @@ export function Options() {
       }
     } finally {
       setCrawling(false);
+    }
+  };
+
+  const handleClickPrice = (strike: OptionStrike, side: "buy" | "sell", expiry: string) => {
+    setOrderTarget({ strike, side, expiry });
+  };
+
+  const handleOrderSubmit = async (order: { account_id: string; contract_code: string; side: string; quantity: number; price: number }) => {
+    setSubmitting(true);
+    try {
+      const result = await placeOptionOrder(order);
+      setToast({
+        message: `Order placed: ${result.side.toUpperCase()} ${result.quantity}×${result.strike}${result.option_type === "C" || result.option_type === "Call" ? "C" : "P"} @ ${result.price} — ID: ${result.order_id}`,
+        type: "ok",
+      });
+      setOrderTarget(null);
+      loadPositions();
+    } catch (e: any) {
+      setToast({ message: `Order failed: ${e.message}`, type: "error" });
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -430,7 +866,27 @@ export function Options() {
             ?
           </button>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-3">
+          {/* Account selector in header */}
+          <select
+            value={selectedAccount}
+            onChange={(e) => setSelectedAccount(e.target.value)}
+            className="text-[11px] px-2 py-1.5 rounded"
+            style={{
+              fontFamily: "var(--font-mono)",
+              background: "var(--color-qe-card)",
+              color: colors.text,
+              border: "1px solid var(--color-qe-card-border)",
+              outline: "none",
+              minWidth: 140,
+            }}
+            title="Select trading account for orders"
+          >
+            <option value="">No account</option>
+            {accounts.map((a) => (
+              <option key={a.gateway_id} value={a.gateway_id}>{a.label}</option>
+            ))}
+          </select>
           <button
             onClick={handleCrawl}
             disabled={crawling}
@@ -467,6 +923,19 @@ export function Options() {
       </div>
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
+
+      {orderTarget && (
+        <OrderDialog
+          target={orderTarget}
+          accounts={accounts}
+          selectedAccount={selectedAccount}
+          onAccountChange={setSelectedAccount}
+          onClose={() => setOrderTarget(null)}
+          onSubmit={handleOrderSubmit}
+        />
+      )}
+
+      {toast && <Toast message={toast.message} type={toast.type} onDone={() => setToast(null)} />}
 
       {error && (
         <div className="text-[12px] mb-3 p-2 rounded" style={{ background: "#3a1a1a", color: colors.red, border: "1px solid #5a2020" }}>
@@ -550,6 +1019,7 @@ export function Options() {
               <span style={{ color: colors.gold }}>ATM</span> = at-the-money row
             </span>
             <span>Vol bars = relative volume</span>
+            <span>Click Bid/Ask to trade</span>
             <span
               className="cursor-pointer underline"
               style={{ color: colors.blue }}
@@ -559,8 +1029,11 @@ export function Options() {
             </span>
           </div>
 
+          {/* Positions */}
+          <PositionsPanel positions={positions} />
+
           {data.expiries.map((exp) => (
-            <ExpiryPanel key={exp.expiry} slice={exp} underlying={data.underlying_price} />
+            <ExpiryPanel key={exp.expiry} slice={exp} underlying={data.underlying_price} onClickPrice={handleClickPrice} />
           ))}
 
           {data.expiries.length === 0 && (

@@ -7,12 +7,22 @@ import logging
 from datetime import date, timedelta
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from src.api.deps import DB_PATH
 from src.data.db import Database
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/options", tags=["options"])
+
+
+class OptionOrderRequest(BaseModel):
+    account_id: str
+    contract_code: str
+    side: str  # "buy" or "sell"
+    quantity: int = 1
+    price: float
+    order_type: str = "limit"
 
 
 def _get_db() -> Database:
@@ -176,3 +186,108 @@ async def list_option_contracts(
             ]
 
     return await asyncio.to_thread(_query)
+
+
+@router.get("/accounts")
+async def list_trading_accounts() -> list[dict]:
+    """List available trading accounts (from GatewayRegistry)."""
+    try:
+        from src.broker_gateway.registry import GatewayRegistry
+        registry = GatewayRegistry.get_instance()
+        accounts = []
+        for gw_id, gw in registry.gateways.items():
+            if not gw.is_connected:
+                continue
+            api = getattr(gw, "_api", None)
+            if api is None:
+                continue
+            acct = getattr(api, "futopt_account", None)
+            if acct is None:
+                continue
+            accounts.append({
+                "gateway_id": gw_id,
+                "account_id": acct.account_id if hasattr(acct, "account_id") else str(acct),
+                "broker_id": acct.broker_id if hasattr(acct, "broker_id") else "",
+                "label": f"{gw_id} ({acct.account_id})" if hasattr(acct, "account_id") else gw_id,
+            })
+        return accounts
+    except Exception as exc:
+        logger.warning("list_trading_accounts_failed", error=str(exc))
+        return []
+
+
+@router.post("/order")
+async def place_option_order(req: OptionOrderRequest) -> dict:
+    """Place a TXO option order through a specific trading account."""
+    if req.quantity < 1 or req.quantity > 100:
+        raise HTTPException(status_code=400, detail="Quantity must be 1-100")
+    if req.side not in ("buy", "sell"):
+        raise HTTPException(status_code=400, detail="Side must be 'buy' or 'sell'")
+    if req.order_type == "limit" and req.price <= 0:
+        raise HTTPException(status_code=400, detail="Limit price must be positive")
+    try:
+        from src.broker_gateway.registry import GatewayRegistry
+        registry = GatewayRegistry.get_instance()
+        gw = registry.gateways.get(req.account_id)
+        if gw is None:
+            raise HTTPException(status_code=404, detail=f"Account not found: {req.account_id}")
+        if not gw.is_connected:
+            raise HTTPException(status_code=503, detail=f"Account {req.account_id} is not connected")
+        result = await asyncio.to_thread(
+            gw.place_option_order,
+            contract_code=req.contract_code,
+            side=req.side,
+            quantity=req.quantity,
+            price=req.price,
+            order_type=req.order_type,
+        )
+        return {"status": "ok", **result}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("place_option_order_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/positions")
+async def get_option_positions() -> list[dict]:
+    """Fetch current option positions from all connected gateways."""
+    try:
+        from src.broker_gateway.registry import GatewayRegistry
+        registry = GatewayRegistry.get_instance()
+        positions = []
+        for gw_id, gw in registry.gateways.items():
+            if not gw.is_connected:
+                continue
+            api = getattr(gw, "_api", None)
+            if api is None:
+                continue
+            try:
+                api.update_status(api.futopt_account)
+                for trade in api.list_trades():
+                    code = getattr(trade.contract, "code", "")
+                    if not code.startswith("TXO"):
+                        continue
+                    contract = trade.contract
+                    status = trade.status
+                    order = trade.order
+                    qty = getattr(status, "deal_quantity", 0) or getattr(order, "quantity", 0)
+                    if qty == 0:
+                        continue
+                    positions.append({
+                        "gateway_id": gw_id,
+                        "contract_code": code,
+                        "strike": float(getattr(contract, "strike_price", 0)),
+                        "option_type": str(getattr(contract, "option_right", "")),
+                        "expiry": getattr(contract, "delivery_date", "").replace("/", "-"),
+                        "side": str(getattr(order, "action", "")),
+                        "quantity": qty,
+                        "avg_price": float(getattr(status, "modified_price", 0) or 0),
+                        "status": str(getattr(status, "status", "")),
+                    })
+            except Exception as exc:
+                logger.warning("get_positions_failed", gateway=gw_id, error=str(exc))
+        return positions
+    except Exception as exc:
+        logger.warning("get_option_positions_failed", error=str(exc))
+        return []

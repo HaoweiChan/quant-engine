@@ -147,6 +147,7 @@ def build_screener(
             strike_data.append({
                 "strike": oc.strike,
                 "option_type": oc.option_type,
+                "contract_code": oc.contract_code,
                 "bid": oq.bid,
                 "ask": oq.ask,
                 "last": oq.last,

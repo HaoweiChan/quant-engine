@@ -437,6 +437,77 @@ class SinopacGateway(BrokerGateway):
             "status": status,
         }
 
+    def place_option_order(
+        self,
+        contract_code: str,
+        side: str,
+        quantity: int,
+        price: float,
+        order_type: str = "limit",
+    ) -> dict[str, Any]:
+        """Place a TXO option order via Shioaji.
+
+        Args:
+            contract_code: Shioaji option contract code (e.g. "TXO22300J4")
+            side: "buy" or "sell"
+            quantity: Number of lots
+            price: Limit price (required for limit orders)
+            order_type: "limit" (default) or "market"
+        """
+        _sj = _ensure_shioaji()
+        if not self._connected or not self._api:
+            raise RuntimeError("Gateway not connected")
+        txo_group = self._api.Contracts.Options.TXO
+        contract = None
+        for opt in txo_group:
+            if opt.code == contract_code:
+                contract = opt
+                break
+        if contract is None:
+            raise ValueError(f"Option contract not found: {contract_code}")
+        action = _sj.constant.Action.Buy if side == "buy" else _sj.constant.Action.Sell
+        if order_type == "market":
+            sj_order = self._api.Order(
+                action=action,
+                price=0,
+                quantity=quantity,
+                price_type=_sj.constant.FuturesPriceType.MKT,
+                order_type=_sj.constant.OrderType.IOC,
+                octype=_sj.constant.FuturesOCType.Auto,
+                account=self._api.futopt_account,
+            )
+        else:
+            sj_order = self._api.Order(
+                action=action,
+                price=price,
+                quantity=quantity,
+                price_type=_sj.constant.FuturesPriceType.LMT,
+                order_type=_sj.constant.OrderType.ROD,
+                octype=_sj.constant.FuturesOCType.Auto,
+                account=self._api.futopt_account,
+            )
+        trade = self._api.place_order(contract, sj_order)
+        order_id = trade.order.id
+        status = str(trade.status.status)
+        logger.info(
+            "sinopac_option_order_placed",
+            order_id=order_id, contract_code=contract_code,
+            side=side, quantity=quantity, order_type=order_type,
+            price=price, status=status,
+        )
+        return {
+            "order_id": order_id,
+            "contract_code": contract_code,
+            "strike": float(contract.strike_price),
+            "option_type": str(contract.option_right.value),
+            "expiry": contract.delivery_date.replace("/", "-"),
+            "side": side,
+            "quantity": quantity,
+            "order_type": order_type,
+            "price": price,
+            "status": status,
+        }
+
     def poll_fills(self) -> list[dict[str, Any]]:
         """Poll for new fills since the last check. Returns list of new fill dicts."""
         if not self._connected or not self._api:
