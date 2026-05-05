@@ -1,6 +1,7 @@
 """TXO Options IV Screener API routes."""
 from __future__ import annotations
 
+import os
 import asyncio
 import logging
 from datetime import date, timedelta
@@ -113,19 +114,22 @@ async def trigger_options_crawl() -> dict:
         raise HTTPException(status_code=503, detail="Broker not available (shioaji not installed)")
 
     from src.data.options_crawl import crawl_option_chain_snapshot
-    from src.secrets.manager import get_secret_manager
 
+    api_key, secret_key = None, None
+    # Try secrets manager first, then fall back to env vars
     try:
+        from src.secrets.manager import get_secret_manager
         sm = get_secret_manager()
         creds = sm.get_group("sinopac")
         api_key = creds.get("api_key")
         secret_key = creds.get("secret_key")
-        if not api_key or not secret_key:
-            raise HTTPException(status_code=503, detail="Broker credentials not configured")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Broker not initialized: {exc}")
+    except Exception:
+        pass
+    if not api_key or not secret_key:
+        api_key = os.environ.get("SHIOAJI_API_KEY")
+        secret_key = os.environ.get("SHIOAJI_API_SECRET")
+    if not api_key or not secret_key:
+        raise HTTPException(status_code=503, detail="Broker credentials not configured (set SHIOAJI_API_KEY/SHIOAJI_API_SECRET or config/secrets.toml)")
 
     api = sj.Shioaji()
     try:
