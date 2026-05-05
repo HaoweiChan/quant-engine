@@ -862,3 +862,62 @@ export async function deleteLivePortfolio(portfolioId: string): Promise<{ portfo
     method: "DELETE",
   });
 }
+
+// --- Options IV Screener ---
+
+export interface OptionStrike {
+  strike: number;
+  option_type: "C" | "P";
+  bid: number | null;
+  ask: number | null;
+  last: number | null;
+  volume: number | null;
+  oi: number | null;
+  iv: number | null;
+  delta: number | null;
+}
+
+export interface ExpirySlice {
+  expiry: string;
+  dte: number;
+  atm_iv: number;
+  iv_rank_val: number;
+  iv_percentile_val: number;
+  rv_30d: number;
+  vrp: number;
+  skew_25d: number;
+  strikes: OptionStrike[];
+}
+
+export interface ScreenerResult {
+  underlying_price: number;
+  timestamp: string;
+  expiries: ExpirySlice[];
+}
+
+export interface IVHistoryPoint {
+  timestamp: string;
+  atm_iv: number;
+}
+
+export async function fetchOptionsScreener(): Promise<ScreenerResult> {
+  return fetchJSON("/api/options/screener");
+}
+
+export async function fetchOptionChain(expiry: string): Promise<{
+  expiry: string;
+  dte: number;
+  atm_iv: number;
+  strikes: OptionStrike[];
+}> {
+  return fetchJSON(`/api/options/chain/${encodeURIComponent(expiry)}`);
+}
+
+export async function fetchIVHistory(days?: number): Promise<{ days: number; history: IVHistoryPoint[] }> {
+  const qs = days ? `?days=${days}` : "";
+  return fetchJSON(`/api/options/iv-history${qs}`);
+}
+
+export async function triggerOptionsCrawl(): Promise<{ status: string; quotes_stored: number }> {
+  return fetchJSON("/api/options/crawl", { method: "POST" });
+}

@@ -51,6 +51,23 @@ tax_rate = 0.00002
 [contracts.TMF.lot_types]
 micro = 10.0
 
+[contracts.TXO]
+symbol = "TXO"
+exchange = "TAIFEX"
+currency = "TWD"
+point_value = 50.0
+multiplier = 50
+min_tick = 0.1
+fee_per_contract = 18.0
+tax_rate = 0.00002
+
+[options]
+risk_free_rate = 0.0175
+dividend_yield = 0.0
+iv_rank_window = 252
+rv_window_default = 30
+rv_estimator = "parkinson"
+
 [lot_translation]
 large = "TX"
 small = "MTX"

@@ -27,6 +27,7 @@ from src.api.routes import (
     monte_carlo,
     ohlcv,
     optimizer,
+    options,
     orders,
     paper_trade,
     params,
@@ -157,6 +158,7 @@ app.include_router(risk_evaluation.router)
 app.include_router(admin_warroom.router)
 app.include_router(paper_trade.router)
 app.include_router(orders.router)
+app.include_router(options.router)
 
 # WebSocket routes
 app.include_router(live_feed.router)

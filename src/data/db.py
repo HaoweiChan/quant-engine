@@ -160,6 +160,39 @@ class ContractRoll(Base):
     adjustment_factor: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class OptionContract(Base):
+    """TXO option contract definition (expiry × strike × type)."""
+    __tablename__ = "option_contracts"
+    __table_args__ = (
+        Index("ix_option_contracts_expiry", "expiry_date"),
+    )
+    contract_code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    underlying_symbol: Mapped[str] = mapped_column(String(16), nullable=False)
+    expiry_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    strike: Mapped[float] = mapped_column(Float, nullable=False)
+    option_type: Mapped[str] = mapped_column(String(1), nullable=False)
+    multiplier: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
+    delisted_at: Mapped[str | None] = mapped_column(String(10), nullable=True)
+
+
+class OptionQuote(Base):
+    """Daily option quote snapshot for IV surface construction."""
+    __tablename__ = "option_quotes"
+    __table_args__ = (
+        Index("ix_option_quotes_ts", "timestamp"),
+        Index("ix_option_quotes_code_ts", "contract_code", "timestamp"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    contract_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    timestamp: Mapped[str] = mapped_column(String(32), nullable=False)
+    bid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    open_interest: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    underlying_price: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 class Database:
     def __init__(self, url: str = DEFAULT_DB_URL) -> None:
         self._engine = create_engine(url)
