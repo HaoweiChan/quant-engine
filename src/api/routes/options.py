@@ -107,16 +107,40 @@ async def iv_history(
 @router.post("/crawl")
 async def trigger_options_crawl() -> dict:
     """Trigger a one-shot TXO chain snapshot crawl."""
-    from src.api.helpers import _init_war_room, _war_room_api
-    from src.data.options_crawl import crawl_option_chain_snapshot
+    try:
+        import shioaji as sj
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Broker not available (shioaji not installed)")
 
-    _init_war_room()
-    api = _war_room_api
-    if api is None:
-        raise HTTPException(status_code=503, detail="Broker API not initialized")
+    from src.data.options_crawl import crawl_option_chain_snapshot
+    from src.secrets.manager import get_secret_manager
+
+    try:
+        sm = get_secret_manager()
+        creds = sm.get_group("sinopac")
+        api_key = creds.get("api_key")
+        secret_key = creds.get("secret_key")
+        if not api_key or not secret_key:
+            raise HTTPException(status_code=503, detail="Broker credentials not configured")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Broker not initialized: {exc}")
+
+    api = sj.Shioaji()
+    try:
+        api.login(api_key, secret_key)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Broker login failed: {exc}")
 
     db = _get_db()
-    count = await asyncio.to_thread(crawl_option_chain_snapshot, api, db)
+    try:
+        count = await asyncio.to_thread(crawl_option_chain_snapshot, api, db)
+    finally:
+        try:
+            api.logout()
+        except Exception:
+            pass
     return {"status": "ok", "quotes_stored": count}
 
 
