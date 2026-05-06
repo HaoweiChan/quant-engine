@@ -115,3 +115,38 @@ Pyramid parameters (max_levels, gamma, trigger_atr) are NOT tunable — they are
 **On core engine changes**: Any proposed change to `src/core/` requires Risk Auditor sign-off and a full regression run before it can be merged.
 
 **On dashboard PRs**: Any chart or time-display change requires Platform Engineer to confirm Taiwan time and session labels are correct before accepting.
+
+## Mandatory STOP Triggers — Mutation Interception
+
+Before any `git push`, `git commit --amend --no-edit`, or any operation that propagates changes beyond local working state, the orchestrator MUST stop and surface the diff to the user when ANY of the following hold. These override default helpfulness — silence-and-proceed is a failure mode.
+
+### Triggers
+
+1. **File rewrite >30%**: For any tracked file modified, if `git diff --stat <ref>` shows insertions+deletions exceed 30% of the file's existing line count, STOP. The default assumption for a >30% diff on an existing file is "this is a rewrite that may be losing intentional logic," not "this is an improvement."
+
+2. **Replaces a tracked file via create/write**: If a file-creation tool targets a path already in `git ls-files`, treat as rewrite, not creation. STOP before writing. Show the user `git log --oneline -5 -- <path>` and ask whether to patch the existing version instead.
+
+3. **Conflicts with a prior user decision**: If the change touches a configuration variable, env var name, file location, naming convention, or workflow that the user has explicitly decided in earlier turns of the conversation or in `docs/decisions/`, STOP and quote the prior decision verbatim. Phrases like "I'll keep X" / "use Y instead of Z" / "reuse existing" are decisions.
+
+4. **Auth / credential / token errors in test output**: Any test failure containing `401`, `403`, `permission`, `credentials`, `token`, or `auth` in the error message is environment, not code. Do NOT modify production code to "fix" it. Surface the failure and ask whether to skip-mark the test or fix the env.
+
+5. **Destructive git operations on shared refs**: Any `git push --force`, `git reset --hard` on a branch with an upstream, or `git rebase` of pushed commits requires explicit user confirmation in chat. Local-only `git reset --hard` to undo unpushed commits is allowed without confirmation.
+
+6. **Bulk or sensitive file deletion**: Any `rm -rf`, mass `git rm`, or deletion of any `*.db`, `*.sqlite`, `*.parquet`, or files under `data/` requires explicit confirmation regardless of size. These are ground-truth artifacts (param_registry.db, taifex_data.db, historical bars).
+
+### STOP format
+
+When triggered, output exactly:
+
+```
+STOP — [trigger name from list above]
+What I was about to do:
+<one sentence>
+Why this triggered:
+<which rule, what specifically>
+Evidence:
+<relevant diff / git log / quoted prior decision>
+Awaiting your call: [override / revise / abort]
+```
+
+Do not continue with any mutation until the user replies in chat. Do not interpret silence as approval. Do not interpret "ok" without specifics as approval for a destructive op — re-confirm.
