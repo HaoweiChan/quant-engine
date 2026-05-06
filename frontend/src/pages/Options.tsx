@@ -121,6 +121,21 @@ interface PriceGuidance {
   note: string;
 }
 
+function txoTickSize(price: number): number {
+  if (price < 10) return 0.1;
+  if (price < 50) return 0.5;
+  if (price < 500) return 1;
+  if (price < 1000) return 5;
+  return 10;
+}
+
+function snapToTick(value: number, direction: "up" | "down" | "nearest"): number {
+  const tick = txoTickSize(value);
+  if (direction === "down") return Math.floor(value / tick) * tick;
+  if (direction === "up") return Math.ceil(value / tick) * tick;
+  return Math.round(value / tick) * tick;
+}
+
 function computePriceGuidance(bid: number | null, ask: number | null, side: "buy" | "sell"): PriceGuidance {
   const b = bid ?? 0;
   const a = ask ?? 0;
@@ -130,15 +145,14 @@ function computePriceGuidance(bid: number | null, ask: number | null, side: "buy
   if (b <= 0 || a <= 0) {
     return { suggested: 0, rangeMin: 0, rangeMax: 0, midpoint: 0, spread: 0, spreadPct: 0, note: "No bid/ask available" };
   }
-  // For buying: start at midpoint, acceptable up to ask
-  // For selling: start at midpoint, acceptable down to bid
-  const tickSize = mid >= 50 ? 1 : mid >= 10 ? 0.5 : 0.1;
-  const roundTick = (v: number) => Math.round(v / tickSize) * tickSize;
+  // Snap suggested to valid tick grid; buy rounds up, sell rounds down
   if (side === "buy") {
-    const suggested = roundTick(mid + spread * 0.15); // slightly above mid for faster fill
+    const raw = mid + spread * 0.15;
+    const suggested = snapToTick(raw, "up");
     return { suggested, rangeMin: b, rangeMax: a, midpoint: mid, spread, spreadPct, note: "Mid+15% of spread. Bid = patient, Ask = aggressive." };
   }
-  const suggested = roundTick(mid - spread * 0.15); // slightly below mid
+  const raw = mid - spread * 0.15;
+  const suggested = snapToTick(raw, "down");
   return { suggested, rangeMin: b, rangeMax: a, midpoint: mid, spread, spreadPct, note: "Mid-15% of spread. Ask = patient, Bid = aggressive." };
 }
 
@@ -308,23 +322,56 @@ function OrderDialog({
         <div className="grid grid-cols-2 gap-3 mb-4">
           <div>
             <label className="block text-[10px] mb-1" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
-              Limit Price
+              Limit Price <span style={{ color: "#555" }}>(tick {txoTickSize(price)})</span>
             </label>
-            <input
-              type="number"
-              step="0.1"
-              min="0"
-              value={price}
-              onChange={(e) => setPrice(parseFloat(e.target.value) || 0)}
-              className="w-full text-[12px] px-2 py-1.5 rounded"
-              style={{
-                fontFamily: "var(--font-mono)",
-                background: "#141620",
-                color: priceWarn ? colors.orange : colors.text,
-                border: `1px solid ${priceWarn ? colors.orange : "#353849"}`,
-                outline: "none",
-              }}
-            />
+            <div className="flex items-stretch gap-0">
+              <button
+                onClick={() => setPrice((p) => Math.max(0, +(p - txoTickSize(p)).toFixed(1)))}
+                className="px-2 text-[14px] font-bold rounded-l"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  background: "#252838",
+                  color: colors.red,
+                  border: "1px solid #353849",
+                  borderRight: "none",
+                  cursor: "pointer",
+                  lineHeight: 1,
+                }}
+              >
+                −
+              </button>
+              <input
+                type="number"
+                step={txoTickSize(price)}
+                min="0"
+                value={price}
+                onChange={(e) => setPrice(parseFloat(e.target.value) || 0)}
+                className="flex-1 min-w-0 text-[12px] text-center py-1.5 rounded-none"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  background: "#141620",
+                  color: priceWarn ? colors.orange : colors.text,
+                  border: `1px solid ${priceWarn ? colors.orange : "#353849"}`,
+                  outline: "none",
+                  width: "100%",
+                }}
+              />
+              <button
+                onClick={() => setPrice((p) => +(p + txoTickSize(p)).toFixed(1))}
+                className="px-2 text-[14px] font-bold rounded-r"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  background: "#252838",
+                  color: colors.green,
+                  border: "1px solid #353849",
+                  borderLeft: "none",
+                  cursor: "pointer",
+                  lineHeight: 1,
+                }}
+              >
+                +
+              </button>
+            </div>
             {priceWarn && (
               <div className="text-[10px] mt-0.5" style={{ color: colors.orange }}>
                 Outside bid-ask range
@@ -335,21 +382,54 @@ function OrderDialog({
             <label className="block text-[10px] mb-1" style={{ color: colors.muted, fontFamily: "var(--font-mono)" }}>
               Quantity (lots)
             </label>
-            <input
-              type="number"
-              min="1"
-              max="100"
-              value={quantity}
-              onChange={(e) => setQuantity(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
-              className="w-full text-[12px] px-2 py-1.5 rounded"
-              style={{
-                fontFamily: "var(--font-mono)",
-                background: "#141620",
-                color: colors.text,
-                border: "1px solid #353849",
-                outline: "none",
-              }}
-            />
+            <div className="flex items-stretch gap-0">
+              <button
+                onClick={() => setQuantity((q) => Math.max(1, q - 1))}
+                className="px-2 text-[14px] font-bold rounded-l"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  background: "#252838",
+                  color: colors.red,
+                  border: "1px solid #353849",
+                  borderRight: "none",
+                  cursor: "pointer",
+                  lineHeight: 1,
+                }}
+              >
+                −
+              </button>
+              <input
+                type="number"
+                min="1"
+                max="100"
+                value={quantity}
+                onChange={(e) => setQuantity(Math.max(1, Math.min(100, parseInt(e.target.value) || 1)))}
+                className="flex-1 min-w-0 text-[12px] text-center py-1.5 rounded-none"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  background: "#141620",
+                  color: colors.text,
+                  border: "1px solid #353849",
+                  outline: "none",
+                  width: "100%",
+                }}
+              />
+              <button
+                onClick={() => setQuantity((q) => Math.min(100, q + 1))}
+                className="px-2 text-[14px] font-bold rounded-r"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  background: "#252838",
+                  color: colors.green,
+                  border: "1px solid #353849",
+                  borderLeft: "none",
+                  cursor: "pointer",
+                  lineHeight: 1,
+                }}
+              >
+                +
+              </button>
+            </div>
           </div>
         </div>
 
