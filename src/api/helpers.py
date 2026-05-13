@@ -756,6 +756,10 @@ def _start_market_data_subscriber() -> None:
     # limits one session per API key, not per person_id.
 
     try:
+        # Apply the #179 callback-arity patch BEFORE shioaji loads pysolace.
+        # Idempotent — safe if SinopacGateway already patched.
+        from src.broker_gateway._shioaji_patch import apply_shioaji_patch
+        apply_shioaji_patch()
         import shioaji as sj
     except ImportError:
         logger.info("market_data_subscriber: shioaji not installed, skipping")

@@ -35,6 +35,10 @@ def _ensure_shioaji() -> Any:
     global sj
     if sj is None:
         try:
+            # Apply the #179 callback-arity patch BEFORE shioaji loads pysolace.
+            # Idempotent — safe if another entry point already patched.
+            from src.broker_gateway._shioaji_patch import apply_shioaji_patch
+            apply_shioaji_patch()
             import shioaji as _sj
             sj = _sj
         except ImportError as exc:
