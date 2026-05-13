@@ -138,3 +138,46 @@ Before any code change ships:
 - `/tmp/random_segv_sample.txt` on VPS (10 random SEGV timestamps used in this analysis)
 - `/tmp/quant-engine-api.unit.snapshot.<ts>` on VPS (unit file at session-close)
 - All raw journalctl windows captured in this session — re-runnable from agent transcript
+
+## Update 2026-05-13 (Sunday closed-market session)
+
+### Versions confirmed
+- shioaji: 1.3.2
+- pysolace: 0.9.53 (the binding that exports `SolClient.session_down_callback_wrap`)
+
+### GitHub issue #179
+- Posted comment with 109-crash forensic data
+- 4 questions for maintainers (arity fix release status, monkey-patch shape, broker-side triggers, login backoff cadence)
+- Awaiting response
+
+### Mitigation revisions
+- L1 (Python try/except wrap) **removed** — `std::terminate` from C++ thread is unreachable from Python
+- L1 (revised): monkey-patch `SolClient.session_down_callback_wrap` to accept `*args, **kwargs` — pending maintainer guidance on safety
+- L0a + L0c remain primary path
+
+### Coredump capture — HALF CONFIGURED
+
+**What's done (no sudo needed):**
+- Drop-in written: `~/.config/systemd/user/quant-engine-api.service.d/coredump.conf`
+  - `LimitCORE=infinity`
+  - `LimitCORESoft=infinity`
+- `systemctl --user daemon-reload` executed (consumed pending NeedDaemonReload flag from prior session)
+- Drop-in registered in unit definition (DropInPaths verified)
+
+**What's NOT done (requires sudo):**
+- `systemd-coredump` package not installed
+- `kernel.core_pattern` still points to apport's pipe handler
+- Cores from future SEGVs will be handed to apport, which lacks shioaji symbols → useless `.crash` files
+
+**Effective state:**
+- Once `systemd-coredump` is installed (next session), it will rewrite `core_pattern` AND drop-in's `LimitCORESoft=infinity` will be in effect at next service restart
+- Until then, even with the drop-in active, no usable cores will be captured
+
+### Next session pre-reqs (in order)
+1. Resolve passwordless sudo on netcup (or alternative root access path)
+2. `sudo apt install -y systemd-coredump`
+3. Verify `cat /proc/sys/kernel/core_pattern` shows `|/lib/systemd/systemd-coredump ...`, not apport
+4. If still apport: `sudo systemctl mask apport.service apport-forward.socket` + `sudo sysctl -p /usr/lib/sysctl.d/50-coredump.conf`
+5. Wait for next natural SEGV (~30–60 min) to validate capture end-to-end
+
+Only after coredump validation should L0a / L0c mitigations be deployed — backtrace from a real captured core informs whether `L1-revised` monkey-patch is necessary or whether L0a alone suffices.
