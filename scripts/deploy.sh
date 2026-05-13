@@ -91,7 +91,7 @@ case "$VPS_DIR" in
 esac
 cd "$VPS_DIR"
 git pull --ff-only
-.venv/bin/python -m pip install -e . --quiet
+"$HOME/.local/bin/uv" pip install --python .venv/bin/python -e . --quiet
 systemctl --user restart "$SERVICE"
 sleep 5
 if ! systemctl --user is-active --quiet "$SERVICE"; then
