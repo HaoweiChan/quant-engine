@@ -181,3 +181,101 @@ Before any code change ships:
 5. Wait for next natural SEGV (~30–60 min) to validate capture end-to-end
 
 Only after coredump validation should L0a / L0c mitigations be deployed — backtrace from a real captured core informs whether `L1-revised` monkey-patch is necessary or whether L0a alone suffices.
+
+## Update 2026-05-13 (Decisive fix session)
+
+### Decisions taken
+- Session guard set aside: no live strategy, broker contact already happening, SEGV loop active anyway.
+- Tested monkey-patch BEFORE the L0a retry-removal refactor — if it works, root cause is fixed without
+  touching the connector retry logic. Coredump validation remains gated on sudo; we proceeded without
+  it because the failure signature already pointed at shioaji#179.
+
+### Anomalous pre-fix SEGV rate
+- Pre-deploy capture at 14:21:17 CST baseline: **88 systemd restarts in 41 minutes** (~2.15 / min),
+  far above the ~22/day baseline cited above. Day session was closed (13:45 close); cause of the
+  burst is unexplained but consistent with a retry storm against a degraded broker session.
+- This burst proves the SEGV path is reachable outside of market hours and outside of `gap_repair`.
+
+### deploy.sh fix
+- Root cause: `.venv` was built with `uv`, so `pip` is not installed inside it; line 94's
+  `.venv/bin/python -m pip install -e .` always fails.
+- Installed `uv 0.11.14` on VPS at `~/.local/bin/uv` (user-local, no sudo).
+- `scripts/deploy.sh` line 94 now reads:
+  `"$HOME/.local/bin/uv" pip install --python .venv/bin/python -e . --quiet`
+- Canary round-trip PASS at 15:02:23 CST (commit `1e1dd4b`):
+  - File `.deploy_canary` arrived on VPS and was readable.
+  - VPS `git rev-parse HEAD` matched local `1e1dd4b`.
+  - MainPID rotated 671603 → 672923 (service restarted by deploy).
+  - Service `ActiveState=active`, `NRestarts=0` immediately after.
+- Phase D from `PLAN_WSL` (the deploy-pipeline broken thread from `2026-05-08-phase-d-aborted.md`)
+  is now functionally complete.
+
+### SEGV monkey-patch — deployed
+- New module `src/broker_gateway/_shioaji_patch.py` exports `apply_shioaji_patch()`. It replaces
+  `pysolace.SolClient.session_down_callback_wrap` with a wrapper that:
+  1. Accepts `*args, **kwargs` so the 5-arg C++ call no longer raises `TypeError`.
+  2. Calls the original `_original(self)` first; on `TypeError` falls back to passing args through;
+     swallows any other exception with a structured log line (never re-raises).
+  3. Uses `structlog` (matches codebase convention; the original draft used `logging.getLogger`
+     which would have silently dropped the kwargs).
+  4. Sets module-level `_PATCHED = True` for idempotency.
+- Patch is applied from TWO entry points in the API process (defense-in-depth, since either path
+  can be the first to import `shioaji`):
+  - `src/broker_gateway/sinopac.py:_ensure_shioaji()` (trading gateway path)
+  - `src/api/helpers.py:_start_market_data_subscriber` (data-feed subscriber path)
+- Local smoke test in `.venv` returned `True` (pysolace is importable locally), confirming the
+  patch code is functional end-to-end before deployment.
+- Deployed via `./scripts/deploy.sh --force` at **15:06:09 CST**, commit `f08f514`.
+- Post-deploy log shows **two** `shioaji_patch_applied` lines 0.7ms apart
+  (15:06:10.551358 + 15:06:10.552078). uvicorn runs single-process (no `--workers`), so this is a
+  benign race where both call sites passed the `_PATCHED` check before either had set it.
+  Net effect on `SolClient` is identical (same callable assigned twice); only cosmetic. Could be
+  hardened with a threading.Lock if desired — not blocking.
+- Both Sinopac gateway accounts logged in successfully post-patch:
+  - `account_id=2010515` connected at 15:06:15.951
+  - `account_id=1839302` connected at 15:06:17.075
+- T+1m14s smoke check: NRestarts=0, no error-level log entries, 0 SEGV/segfault/core-dump
+  markers in the last 5 minutes.
+
+### Observation window — COMPLETE (60 min, clean)
+- Deploy moment T+0: **2026-05-13 15:06:09 CST**, MainPID=673243, NRestarts=0.
+- T+60 capture at 16:06:44 CST (35s slack past T+60):
+  - MainPID still **673243** — same PID as deploy, 60 min continuous uptime
+  - NRestarts = **0**
+  - `ActiveState=active`, `ActiveEnterTimestamp` unchanged from 15:06:09
+  - Restart events by window:
+    - T+0…T+15 (15:06–15:21): **0**
+    - T+15…T+30 (15:21–15:36): **0**
+    - T+30…T+60 (15:36–16:06): **0**
+  - `SEGV/segfault/core-dump/Main process exited` markers in journal: **0**
+  - Error-level journal entries since deploy: **none**
+  - `shioaji_patch_applied` log count: 2 (the original double-emit from startup, not re-emitted — i.e. no restart triggered a re-import)
+  - `sinopac_gateway_connected` log count: 2 (one per account, only on initial startup)
+- Pre-fix rate: 88 restarts in 41 min (~129/hour); post-fix rate: 0 restarts in 60 min. **100%
+  reduction over this window.**
+- **Caveat — not apples-to-apples**: the observation window sits entirely inside the TAIFEX
+  night-session opening hour (night session opens 15:00; deploy was 15:06). The pre-fix burst
+  (14:21–15:02) was in the inter-session dead zone. Different broker-side activity. That said,
+  the night-session open hour is historically a busy callback period — zero SEGVs here is a
+  meaningful positive signal, not a quiet-period artifact.
+- **Verdict (per plan rubric):** `T+60 NRestarts = 0` → **patch likely working**. Required
+  follow-up: **watch 24h** before declaring victory. Next checkpoint: **2026-05-14 ~16:06 CST**.
+
+### Next session triggers
+- T+24h: re-check `NRestarts`. If still climbing significantly, deploy **L0a** (remove
+  retry-on-451 in `src/data/connector`). Patch + L0a are independent — L0a remains the
+  highest-leverage refactor if the monkey-patch is insufficient.
+- GitHub `Sinotrade/Shioaji#179`: still awaiting maintainer response on (a) whether the
+  monkey-patch is safe long-term, (b) whether they will ship an arity fix in pysolace.
+- VPS Phase E lockdown: deferred until SEGV is proven contained.
+- Coredump capture: still half-configured (drop-in installed, `systemd-coredump` package
+  install still needs sudo). Lower priority now that the patch is in — but if the patch
+  is insufficient, coredumps become critical for L1-revised analysis.
+
+### Code shipped this session
+| Commit  | Purpose                                                            |
+|---------|--------------------------------------------------------------------|
+| d75a28a | `fix(deploy)`: use `uv pip install` since `.venv` was built with uv |
+| 1e1dd4b | `test`: deploy canary (deleted in f08f514)                          |
+| f08f514 | `fix(broker)`: monkey-patch shioaji `session_down_callback_wrap` arity (#179) |
+
