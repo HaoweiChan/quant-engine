@@ -177,10 +177,25 @@ class SinopacConnector:
                 return fn()
             except Exception as exc:
                 last_exc = exc
+                err_msg = str(exc)
+                # L0a (shioaji#179 follow-up): do NOT retry on 451 "Too Many
+                # Connections". Re-entering the shioaji C++ login path under an
+                # active rate limit triggers a use-after-free / refcount bug
+                # that ends in SIGSEGV/SIGABRT and kills the host process.
+                # Caller (e.g. gap_repair._backfill_gaps) already wraps this
+                # in try/except and will log live_gap_repair_failed and skip
+                # the gap rather than retry into the crash.
+                if "451" in err_msg or "Too Many Connections" in err_msg:
+                    logger.warning(
+                        "broker_rate_limited_not_retrying",
+                        attempt=attempt + 1,
+                        error=err_msg[:200],
+                    )
+                    raise
                 wait = self._base_backoff * (2 ** attempt)
                 logger.warning(
                     "retry", attempt=attempt + 1,
-                    max_retries=self._max_retries, wait=wait, error=str(exc),
+                    max_retries=self._max_retries, wait=wait, error=err_msg,
                 )
                 time.sleep(wait)
         raise RuntimeError(
