@@ -160,14 +160,119 @@ async def create_account(req: AccountCreateRequest) -> dict:
     }
 
 
+def _cascade_dependents(account_id: str) -> tuple[list[str], list[str], str | None]:
+    """Stop+delete every session and delete every live portfolio bound to
+    ``account_id``. Returns ``(deleted_session_ids, deleted_portfolio_ids,
+    warning_or_None)``.
+
+    Background: ``sessions.account_id`` and ``live_portfolios.account_id``
+    have no SQL-level foreign key to ``accounts.id``, and the session
+    loader restores any row with ``status='active'`` on every restart.
+    A delete that touched only ``accounts`` therefore left an "active"
+    paper session quietly trading under a now-nonexistent account until
+    someone noticed losses on Telegram (see 2026-05-13 sinopac-main).
+    This helper makes deletion transitive.
+
+    Each step is best-effort: when the war-room singletons aren't wired
+    up (the unit-test fixtures don't init them) or a single transition
+    raises, we log and keep going so the parent account row still gets
+    deleted. Callers receive a single combined warning string.
+    """
+    deleted_sessions: list[str] = []
+    deleted_portfolios: list[str] = []
+    warnings: list[str] = []
+
+    try:
+        from src.api.helpers import get_session_manager
+        mgr = get_session_manager()
+    except Exception as exc:
+        mgr = None
+        warnings.append(f"session manager unavailable: {exc}")
+
+    if mgr is not None:
+        try:
+            sessions = mgr.get_sessions_for_account(account_id)
+        except Exception as exc:
+            sessions = []
+            warnings.append(f"session lookup failed: {exc}")
+        for sess in sessions:
+            sid = sess.session_id
+            try:
+                # SessionManager.delete_session refuses any non-stopped row;
+                # every other live status is a valid transition to "stopped"
+                # per session_db._VALID_TRANSITIONS.
+                if sess.status in ("active", "halted", "flattening", "paused"):
+                    mgr.set_status(sid, "stopped")
+                mgr.delete_session(sid)
+                deleted_sessions.append(sid)
+            except Exception as exc:
+                warnings.append(f"session {sid} cleanup failed: {exc}")
+                logger.warning(
+                    "account_delete_session_cascade_failed",
+                    account_id=account_id, session_id=sid, error=str(exc),
+                )
+
+    try:
+        from src.api.helpers import _live_portfolio_store
+        store = _live_portfolio_store
+    except Exception as exc:
+        store = None
+        warnings.append(f"portfolio store unavailable: {exc}")
+
+    if store is not None:
+        try:
+            portfolios = store.load_for_account(account_id)
+        except Exception as exc:
+            portfolios = []
+            warnings.append(f"portfolio lookup failed: {exc}")
+        for p in portfolios:
+            try:
+                store.delete(p.portfolio_id)
+                deleted_portfolios.append(p.portfolio_id)
+            except Exception as exc:
+                warnings.append(f"portfolio {p.portfolio_id} cleanup failed: {exc}")
+                logger.warning(
+                    "account_delete_portfolio_cascade_failed",
+                    account_id=account_id,
+                    portfolio_id=p.portfolio_id,
+                    error=str(exc),
+                )
+
+    # Tear down any runners that referenced the now-orphan sessions so the
+    # pipeline stops scheduling bars at them. Optional — missing pipeline
+    # singleton is fine.
+    if deleted_sessions:
+        try:
+            from src.api.helpers import sync_live_pipeline
+            sync_live_pipeline()
+        except Exception as exc:
+            warnings.append(f"pipeline sync failed: {exc}")
+            logger.warning(
+                "account_delete_pipeline_sync_failed",
+                account_id=account_id, error=str(exc),
+            )
+
+    warning = "; ".join(warnings) if warnings else None
+    return deleted_sessions, deleted_portfolios, warning
+
+
 @router.delete("/accounts/{account_id}")
 async def delete_account(account_id: str) -> dict:
-    """Delete an account: removes the DB row, every GSM credential under
-    that id, and the in-memory gateway from ``GatewayRegistry``.
+    """Delete an account and everything that hangs off it: in-DB sessions,
+    in-DB live portfolios, every GSM credential under that id, and the
+    in-memory gateway from ``GatewayRegistry``.
 
     Idempotent — a 404 means there was nothing to delete in the DB, but
-    we still attempt the GSM + registry cleanup as a defensive sweep.
+    we still attempt the GSM + registry + dependents cleanup as a
+    defensive sweep so orphans from a half-failed earlier add can't
+    accumulate.
     """
+    # Cascade first so the runner stops issuing bars at the doomed account
+    # before we yank its credentials. If the cascade partially fails we
+    # still proceed — the account row deletion is the user-visible action
+    # and orphan cleanup is reported via warnings.
+    deleted_sessions, deleted_portfolios, cascade_warning = _cascade_dependents(account_id)
+
     db = _get_db()
     existed = db.delete_account(account_id)
     # Always try to clean credentials and registry, even on 404, in case
@@ -188,13 +293,21 @@ async def delete_account(account_id: str) -> dict:
     if not existed:
         raise HTTPException(
             status_code=404,
-            detail=f"account '{account_id}' not found (any orphan credentials were cleaned anyway)",
+            detail=f"account '{account_id}' not found (any orphan credentials, sessions, or portfolios were cleaned anyway)",
         )
-    logger.info("account_deleted", account_id=account_id)
+    logger.info(
+        "account_deleted",
+        account_id=account_id,
+        deleted_sessions=deleted_sessions,
+        deleted_portfolios=deleted_portfolios,
+    )
     return {
         "id": account_id,
         "deleted": True,
+        "deleted_sessions": deleted_sessions,
+        "deleted_portfolios": deleted_portfolios,
         "credential_warning": cred_warning or None,
+        "cascade_warning": cascade_warning,
     }
 
 
