@@ -177,3 +177,89 @@ class TestStrategyWarmup:
         # confirm hydration by checking it's saturated to its cap rather
         # than equal to the bar count.
         assert len(engine._high_history) == engine._high_history.maxlen  # noqa: SLF001
+
+
+class TestAggregateToResampled:
+    """Pin the 2026-05-13 regression: warmup must feed bars at the strategy's
+    native bar_agg timeframe, not raw 1m bars. Donchian/RSI indicators on a
+    15m strategy were being hydrated with 1m data, making the 20-bar channel
+    represent 20 minutes instead of 300 minutes — spurious entries for ~5h
+    after every restart.
+    """
+
+    def test_5m_aggregation_reduces_bar_count(self) -> None:
+        from src.execution.strategy_warmup import _aggregate_to_resampled
+
+        # 30 consecutive 1m bars inside one session window → should produce
+        # 30 // 5 = 6 resampled bars.
+        base = datetime(2026, 4, 25, 9, 0, tzinfo=UTC)
+        rows = [
+            _Row(
+                timestamp=base + timedelta(minutes=i),
+                open=20_000.0 + i,
+                high=20_001.0 + i,
+                low=19_999.0 + i,
+                close=20_000.5 + i,
+                volume=10.0,
+            )
+            for i in range(30)
+        ]
+        result = _aggregate_to_resampled(rows, tf_minutes=5)
+        assert len(result) == 6
+
+    def test_15m_ohlcv_correctness(self) -> None:
+        from src.execution.strategy_warmup import _aggregate_to_resampled
+
+        # 15 bars; first bar open and extremes should feed into one 15m bar.
+        base = datetime(2026, 4, 25, 9, 0, tzinfo=UTC)
+        rows = [
+            _Row(
+                timestamp=base + timedelta(minutes=i),
+                open=100.0 if i == 0 else 200.0,
+                high=150.0 + i,
+                low=50.0 + i,
+                close=200.0,
+                volume=5.0,
+            )
+            for i in range(15)
+        ]
+        result = _aggregate_to_resampled(rows, tf_minutes=15)
+        assert len(result) == 1
+        bar = result[0]
+        # open from first 1m bar
+        assert bar.open == pytest.approx(100.0)
+        # high is the max across all 1m bars
+        assert bar.high == pytest.approx(max(150.0 + i for i in range(15)))
+        # low is the min
+        assert bar.low == pytest.approx(50.0)
+        # close from last 1m bar
+        assert bar.close == pytest.approx(200.0)
+        # volume summed
+        assert bar.volume == 75
+
+    def test_bar_agg_1_passthrough(self, engine, contract_specs) -> None:
+        """bar_agg=1 must replay all 1m bars unchanged (no regression for
+        strategies that natively run on 1m bars)."""
+        from src.execution.strategy_warmup import StrategyWarmup
+
+        runner = _StubRunner(engine, contract_specs)
+        runner._bar_agg = 1  # type: ignore[attr-defined]
+        rows = _bars(30)
+        warmup = StrategyWarmup(runner, db=_StubDB(rows), lookback_bars=200)
+        end = datetime(2026, 4, 25, 9, 29, tzinfo=UTC)
+        replayed = warmup.run(end=end)
+        assert replayed == 30
+
+    def test_bar_agg_15_feeds_resampled_bars(self, engine, contract_specs) -> None:
+        """bar_agg=15 must aggregate 1m bars and feed only the resampled bars
+        to the engine — the regression pin for donchian_trend_strength."""
+        from src.execution.strategy_warmup import StrategyWarmup
+
+        runner = _StubRunner(engine, contract_specs)
+        runner._bar_agg = 15  # type: ignore[attr-defined]
+        # 60 1m bars → 4 resampled 15m bars
+        rows = _bars(60)
+        warmup = StrategyWarmup(runner, db=_StubDB(rows), lookback_bars=200)
+        end = datetime(2026, 4, 25, 9, 59, tzinfo=UTC)
+        replayed = warmup.run(end=end)
+        assert replayed == 4  # 60 // 15 = 4
