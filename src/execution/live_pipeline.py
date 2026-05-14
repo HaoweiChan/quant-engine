@@ -254,8 +254,9 @@ class LivePipelineManager:
             if not symbols:
                 return
             from datetime import datetime, timedelta
+
             from src.data.aggregator import incremental_update
-            from src.data.db import Database, DEFAULT_DB_PATH
+            from src.data.db import DEFAULT_DB_PATH, Database
             db = Database(f"sqlite:///{DEFAULT_DB_PATH}")
             since = datetime.now() - timedelta(days=7)
             for symbol in symbols:
@@ -347,6 +348,12 @@ class LivePipelineManager:
                     )
                     self._warmup_runner(runner)
                     self._runners[sid] = runner
+                    # Hook the router-fed eval path into the same fan-out
+                    # the per-1m path uses (persist → blotter → Telegram).
+                    # Without this, strategy fills from _dispatch_resampled
+                    # (every entry, every add) silently bypassed live_fills
+                    # and Telegram while only stop-tick exits got reported.
+                    runner.set_notify_callback(self._notify_fills)
                     self._maybe_register_spread_builder(sid, session)
                     logger.info(
                         "live_runner_created",

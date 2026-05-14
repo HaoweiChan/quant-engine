@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, Literal, Union
 from zoneinfo import ZoneInfo
@@ -105,6 +106,20 @@ class LiveStrategyRunner:
         self._fill_history: list[ExecutionResult] = []
         self._last_bar_ts: datetime | None = None
         self._bar_count = 0
+        # Notification callback for fills produced by the router-fed eval
+        # path. When the MultiTimeframeRouter is wired, strategy evaluation
+        # runs from ``_on_resampled_bar`` → ``_dispatch_resampled`` instead
+        # of the legacy ``on_bar_complete`` buffer flush. The pipeline
+        # registers ``_notify_fills`` here so resampled-path fills also get
+        # persisted to ``live_fills``, broadcast on the blotter, and
+        # dispatched to Telegram — without this, entries (which only fire
+        # on the resampled close) were silently filed to nowhere while
+        # exits (firing from the per-1m stop check via ``on_bar_complete``)
+        # still got reported. The 2026-05-13 sinopac-main report — 479
+        # EXIT alerts, 0 ENTRY alerts in 24h — is the canonical regression.
+        self._notify_callback: Callable[
+            [LiveStrategyRunner, list[ExecutionResult]], Awaitable[None]
+        ] | None = None
         # Cached margin-per-unit from the most recent snapshot, so
         # ``margin_used`` can be computed outside the bar-tick context
         # (e.g. by LivePipelineManager.aggregate_open_exposure).
@@ -579,9 +594,40 @@ class LiveStrategyRunner:
                 bar_ts=bar.timestamp.isoformat(),
             )
 
+    def set_notify_callback(
+        self,
+        callback: Callable[
+            [LiveStrategyRunner, list[ExecutionResult]], Awaitable[None]
+        ] | None,
+    ) -> None:
+        """Register the pipeline's ``_notify_fills`` (or any compatible
+        coroutine) so router-fed strategy evaluations notify the same way
+        the legacy buffer flush does. Calling with ``None`` clears it.
+        """
+        self._notify_callback = callback
+
     async def _dispatch_resampled(self, bar: MinuteBar) -> list[ExecutionResult]:
-        """Run strategy evaluation against a router-supplied resampled bar."""
-        return await self._evaluate_strategy(bar)
+        """Run strategy evaluation against a router-supplied resampled bar.
+
+        Returned results are also pushed through the registered notify
+        callback so the router-fed eval path (entries, adds, strategy
+        closes) reaches ``live_fills`` persistence, the blotter
+        WebSocket, and Telegram — the same destinations served by
+        ``LivePipelineManager._notify_fills`` on the per-1m path.
+        Notification failures are logged but never raised so a flaky
+        sink can't break the eval loop.
+        """
+        results = await self._evaluate_strategy(bar)
+        if results and self._notify_callback is not None:
+            try:
+                await self._notify_callback(self, results)
+            except Exception:
+                logger.exception(
+                    "live_runner_resampled_notify_failed",
+                    session_id=self.session_id,
+                    fills=len(results),
+                )
+        return results
 
     def _resample_buffer(self) -> MinuteBar:
         """Merge accumulated 1m bars into a single resampled bar."""
