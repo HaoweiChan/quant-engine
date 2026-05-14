@@ -279,3 +279,96 @@ Only after coredump validation should L0a / L0c mitigations be deployed — back
 | 1e1dd4b | `test`: deploy canary (deleted in f08f514)                          |
 | f08f514 | `fix(broker)`: monkey-patch shioaji `session_down_callback_wrap` arity (#179) |
 
+## Update 2026-05-14 (T+24h re-check + L0a deployed)
+
+### T+24h verdict on the f08f514 monkey-patch: INSUFFICIENT
+
+Re-check at **2026-05-14 23:19 CST** (T+32h13min since the 2026-05-13 15:06:09 deploy):
+
+- MainPID at check: 695075 (last restart at 2026-05-14 21:38:32 CST; one prior crash
+  at 21:38:15 with `code=dumped, status=11/SEGV`).
+- Cumulative process starts since deploy: 24 (`shioaji_patch_applied` count = 48,
+  emitted 2× per start from the two patch call-sites).
+- **Cumulative crashes since deploy: 23** (matches `NRestarts` interpretation).
+- Exit signal distribution across the 23 crashes:
+  - **18 × `code=dumped, status=11/SEGV`**
+  - **5 × `code=dumped, status=6/ABRT`**
+- Rate: 23 / 32h ≈ **0.72/hour ≈ 17/day**. The historic baseline cited in
+  this doc was ~22/day. Pre-fix burst observed in the original session was
+  ~129/hour. So vs. the burst the patch is a huge reduction; vs. the
+  steady-state baseline the patch is essentially a wash.
+- Last-crash event trail (21:38:15) reproduces the original Class A signature
+  verbatim:
+  ```
+  live_bar_gap_detected → shioaji_creds_not_in_env_falling_back_to_gsm
+    → {'status_code': 451, 'detail': 'Too Many Connections.'} → "retry"
+    → {'status_code': 451 …} → "retry"
+    → Main process exited, code=dumped, status=11/SEGV
+  ```
+- Per the rubric in the all-in-fix-session prompt: `NRestarts > 0 (climbing)`
+  → **deploy L0a**.
+
+The 18/5 SEGV-vs-ABRT split is interesting: the monkey-patch was supposed to
+eliminate the std::terminate (ABRT) path entirely, yet 5/23 (22%) are still
+ABRTs. Two possibilities:
+  1. The 5 ABRTs came from the still-in-process gap-repair path before any
+     `session_down` callback fired, so the patch never had a chance to
+     intercept (the C++ abort path is being reached through a different
+     trigger).
+  2. The class-attribute monkey-patch is being clobbered by something
+     (e.g. a fresh `SolClient` class load via `import shioaji` re-init
+     after a connection reset).
+Either way it's moot if L0a removes the upstream retry that lands us here.
+
+### L0a — short-circuit on 451, no retry (DEPLOYED 23:30:14 CST)
+
+Smallest possible diff in `src/data/connector.py` (`_call_with_retry`):
+
+- Catch the exception → inspect `str(exc)` → if it contains `"451"` or
+  `"Too Many Connections"`, log `broker_rate_limited_not_retrying` and
+  re-raise immediately (no backoff sleep, no further retry).
+- Non-451 exceptions retain the previous retry-with-exponential-backoff
+  behavior.
+
+Behavior verified locally before commit:
+- 451 path: 1 call, 0.000s elapsed, original exception re-raised.
+- `network blip` path: 2 calls (= `max_retries`), proper `RuntimeError(
+  "Failed after 2 retries")` from the original code path.
+
+`gap_repair._backfill_gaps` already wraps the crawl call in `try/except`
+and logs `live_gap_repair_failed` on any exception — so the new
+short-circuit RuntimeError will surface there as a logged failure and the
+specific gap will be skipped, instead of looping into the C++ crash.
+
+Deployed:
+- Commit: `802a9c5 fix(connector): L0a — short-circuit on 451 Too Many Connections (no retry)`
+- Deploy moment T+0: **2026-05-14 23:30:14 CST**, MainPID = 697564, NRestarts = 0.
+- Connector code on VPS contains the new `broker_rate_limited_not_retrying`
+  guard (`grep -c` confirmed 1 hit).
+- Both Sinopac gateways reconnected post-deploy at 23:30:21 (acct 1839302)
+  and 23:30:22 (acct 2010515).
+
+### Pending next-check
+- **T+24h on L0a**: 2026-05-15 ~23:30 CST. Expectation if L0a is the right
+  fix: zero ABRTs (the 451-path was their direct trigger), and any
+  remaining SEGVs should be non-Class-A (e.g. the OHLCV-mmap Class B
+  outlier or yet-unobserved paths).
+- First in-flight verification target: wait for the next
+  `live_bar_gap_detected` that escalates to a 451. We should see
+  `broker_rate_limited_not_retrying` followed by `live_gap_repair_failed`
+  instead of a `Main process exited` line.
+- If 24h shows residual crashes, next move per the original handoff is
+  L0c (route `gap_repair._backfill_gaps` through the existing
+  `src/data/crawl_cli` subprocess so even a crash in the broker layer
+  cannot kill the API process). The L0c plumbing already exists for
+  API-triggered crawls (`src/api/helpers.py:_crawl_worker`); gap_repair
+  just hasn't been refactored to use it.
+
+### Code shipped this update
+| Commit  | Purpose                                                            |
+|---------|--------------------------------------------------------------------|
+| 4b2f255 | `fix(api)`: cascade delete sessions and portfolios when removing account (user) |
+| 95d19f8 | `fix(execution)`: notify on resampled-bar fills so entry alerts fire (user) |
+| f16d8f5 | `fix(execution)`: aggregate warmup bars to strategy bar_agg timeframe (user) |
+| 802a9c5 | `fix(connector)`: L0a — short-circuit on 451 Too Many Connections (no retry) |
+
