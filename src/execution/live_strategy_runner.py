@@ -655,9 +655,28 @@ class LiveStrategyRunner:
                 price=snapshot.price,
                 available_margin=max(self._equity_budget + self._realized_pnl - self._margin_used(snapshot), 0),
             )
+        pre_stops = {p.position_id: p.stop_level for p in state.positions}
+        pre_entries = {p.position_id: p.entry_price for p in state.positions}
         orders = self._engine.check_stops(snapshot)
         if not orders:
             return []
+        # Diagnostic: surface stop-level + bar-range + daily_atr whenever a
+        # 1m stop check fires, so the 2026-05-15 "exit on next 1m bar after
+        # every entry" pattern can be debugged from production logs.
+        logger.info(
+            "stop_trigger_diagnostic",
+            session_id=self.session_id,
+            strategy=self.strategy_slug,
+            bar_ts=bar.timestamp.isoformat(),
+            bar_open=bar.open,
+            bar_high=bar.high,
+            bar_low=bar.low,
+            bar_close=bar.close,
+            daily_atr=snapshot.atr.get("daily"),
+            pre_stop_levels=pre_stops,
+            pre_entry_prices=pre_entries,
+            order_reasons=[o.reason for o in orders],
+        )
         orders = [self._tag_daytrade(o) for o in orders]
         await self._paper_engine.on_bar_open(self.symbol, bar.open)
         results = await self._paper_engine.execute(orders, snapshot)
@@ -919,9 +938,62 @@ class LiveStrategyRunner:
         return atr
 
     @staticmethod
+    def _atr_from_hourly_rows(
+        rows: list[tuple[str, float, float, float]], lookback: int,
+    ) -> float:
+        """Aggregate (timestamp, high, low, close) 1h rows into per-trading-day
+        OHLC and return the mean True Range over the last ``lookback`` days.
+
+        Pure function — no DB access, no logging. Made into its own method
+        so the aggregation logic can be unit-tested without a real
+        market.db. The DB-reading wrapper is ``_compute_daily_atr``.
+        """
+        from datetime import datetime
+
+        from src.data.session_utils import trading_day
+
+        if not rows:
+            return 100.0
+        # Walk chronologically (ascending) so each trading-day's last close
+        # is preserved. The SQL query returns DESC and tests may pass ASC,
+        # so sort here rather than relying on the caller.
+        daily: dict = {}
+        for ts_str, h, lo, c in sorted(rows, key=lambda r: r[0]):
+            ts = datetime.fromisoformat(ts_str)
+            td = trading_day(ts)
+            if td not in daily:
+                daily[td] = [float(h), float(lo), float(c)]
+            else:
+                d = daily[td]
+                d[0] = max(d[0], float(h))
+                d[1] = min(d[1], float(lo))
+                d[2] = float(c)
+        days_sorted = sorted(daily.items(), key=lambda kv: kv[0])
+        if len(days_sorted) < 2:
+            return 100.0
+        trs: list[float] = []
+        for i in range(1, len(days_sorted)):
+            _, (h, lo, _c) = days_sorted[i]
+            prev_c = days_sorted[i - 1][1][2]
+            tr = max(h - lo, abs(h - prev_c), abs(lo - prev_c))
+            trs.append(tr)
+        trs = trs[-lookback:]
+        if not trs:
+            return 100.0
+        return sum(trs) / len(trs)
+
+    @staticmethod
     def _compute_daily_atr(symbol: str, day, lookback: int = 14) -> float:
-        """Read the last ``lookback`` daily-resampled bars from market.db
-        and return the mean True Range. Used by the per-session cache.
+        """Return the mean True Range over the last ``lookback`` TAIFEX
+        trading days, aggregated from 1h bars in market.db.
+
+        market.db has no daily table — only ohlcv_bars (1m), ohlcv_5m,
+        ohlcv_1h. Earlier versions queried a non-existent
+        ``timeframe_minutes=1440`` filter and silently fell back to
+        100.0, which pinned trail stops to ~70 pts and caused every
+        donchian entry to exit on the very next 1m bar. Aggregate from
+        ohlcv_1h grouped by TAIFEX ``trading_day()`` so weekend gaps
+        and the night-spans-midnight quirk are handled correctly.
         """
         import sqlite3
         from pathlib import Path
@@ -931,32 +1003,21 @@ class LiveStrategyRunner:
             return 100.0
         conn = sqlite3.connect(str(db_path))
         try:
-            # Pull the last `lookback*2` calendar days of daily bars to
-            # tolerate weekends/holidays without slicing them out manually.
+            # Pull enough 1h bars to cover ~lookback * 2 trading days.
+            # A TAIFEX trading day spans ~19 hours of bars, so ~50/day
+            # is a safe upper bound after weekends/holidays.
             rows = conn.execute(
                 """
-                SELECT high, low, close FROM ohlcv_bars
-                WHERE symbol = ? AND timeframe_minutes = 1440 AND date(timestamp) <= date(?)
+                SELECT timestamp, high, low, close FROM ohlcv_1h
+                WHERE symbol = ? AND date(timestamp) <= date(?)
                 ORDER BY timestamp DESC
                 LIMIT ?
                 """,
-                (symbol, day.isoformat(), lookback + 1),
+                (symbol, day.isoformat(), lookback * 50),
             ).fetchall()
         finally:
             conn.close()
-        if len(rows) < 2:
-            return 100.0
-        # Reverse so prev_close[i] = rows[i-1].close.
-        rows = list(reversed(rows))
-        trs: list[float] = []
-        for i in range(1, len(rows)):
-            high, low, _close = rows[i]
-            prev_close = rows[i - 1][2]
-            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            trs.append(float(tr))
-        if not trs:
-            return 100.0
-        return sum(trs) / len(trs)
+        return LiveStrategyRunner._atr_from_hourly_rows(rows, lookback)
 
     def _make_account(self, snapshot: MarketSnapshot) -> AccountState:
         state = self._engine.get_state()
