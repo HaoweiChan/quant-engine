@@ -63,6 +63,11 @@ def _aggregate_to_resampled(rows: list, tf_minutes: int) -> list[MinuteBar]:
         if getattr(ts, "tzinfo", None) is not None:
             ts = ts.replace(tzinfo=None)
         sid = get_sid(ts)
+        # 1m bars in the DB include between-session timestamps (05:00–08:45
+        # and 13:45–15:00). session_id() returns "CLOSED" for those, and
+        # session_open_dt("CLOSED") raises ValueError — skip them entirely.
+        if not (sid.startswith("D") or sid.startswith("N")):
+            continue
         open_dt = session_open_dt(sid)
         minutes_into_session = int((ts - open_dt).total_seconds() / 60)
         bucket_index = minutes_into_session // tf_minutes

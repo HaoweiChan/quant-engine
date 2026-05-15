@@ -16,7 +16,6 @@ from src.core.types import EngineConfig, PyramidConfig
 from src.strategies.registry import get_warmup_bars
 from tests.conftest import make_signal, make_snapshot
 
-
 # -- warmup_mode flag in PositionEngine ----------------------------------
 
 
@@ -249,6 +248,37 @@ class TestAggregateToResampled:
         end = datetime(2026, 4, 25, 9, 29, tzinfo=UTC)
         replayed = warmup.run(end=end)
         assert replayed == 30
+
+    def test_skips_between_session_timestamps(self) -> None:
+        """Pin the 2026-05-15 regression: 1m bars whose timestamps fall in
+        the between-session windows (05:00–08:45 and 13:45–15:00) made
+        session_id() return "CLOSED", which session_open_dt() couldn't
+        parse — the whole warmup aborted and indicators stayed cold."""
+        from src.execution.strategy_warmup import _aggregate_to_resampled
+
+        # Naive Taipei-local — production DB convention. 13:30 is inside
+        # the day session, 14:00 is in the closed window, 15:00 is inside
+        # the night session.
+        rows = [
+            _Row(  # day session, valid
+                timestamp=datetime(2026, 4, 25, 13, 30),
+                open=20_000.0, high=20_001.0, low=19_999.0, close=20_000.5,
+                volume=10.0,
+            ),
+            _Row(  # CLOSED window — must be skipped, not crash
+                timestamp=datetime(2026, 4, 25, 14, 0),
+                open=20_100.0, high=20_101.0, low=20_099.0, close=20_100.5,
+                volume=10.0,
+            ),
+            _Row(  # night session, valid
+                timestamp=datetime(2026, 4, 25, 15, 0),
+                open=20_200.0, high=20_201.0, low=20_199.0, close=20_200.5,
+                volume=10.0,
+            ),
+        ]
+        # Must not raise. Should yield 2 bars (CLOSED row dropped).
+        result = _aggregate_to_resampled(rows, tf_minutes=5)
+        assert len(result) == 2
 
     def test_bar_agg_15_feeds_resampled_bars(self, engine, contract_specs) -> None:
         """bar_agg=15 must aggregate 1m bars and feed only the resampled bars
