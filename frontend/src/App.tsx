@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useUiStore } from "@/stores/uiStore";
 import { DataHub } from "@/pages/DataHub";
+import { Options } from "@/pages/Options";
 import { Strategy } from "@/pages/Strategy";
 import { Trading } from "@/pages/Trading";
 
@@ -10,10 +11,12 @@ const primaryTabs = [
   { value: "trading", label: "Trading" },
   { value: "strategy", label: "Strategy" },
   { value: "datahub", label: "Data Hub" },
+  { value: "options", label: "Options" },
 ] as const;
 
 const tabComponents: Record<string, React.FC> = {
   datahub: DataHub,
+  options: Options,
   strategy: Strategy,
   trading: Trading,
 };

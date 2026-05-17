@@ -27,6 +27,7 @@ from src.api.routes import (
     monte_carlo,
     ohlcv,
     optimizer,
+    options,
     orders,
     paper_trade,
     params,
@@ -128,6 +129,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -157,6 +160,7 @@ app.include_router(risk_evaluation.router)
 app.include_router(admin_warroom.router)
 app.include_router(paper_trade.router)
 app.include_router(orders.router)
+app.include_router(options.router)
 
 # WebSocket routes
 app.include_router(live_feed.router)
