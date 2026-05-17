@@ -372,3 +372,39 @@ Deployed:
 | f16d8f5 | `fix(execution)`: aggregate warmup bars to strategy bar_agg timeframe (user) |
 | 802a9c5 | `fix(connector)`: L0a — short-circuit on 451 Too Many Connections (no retry) |
 
+## Update 2026-05-18 (T+72h+ verdict on L0a: WORKING — ~85% reduction)
+
+Re-check at **2026-05-18 01:00 CST** (T+73h54min since the 2026-05-14 23:30:14 L0a deploy):
+
+- MainPID = 717026, NRestarts = 2 in current activation (since 2026-05-16 03:44:46),
+  i.e. ~46h current uptime on the same process. ActiveEnterTimestamp moved once
+  between L0a deploy and the check, indicating one full systemd cycle in ~30h.
+- **Cumulative process exits (SEGV+ABRT markers in journal) since L0a deploy: 8**.
+  Historic 22/day baseline × 3.07 days ≈ 67-68 expected; observed 8 → **~88% reduction**.
+- Exit signal split across the 23 crashes from the f08f514-only window stayed at
+  ~78:22 SEGV:ABRT; the L0a window data has a similar SEGV-dominated tail but at
+  far lower volume, consistent with L0a eliminating the 451-retry storm path and
+  leaving only sporadic non-Class-A crashes.
+- **68 `broker_rate_limited_not_retrying` log lines** since L0a deploy, each
+  matched by a **`live_gap_repair_failed`** record from `gap_repair._backfill_gaps`.
+  Net effect: every 451 the broker returned was absorbed by L0a's short-circuit
+  and surfaced as a gracefully-skipped gap-repair instead of triggering a SEGV.
+- **Verdict (per plan rubric):** `NRestarts >> 0 but rate well below baseline` →
+  L0a **likely working as designed**. The residual ~12% crash budget is non-Class-A
+  (no 451 in the trail before exit) and should be re-evaluated against the
+  original Class B (OHLCV-mmap) hypothesis or treated as a baseline-broker-stability
+  floor that requires L0c (subprocess isolation of `gap_repair._backfill_gaps`
+  through the existing `src/data/crawl_cli`) to eliminate fully.
+
+### Recommended next move (deferred)
+- **L0c — subprocess isolation of gap_repair**: the L3-style isolation already
+  exists for API-triggered crawls (`src/api/helpers._crawl_worker` shells out to
+  `python -m src.data.crawl_cli`). `gap_repair._backfill_gaps` still calls
+  `crawl_historical` in-process via a background thread, so even a single crash
+  in the broker layer kills the API. Routing the gap-repair path through the
+  same subprocess pattern would survive 100% of broker-layer crashes, not just
+  the 451-induced ones. Estimated effort: medium (one new wrapper + thread
+  swap, no API contract change).
+- Coredump capture remains the prerequisite for diagnosing the residual
+  non-Class-A crashes. `systemd-coredump` install still needs sudo.
+
