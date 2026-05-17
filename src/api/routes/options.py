@@ -192,11 +192,17 @@ async def list_option_contracts(
 async def list_trading_accounts() -> list[dict]:
     """List available trading accounts (from GatewayRegistry)."""
     try:
-        from src.broker_gateway.registry import GatewayRegistry
-        registry = GatewayRegistry.get_instance()
+        # The real GatewayRegistry has no get_instance() and no public
+        # .gateways dict (it lives at .account_ids + .get_gateway(aid)).
+        # The canonical accessor is the lazy singleton in src.api.helpers.
+        from src.api.helpers import get_gateway_registry
+        registry = get_gateway_registry()
+        if registry is None:
+            return []
         accounts = []
-        for gw_id, gw in registry.gateways.items():
-            if not gw.is_connected:
+        for gw_id in registry.account_ids:
+            gw = registry.get_gateway(gw_id)
+            if gw is None or not gw.is_connected:
                 continue
             api = getattr(gw, "_api", None)
             if api is None:
@@ -226,9 +232,11 @@ async def place_option_order(req: OptionOrderRequest) -> dict:
     if req.order_type == "limit" and req.price <= 0:
         raise HTTPException(status_code=400, detail="Limit price must be positive")
     try:
-        from src.broker_gateway.registry import GatewayRegistry
-        registry = GatewayRegistry.get_instance()
-        gw = registry.gateways.get(req.account_id)
+        from src.api.helpers import get_gateway_registry
+        registry = get_gateway_registry()
+        if registry is None:
+            raise HTTPException(status_code=503, detail="GatewayRegistry not initialized")
+        gw = registry.get_gateway(req.account_id)
         if gw is None:
             raise HTTPException(status_code=404, detail=f"Account not found: {req.account_id}")
         if not gw.is_connected:
@@ -253,11 +261,14 @@ async def place_option_order(req: OptionOrderRequest) -> dict:
 async def get_option_positions() -> list[dict]:
     """Fetch current option positions from all connected gateways."""
     try:
-        from src.broker_gateway.registry import GatewayRegistry
-        registry = GatewayRegistry.get_instance()
+        from src.api.helpers import get_gateway_registry
+        registry = get_gateway_registry()
+        if registry is None:
+            return []
         positions = []
-        for gw_id, gw in registry.gateways.items():
-            if not gw.is_connected:
+        for gw_id in registry.account_ids:
+            gw = registry.get_gateway(gw_id)
+            if gw is None or not gw.is_connected:
                 continue
             api = getattr(gw, "_api", None)
             if api is None:
