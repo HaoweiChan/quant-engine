@@ -412,11 +412,32 @@ async def main_from_journal(target_date: str) -> None:
         print(f"{short:45} {symbol:4} {len(bars):>5} {win_str:>17} {len(bt_fills):>4} {len(live_in_win):>11}  {v}")
 
 
+async def main_from_journal_window(target_date: str, win_filter_start: str | None = None):
+    """Variant: skip the first N journal bars so win_start lands AFTER
+    runner_state_seen records have accumulated (enabling exact seeding)."""
+    # Trick: just monkey-patch the journal-bar fetcher to drop bars before
+    # win_filter_start, then call main_from_journal normally.
+    if win_filter_start is None:
+        return await main_from_journal(target_date)
+    global fetch_bars_from_journal
+    cutoff = datetime.fromisoformat(f"{target_date}T{win_filter_start}")
+    orig = fetch_bars_from_journal
+    def filtered(session_id, td):
+        bs = orig(session_id, td)
+        return [b for b in bs if b.timestamp >= cutoff]
+    fetch_bars_from_journal = filtered
+    try:
+        await main_from_journal(target_date)
+    finally:
+        fetch_bars_from_journal = orig
+
+
 if __name__ == "__main__":
     if "--from-journal" in sys.argv:
         args = [a for a in sys.argv[1:] if a != "--from-journal"]
         target = args[0] if args else datetime.now().strftime("%Y-%m-%d")
-        asyncio.run(main_from_journal(target))
+        win_filter = args[1] if len(args) > 1 else None
+        asyncio.run(main_from_journal_window(target, win_filter))
     else:
         target = sys.argv[1] if len(sys.argv) > 1 else "2026-05-15"
         start = sys.argv[2] if len(sys.argv) > 2 else "2026-04-01 00:00:00"
