@@ -272,7 +272,9 @@ def seed_position(runner: LiveStrategyRunner, qty: float, vwap: float, snapshot_
     from src.core.types import Position
     direction = "long" if qty > 0 else "short"
     abs_qty = abs(qty)
-    # Stop at 5% away — strategy will tighten on next update_stop tick
+    # Stop at 5% from VWAP — generous to avoid premature stop-out on the
+    # first journal bar. The strategy's update_stop will tighten on
+    # subsequent bars via the trail-ratchet logic.
     stop = vwap * 0.95 if direction == "long" else vwap * 1.05
     pos = Position(
         entry_price=vwap,
