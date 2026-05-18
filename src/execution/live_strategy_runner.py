@@ -507,6 +507,21 @@ class LiveStrategyRunner:
         if not self._matches_symbol(symbol):
             return []
         self._bar_count += 1
+        # Bar-input record — emit a single structured log line per incoming
+        # bar so the playback verifier can replay the EXACT bar stream this
+        # runner saw rather than whatever market.db ended up with after
+        # gap_repair / aggregator side-effects. The verifier greps the
+        # journal for ``runner_bar_seen session_id=<sid>`` and feeds those
+        # bars in order. Adds negligible overhead (one info-level log per
+        # 1m bar per active session = ≤6 lines/min in production).
+        logger.info(
+            "runner_bar_seen",
+            session_id=self.session_id,
+            symbol=symbol,
+            bar_ts=bar.timestamp.isoformat(),
+            open=bar.open, high=bar.high, low=bar.low, close=bar.close,
+            volume=bar.volume,
+        )
         # Session boundary check: force flat if new session started.
         # Strategies opting out of session-end-flat (intraday_max_long,
         # SWING strategies on 5m bars) also opt out of this gap-detected
