@@ -29,7 +29,7 @@ import sys
 import sqlite3
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ".")
@@ -216,26 +216,46 @@ def fetch_bars_from_journal(session_id: str, target_date: str) -> list[MinuteBar
 async def main_from_journal(target_date: str) -> None:
     """Exact-match mode: replay only the bars the LIVE runner actually saw
     (via the journal runner_bar_seen records). Given the same bar stream and
-    the same runner code, the playback's fills must equal LIVE's fills."""
+    the same runner code, the playback's fills must equal LIVE's fills.
+
+    Comparison is restricted to LIVE fills that fall WITHIN the journal's
+    recorded bar-timestamp range, so we don't penalise the playback for
+    pre-instrumentation fills it has no bars for."""
     sessions = discover_sessions()
-    print("=" * 110)
+    print("=" * 116)
     print(f"PLAYBACK FROM-JOURNAL  date={target_date}   "
-          f"(bars sourced from runner_bar_seen journal records)")
-    print("=" * 110)
-    print(f"{'session':45} {'sym':4} {'journal_bars':>12} {'bt':>5} {'live':>5}  verdict")
-    print("-" * 110)
+          f"(bars from runner_bar_seen records; comparison clamped to journal time range)")
+    print("=" * 116)
+    print(f"{'session':45} {'sym':4} {'bars':>5} {'window':>17} {'bt':>4} {'live_in_win':>11}  verdict")
+    print("-" * 116)
     for account_id, strategy, symbol, equity, sid in sessions:
         short = f"{account_id}/{strategy.split('/')[-1]}"
         bars = fetch_bars_from_journal(sid, target_date)
         if not bars:
-            print(f"{short:45} {symbol:4} {0:>12} (no journal records — needs runner instrumentation deployed)")
+            print(f"{short:45} {symbol:4} {0:>5} (no journal records — needs runner instrumentation deployed)")
             continue
+        win_start = bars[0].timestamp
+        win_end = bars[-1].timestamp
         runner = LiveStrategyRunner(
             session_id=sid, account_id=account_id, strategy_slug=strategy,
             symbol=symbol, equity_budget=equity, sizing_config=SIZING,
             execution_mode="paper",
         )
-        target_fills: list[tuple] = []
+        # Pre-warmup: hydrate indicator state + accumulate positions from
+        # market.db bars BEFORE the journal window. Without this, the cold-
+        # started runner has no indicators (RSI/EMA/ATR are 0) so its
+        # strategy decisions don't match LIVE's. Replay enough history to
+        # cover indicator lookbacks AND any LIVE position carried into the
+        # window from earlier in the day.
+        warmup_start = (win_start - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        warmup_end = (win_start - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        warmup_bars = fetch_1m_bars(symbol, warmup_start, warmup_end)
+        for bar in warmup_bars:
+            try:
+                await runner.on_bar_complete(symbol, bar)
+            except Exception:
+                continue
+        bt_fills: list[tuple] = []
         for bar in bars:
             try:
                 results = await runner.on_bar_complete(symbol, bar)
@@ -244,12 +264,21 @@ async def main_from_journal(target_date: str) -> None:
             for r in results or []:
                 if getattr(r, "fill_price", None) is None:
                     continue
-                if bar.timestamp.date().isoformat() == target_date:
-                    target_fills.append((bar.timestamp, r))
-        live = live_fills_on(account_id, strategy, symbol, target_date)
-        diff = len(target_fills) - len(live)
+                bt_fills.append((bar.timestamp, r))
+        # Clamp live fills to the journal time window so we compare like-with-like
+        all_live = live_fills_on(account_id, strategy, symbol, target_date)
+        live_in_win = []
+        for ts_s, side, price, qty, reason in all_live:
+            try:
+                tt = datetime.fromisoformat(ts_s.replace(" ", "T"))
+            except ValueError:
+                tt = datetime.strptime(ts_s[:19], "%Y-%m-%d %H:%M:%S")
+            if win_start <= tt <= win_end:
+                live_in_win.append((ts_s, side, price, qty, reason))
+        diff = len(bt_fills) - len(live_in_win)
         v = "MATCH" if diff == 0 else ("OFF-BY-1" if abs(diff) <= 1 else f"DIVERGE ({diff:+d})")
-        print(f"{short:45} {symbol:4} {len(bars):>12} {len(target_fills):>5} {len(live):>5}  {v}")
+        win_str = f"{win_start.strftime('%H:%M')}-{win_end.strftime('%H:%M')}"
+        print(f"{short:45} {symbol:4} {len(bars):>5} {win_str:>17} {len(bt_fills):>4} {len(live_in_win):>11}  {v}")
 
 
 if __name__ == "__main__":
