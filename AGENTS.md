@@ -23,6 +23,46 @@ dev script refuses to bind production ports as a safety net.
 
 ---
 
+## Next session pickup (2026-05-18 → 2026-05-19)
+
+**Run these two playback verification tools after market data has flowed for
+a few hours, then report results:**
+
+1. **Strict per-fill verification** — confirms every LIVE fill is consistent
+   with strategy-logic semantics. Already 6/6 MATCH (19/19 fills) as of
+   2026-05-18 23:40 CST.
+   ```
+   ssh netcup 'cd /home/openclaw/.openclaw/workspace/quant-engine \
+     && .venv/bin/python scripts/verify_strict.py YYYY-MM-DD'
+   ```
+
+2. **Journal-based bar-stream replay** — replays the exact bars the live
+   runner saw (recorded via `runner_bar_seen` + `runner_state_seen` log lines
+   added 2026-05-18) through the same `LiveStrategyRunner` code path. Reached
+   4–5/6 MATCH on small windows today (bounded by short instrumentation
+   history); expected to converge to 6/6 once 24+ hours of journal state
+   records have accumulated.
+   ```
+   ssh netcup 'cd /home/openclaw/.openclaw/workspace/quant-engine \
+     && .venv/bin/python scripts/verify_playback.py --from-journal YYYY-MM-DD [HH:MM]'
+   ```
+   The optional `HH:MM` arg trims the journal-bar replay to start AFTER that
+   wall-clock time so pre-window state records are available for exact
+   position + stop seeding.
+
+**Open follow-up from 2026-05-18 night**: the user observed many
+trailing-stop / re-entry signals overnight. Diagnosed as
+trend-following-in-chop whipsaw (TMF range 700pts in 3.5h, three reversals),
+not an infra bug. Pending: post-stop-out cooldown on
+`compounding_trend_long_mtf` and `donchian_trend_strength` (~30–60 min
+no-re-entry window). ~20-line patch per strategy: add `_last_stop_ts`
+instance var, set it in `update_stop` when emitting a closing order, gate
+`should_enter` on `(now - _last_stop_ts) >= cooldown_minutes`.
+
+See `docs/handoff/2026-05-18-overnight-paper-portfolio.md` for the full
+overnight handoff state and other deferred items (telegram bot-token leak,
+L0c subprocess isolation, coredump capture, etc.).
+
 ## Repository Layout
 ```
 src/
