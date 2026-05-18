@@ -213,6 +213,37 @@ def fetch_bars_from_journal(session_id: str, target_date: str) -> list[MinuteBar
     return bars
 
 
+def fetch_state_from_journal(session_id: str, target_date: str, win_start: datetime) -> list[dict] | None:
+    """Find the most recent runner_state_seen record at or before win_start
+    for this session on target_date. Returns the positions list (with exact
+    stop_level) or None if no state log was emitted (pre-instrumentation)."""
+    import json as _json
+    import subprocess
+    cmd = [
+        "journalctl", "--user", "-u", "quant-engine-api",
+        f"--since={target_date} 00:00:00",
+        f"--until={win_start.strftime('%Y-%m-%d %H:%M:%S')}",
+        "--no-pager", "--output=cat",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except Exception:
+        return None
+    latest: list[dict] | None = None
+    for line in proc.stdout.splitlines():
+        if "runner_state_seen" not in line or session_id not in line:
+            continue
+        try:
+            j = line[line.index("{"): line.rindex("}") + 1]
+            d = _json.loads(j)
+        except Exception:
+            continue
+        if d.get("event") != "runner_state_seen" or d.get("session_id") != session_id:
+            continue
+        latest = d.get("positions") or None
+    return latest
+
+
 def compute_position_at(session_id: str, win_start: datetime) -> tuple[float, float] | None:
     """Reconstruct LIVE's net position at win_start from live_fills history.
     Returns (signed_qty, vwap_entry_price) or None if flat."""
@@ -330,13 +361,31 @@ async def main_from_journal(target_date: str) -> None:
         # Flatten anything the warmup produced (it would otherwise contaminate
         # the journal-window comparison with BT-only positions).
         runner._engine._positions = []
-        # Position seeding: inject LIVE's actual net position at win_start
-        # so stop-checks during journal replay have something to act on.
-        pos_info = compute_position_at(sid, win_start)
-        if pos_info is not None:
-            net_qty, vwap = pos_info
-            # Use the first journal bar's open as the seed snapshot price.
-            seed_position(runner, net_qty, vwap, bars[0].open)
+        # Position seeding: prefer the runner_state_seen journal record
+        # (exact stop_level + pyramid level). Fall back to fills-based
+        # reconstruction (approximate stop_level) when no state record
+        # exists for this session yet.
+        from src.core.types import Position
+        state_positions = fetch_state_from_journal(sid, target_date, win_start)
+        if state_positions:
+            seeded = []
+            for p in state_positions:
+                seeded.append(Position(
+                    entry_price=float(p["entry_price"]),
+                    lots=float(p["lots"]),
+                    contract_type="large",
+                    stop_level=float(p["stop_level"]),
+                    pyramid_level=int(p.get("pyramid_level", 0)),
+                    entry_timestamp=win_start,
+                    direction=p["direction"],
+                    position_id=f"seed-{sid[:8]}",
+                ))
+            runner._engine._positions = seeded
+        else:
+            pos_info = compute_position_at(sid, win_start)
+            if pos_info is not None:
+                net_qty, vwap = pos_info
+                seed_position(runner, net_qty, vwap, bars[0].open)
         bt_fills: list[tuple] = []
         for bar in bars:
             try:

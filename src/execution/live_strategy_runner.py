@@ -522,6 +522,32 @@ class LiveStrategyRunner:
             open=bar.open, high=bar.high, low=bar.low, close=bar.close,
             volume=bar.volume,
         )
+        # Engine-state record — capture position list (entry_price, lots,
+        # direction, stop_level, pyramid_level) per bar so the playback
+        # verifier can seed runner state at any journal-window start with
+        # the EXACT stop_level LIVE was using (not a reconstructed
+        # approximation). Without this, seeded positions use a generous
+        # stop and the trailing_stop ratchet diverges from LIVE.
+        try:
+            _state = self._engine.get_state()
+            if _state.positions:
+                logger.info(
+                    "runner_state_seen",
+                    session_id=self.session_id,
+                    bar_ts=bar.timestamp.isoformat(),
+                    positions=[
+                        {
+                            "direction": p.direction,
+                            "entry_price": p.entry_price,
+                            "lots": p.lots,
+                            "stop_level": p.stop_level,
+                            "pyramid_level": p.pyramid_level,
+                        }
+                        for p in _state.positions
+                    ],
+                )
+        except Exception:
+            pass
         # Session boundary check: force flat if new session started.
         # Strategies opting out of session-end-flat (intraday_max_long,
         # SWING strategies on 5m bars) also opt out of this gap-detected
