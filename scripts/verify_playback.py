@@ -213,6 +213,80 @@ def fetch_bars_from_journal(session_id: str, target_date: str) -> list[MinuteBar
     return bars
 
 
+def compute_position_at(session_id: str, win_start: datetime) -> tuple[float, float] | None:
+    """Reconstruct LIVE's net position at win_start from live_fills history.
+    Returns (signed_qty, vwap_entry_price) or None if flat."""
+    conn = sqlite3.connect("data/trading.db")
+    cur = conn.execute(
+        "SELECT side, price, quantity FROM live_fills "
+        "WHERE session_id = ? AND timestamp < ? ORDER BY timestamp",
+        (session_id, win_start.strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    net = 0.0
+    long_cost = 0.0  # cumulative cost of currently-open long lots
+    short_cost = 0.0
+    for side, price, qty in cur.fetchall():
+        s = 1.0 if side == "buy" else -1.0
+        new_net = net + s * qty
+        # Crossing zero closes the prior side and opens the new side
+        if net == 0:
+            if s > 0:
+                long_cost = price * qty
+            else:
+                short_cost = price * qty
+        elif (net > 0 and s > 0) or (net < 0 and s < 0):
+            # Adding to existing side
+            if s > 0:
+                long_cost += price * qty
+            else:
+                short_cost += price * qty
+        else:
+            # Reducing
+            if new_net == 0:
+                long_cost = 0.0; short_cost = 0.0
+            elif (net > 0 and new_net > 0) or (net < 0 and new_net < 0):
+                # Proportional reduce
+                if net > 0:
+                    long_cost *= new_net / net
+                else:
+                    short_cost *= new_net / abs(net) if net != 0 else 1
+            else:
+                # Crossed zero AND flipped sides
+                if new_net > 0:
+                    long_cost = price * new_net
+                    short_cost = 0.0
+                else:
+                    short_cost = price * abs(new_net)
+                    long_cost = 0.0
+        net = new_net
+    if abs(net) < 1e-9:
+        return None
+    vwap = (long_cost if net > 0 else short_cost) / abs(net)
+    return (net, vwap)
+
+
+def seed_position(runner: LiveStrategyRunner, qty: float, vwap: float, snapshot_price: float) -> None:
+    """Inject a Position into the runner's engine to match LIVE state at win_start.
+    Uses a generous stop so the seeded position survives normal noise — actual
+    stop will be recomputed by the strategy's update_stop on the next bar."""
+    from src.core.types import Position
+    direction = "long" if qty > 0 else "short"
+    abs_qty = abs(qty)
+    # Stop at 5% away — strategy will tighten on next update_stop tick
+    stop = vwap * 0.95 if direction == "long" else vwap * 1.05
+    pos = Position(
+        entry_price=vwap,
+        lots=abs_qty,
+        contract_type="large",
+        stop_level=stop,
+        pyramid_level=0,
+        entry_timestamp=datetime.now(),
+        direction=direction,
+        position_id=f"seed-{runner.session_id[:8]}",
+    )
+    runner._engine._positions = [pos]
+
+
 async def main_from_journal(target_date: str) -> None:
     """Exact-match mode: replay only the bars the LIVE runner actually saw
     (via the journal runner_bar_seen records). Given the same bar stream and
@@ -241,12 +315,8 @@ async def main_from_journal(target_date: str) -> None:
             symbol=symbol, equity_budget=equity, sizing_config=SIZING,
             execution_mode="paper",
         )
-        # Pre-warmup: hydrate indicator state + accumulate positions from
-        # market.db bars BEFORE the journal window. Without this, the cold-
-        # started runner has no indicators (RSI/EMA/ATR are 0) so its
-        # strategy decisions don't match LIVE's. Replay enough history to
-        # cover indicator lookbacks AND any LIVE position carried into the
-        # window from earlier in the day.
+        # Pre-warmup: hydrate indicator state from market.db bars before
+        # the journal window so RSI/EMA/ATR/Donchian channels have history.
         warmup_start = (win_start - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
         warmup_end = (win_start - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
         warmup_bars = fetch_1m_bars(symbol, warmup_start, warmup_end)
@@ -255,6 +325,16 @@ async def main_from_journal(target_date: str) -> None:
                 await runner.on_bar_complete(symbol, bar)
             except Exception:
                 continue
+        # Flatten anything the warmup produced (it would otherwise contaminate
+        # the journal-window comparison with BT-only positions).
+        runner._engine._positions = []
+        # Position seeding: inject LIVE's actual net position at win_start
+        # so stop-checks during journal replay have something to act on.
+        pos_info = compute_position_at(sid, win_start)
+        if pos_info is not None:
+            net_qty, vwap = pos_info
+            # Use the first journal bar's open as the seed snapshot price.
+            seed_position(runner, net_qty, vwap, bars[0].open)
         bt_fills: list[tuple] = []
         for bar in bars:
             try:
