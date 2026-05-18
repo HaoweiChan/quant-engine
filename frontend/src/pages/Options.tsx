@@ -846,7 +846,7 @@ export function Options() {
   const [orderTarget, setOrderTarget] = useState<OrderTarget | null>(null);
   const [positions, setPositions] = useState<OptionPosition[]>([]);
   const [toast, setToast] = useState<{ message: string; type: "ok" | "error" } | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [, setSubmitting] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);

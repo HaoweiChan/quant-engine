@@ -366,13 +366,26 @@ class NightSessionLongEntry(EntryPolicy):
         if self._entered_this_session:
             return None
 
-        # Check DB-persisted entry guard (survives runner recreation)
+        # Check DB-persisted entry guard (survives runner recreation).
+        # Key is scoped by (session_id, session_key) so the guard expires
+        # at each new night-session boundary. Previously the key was just
+        # the long-lived TradingSession ID, so once the strategy entered
+        # ONCE, it could never enter again — silently skipping forever.
         try:
             from src.trading_session.store import SnapshotStore
             store = SnapshotStore()
-            guard_key = self._session_id or session_key.isoformat()
+            if self._session_id:
+                guard_key = f"{self._session_id}:{session_key.isoformat()}"
+            else:
+                guard_key = session_key.isoformat()
             if store.has_entry_guard(guard_key, "short_term/trend_following/night_session_long"):
                 self._entered_this_session = True
+                import structlog
+                structlog.get_logger().info(
+                    "night_session_long_skip_already_entered",
+                    guard_key=guard_key,
+                    session_key=session_key.isoformat(),
+                )
                 return None
         except Exception as e:
             # If DB check fails, log but continue (fail open for robustness)

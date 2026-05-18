@@ -1047,12 +1047,28 @@ class LiveStrategyRunner:
             self._fill_history.append(r)
             fill_pnl = 0.0
 
-            # Record entry guard for DB persistence (survives runner recreation)
+            # Record entry guard for DB persistence (survives runner recreation).
+            # Key is scoped by (session_id, session_date) so the guard expires
+            # at each trading-session boundary. Previously the key was just
+            # self.session_id which made the guard permanent — blocking the
+            # strategy after its very first entry forever (cf. night_session_long
+            # on TMF, ecc3f22b, entered 2026-05-04 and blocked for two weeks).
             if r.order.reason == "entry":
                 try:
+                    from datetime import time as _dt_time, timedelta as _timedelta
                     from src.trading_session.store import SnapshotStore
                     store = SnapshotStore()
-                    store.record_entry_guard(self.session_id, self.strategy_slug)
+                    now_tpe = datetime.now(_TAIPEI_TZ)
+                    # Night-session strategies roll the date at 15:00 TPE:
+                    # entries between 00:00-04:59 belong to the previous
+                    # calendar day's session. Day strategies always use today.
+                    is_night = "night_session" in self.strategy_slug
+                    if is_night and now_tpe.time() < _dt_time(5, 0):
+                        session_date = (now_tpe.date() - _timedelta(days=1)).isoformat()
+                    else:
+                        session_date = now_tpe.date().isoformat()
+                    guard_key = f"{self.session_id}:{session_date}"
+                    store.record_entry_guard(guard_key, self.strategy_slug)
                 except Exception as e:
                     logger.warning("entry_guard_record_failed", session_id=self.session_id, error=str(e))
 
