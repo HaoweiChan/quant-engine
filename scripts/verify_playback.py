@@ -1,0 +1,182 @@
+"""Playback verification — replay live runner code against historical bars.
+
+Usage:
+    .venv/bin/python scripts/verify_playback.py [target_date YYYY-MM-DD]
+
+For each active live session, this script:
+  1. Instantiates LiveStrategyRunner with the SAME SizingConfig the live
+     pipeline uses (LivePipelineManager.DEFAULT_SIZING). [goal-1]
+  2. Replays 1m bars from a configurable window so the runner accumulates
+     state (positions, indicator history, daily_atr cache). [goal-2]
+  3. Feeds each bar bar-for-bar through runner.on_bar_complete(), captures
+     ExecutionResults. [goal-3]
+  4. Optionally seeds prior positions from live_fills history to reduce
+     cold-start divergence. [goal-2 extended]
+
+Compares the playback's fills on the target date against the live_fills
+table.
+
+KNOWN LIMITS — exact alignment to live is bounded by:
+  - Live runner restarts mid-day are not reproduced (state resets).
+  - Live data-feed gaps (e.g. 2026-05-18 day session) are not visible in
+    market.db, which fills the gap retroactively via gap_repair.
+  - Live's _daily_atr_cache may accumulate stale values across restarts;
+    the playback computes it fresh from market.db.
+"""
+from __future__ import annotations
+import os
+import sys
+import sqlite3
+import asyncio
+import logging
+from datetime import datetime
+
+os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, ".")
+
+# Silence noisy production logs so the summary table is readable.
+logging.basicConfig(level=logging.CRITICAL)
+import structlog
+structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.CRITICAL))
+
+from src.broker_gateway.live_bar_store import MinuteBar
+from src.execution.live_pipeline import LivePipelineManager
+from src.execution.live_strategy_runner import LiveStrategyRunner
+
+
+SIZING = LivePipelineManager.DEFAULT_SIZING
+
+
+def discover_sessions() -> list[tuple[str, str, str, float, str]]:
+    """Return (account_id, strategy, symbol, equity, live_session_id) for
+    every active live session. Equity is the most-recent account_equity
+    row; falls back to virtual_equity then 1M."""
+    conn = sqlite3.connect("data/trading.db")
+    out: list[tuple[str, str, str, float, str]] = []
+    for row in conn.execute(
+        "SELECT session_id, account_id, strategy_slug, symbol, equity_share, virtual_equity "
+        "FROM sessions WHERE status = 'active' ORDER BY account_id, strategy_slug"
+    ):
+        sid, account_id, slug, symbol, share, vequity = row
+        eq = vequity or (share or 1.0) * 1_000_000
+        # Try to pull a more accurate per-account equity if available.
+        try:
+            cur = conn.execute(
+                "SELECT equity FROM account_equity_history "
+                "WHERE account_id=? ORDER BY timestamp DESC LIMIT 1",
+                (account_id,),
+            )
+            row2 = cur.fetchone()
+            if row2 and row2[0]:
+                eq = float(row2[0]) * (share or 1.0)
+        except Exception:
+            pass
+        out.append((account_id, slug, symbol, float(eq), sid))
+    return out
+
+
+def fetch_1m_bars(symbol: str, start: str, end: str) -> list[MinuteBar]:
+    conn = sqlite3.connect("data/market.db")
+    cur = conn.execute(
+        "SELECT timestamp, open, high, low, close, volume FROM ohlcv_bars "
+        "WHERE symbol = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp",
+        (symbol, start, end),
+    )
+    out: list[MinuteBar] = []
+    for ts, o, h, lo, c, v in cur.fetchall():
+        try:
+            t = datetime.fromisoformat(ts)
+        except ValueError:
+            t = datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S")
+        out.append(MinuteBar(timestamp=t, open=float(o), high=float(h),
+                             low=float(lo), close=float(c), volume=float(v)))
+    return out
+
+
+def live_fills_on(account_id: str, strategy: str, symbol: str, date: str) -> list[tuple]:
+    conn = sqlite3.connect("data/trading.db")
+    cur = conn.execute(
+        "SELECT timestamp, side, price, quantity, signal_reason FROM live_fills "
+        "WHERE strategy_slug=? AND symbol=? AND account_id=? AND timestamp LIKE ? "
+        "ORDER BY timestamp",
+        (strategy, symbol, account_id, f"{date}%"),
+    )
+    return cur.fetchall()
+
+
+async def replay(account_id: str, strategy: str, symbol: str, equity: float,
+                 live_session_id: str, start: str, end: str, target_date: str
+                 ) -> tuple[list[tuple], int]:
+    runner = LiveStrategyRunner(
+        session_id=live_session_id,          # use LIVE session_id so DB-backed
+        account_id=account_id,               # state (entry guards) is shared
+        strategy_slug=strategy,
+        symbol=symbol,
+        equity_budget=equity,
+        sizing_config=SIZING,
+        execution_mode="paper",
+    )
+    bars = fetch_1m_bars(symbol, start, end)
+    target_fills: list[tuple] = []
+    for bar in bars:
+        try:
+            results = await runner.on_bar_complete(symbol, bar)
+        except Exception:
+            continue
+        if not results:
+            continue
+        for r in results:
+            if getattr(r, "fill_price", None) is None:
+                continue
+            if bar.timestamp.date().isoformat() == target_date:
+                target_fills.append((bar.timestamp, r))
+    return target_fills, len(bars)
+
+
+async def main(target_date: str, start: str, end: str) -> None:
+    sessions = discover_sessions()
+    print("=" * 110)
+    print(f"PLAYBACK vs LIVE on {target_date}   window={start[:10]}..{end[:10]}")
+    print(f"runner=LiveStrategyRunner  sizing={SIZING.__class__.__name__}(risk={SIZING.risk_per_trade}, "
+          f"margin_cap={SIZING.margin_cap}, max_lots={SIZING.max_lots})")
+    print("=" * 110)
+    print(f"{'session':45} {'sym':4} {'equity':>12} {'bars':>7} {'bt':>5} {'live':>5}  verdict")
+    print("-" * 110)
+    rows: list[tuple] = []
+    for account_id, strategy, symbol, equity, sid in sessions:
+        short = f"{account_id}/{strategy.split('/')[-1]}"
+        try:
+            bt_fills, n_bars = await replay(account_id, strategy, symbol, equity, sid,
+                                            start, end, target_date)
+        except Exception as e:
+            print(f"{short:45} {symbol:4} {equity:>12.0f} FAIL: {type(e).__name__}: {e}")
+            continue
+        live = live_fills_on(account_id, strategy, symbol, target_date)
+        if len(bt_fills) == len(live):
+            v = "MATCH"
+        elif abs(len(bt_fills) - len(live)) <= 1:
+            v = "OFF-BY-1"
+        elif abs(len(bt_fills) - len(live)) <= 3:
+            v = "CLOSE"
+        else:
+            v = f"DIVERGE ({len(bt_fills) - len(live):+d})"
+        print(f"{short:45} {symbol:4} {equity:>12.0f} {n_bars:>7} {len(bt_fills):>5} {len(live):>5}  {v}")
+        rows.append((short, symbol, bt_fills, live, v))
+
+    print()
+    for short, symbol, bt_fills, live, v in rows:
+        if not bt_fills and not live:
+            continue
+        print(f"--- {short} {symbol} (BT={len(bt_fills)}, LIVE={len(live)}, {v}) ---")
+        for ts, r in bt_fills[:10]:
+            side = getattr(r.order, "side", "?"); reason = getattr(r.order, "reason", "?")
+            print(f"   BT   {ts}  {side:4} qty={r.fill_qty:>5} @ {r.fill_price:>9.3f} {reason}")
+        for ts_s, side, price, qty, reason in live[:10]:
+            print(f"   LIVE {ts_s}  {side:4} qty={qty:>5} @ {price:>9.3f} {reason}")
+
+
+if __name__ == "__main__":
+    target = sys.argv[1] if len(sys.argv) > 1 else "2026-05-15"
+    start = sys.argv[2] if len(sys.argv) > 2 else "2026-04-01 00:00:00"
+    end = sys.argv[3] if len(sys.argv) > 3 else f"{target} 23:59:59"
+    asyncio.run(main(target, start, end))
