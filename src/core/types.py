@@ -467,7 +467,7 @@ class InstrumentCostConfig:
     """Per-instrument default transaction cost configuration."""
 
     slippage_pct: float = 0.1  # 0.1% per side
-    commission_per_contract: float = 100.0  # NT$ per fill (MarketImpactFillModel charges this on both entry and exit fills, so round-trip cost = 2x this value)
+    commission_per_contract: float = 100.0  # NT$ round-trip per contract
     symbol: str = "TX"
 
     @property

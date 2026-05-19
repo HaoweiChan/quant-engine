@@ -729,14 +729,16 @@ def _build_runner(
     adapter = _get_adapter()
     merged = dict(strategy_params or {})
     # Use instrument defaults when caller doesn't provide explicit cost params
-    has_explicit_slippage = "slippage_bps" in merged
-    has_explicit_commission_bps = "commission_bps" in merged
     has_explicit_commission_fixed = "commission_fixed_per_contract" in merged
     slippage_bps = float(merged.pop("slippage_bps", cost_config.slippage_bps))
     commission_bps = float(merged.pop("commission_bps", cost_config.commission_bps))
-    commission_fixed = float(merged.pop(
-        "commission_fixed_per_contract", cost_config.commission_per_contract
-    ))
+    if has_explicit_commission_fixed:
+        commission_fixed = float(merged.pop("commission_fixed_per_contract"))
+    else:
+        # InstrumentCostConfig stores the documented round-trip commission.
+        # MarketImpactFillModel charges once per fill/side, so pass half to
+        # keep backtest costs aligned with paper/live PaperExecutor.
+        commission_fixed = cost_config.commission_per_contract / 2.0
     # Spread strategies: override cost model (4 legs, fixed per-fill cost)
     if spread_meta and fill_model is None:
         cost_per_fill = spread_meta.get("spread_cost_per_fill", 700.0)
@@ -988,7 +990,10 @@ def _build_cache_key(
     # Use instrument cost defaults when not explicitly provided (matches _build_runner)
     cost_config = get_instrument_cost_config(symbol)
     _slip_bps = _sp.get("slippage_bps", cost_config.slippage_bps)
-    _comm_fixed = _sp.get("commission_fixed_per_contract", cost_config.commission_per_contract)
+    _comm_fixed = _sp.get(
+        "commission_fixed_per_contract",
+        cost_config.commission_per_contract / 2.0,
+    )
     # Always generate cost_note so frontend can display costs
     cost_note = f"sbps={_slip_bps}|cfix={_comm_fixed}"
     _p_str = _normalize_params_for_hash(_sp)
@@ -2116,7 +2121,10 @@ def run_sweep_for_mcp(
         # Include cost info in notes so frontend can display it
         _sweep_cost_config = get_instrument_cost_config(symbol)
         _sweep_slip_bps = clamped_base.get("slippage_bps", _sweep_cost_config.slippage_bps)
-        _sweep_comm_fixed = clamped_base.get("commission_fixed_per_contract", _sweep_cost_config.commission_per_contract)
+        _sweep_comm_fixed = clamped_base.get(
+            "commission_fixed_per_contract",
+            _sweep_cost_config.commission_per_contract / 2.0,
+        )
         _sweep_cost_note = f"sbps={_sweep_slip_bps}|cfix={_sweep_comm_fixed}"
         _sweep_tf_note = f"tf={_sweep_tf_str}" if _sweep_tf_str else None
         _sweep_notes = "; ".join(filter(None, [_sweep_cost_note, _sweep_tf_note]))

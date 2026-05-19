@@ -326,13 +326,20 @@ class LivePipelineManager:
                 if sid in self._runners:
                     continue
                 try:
-                    effective_eq = self._sm.get_effective_equity(sid)
-                    if effective_eq is None or effective_eq <= 0:
-                        effective_eq = session.virtual_equity
-                    if (effective_eq is None or effective_eq <= 0) and session.portfolio_id:
+                    # Paper portfolios own their own seed capital. Prefer
+                    # portfolio.initial_equity × equity_share before asking the
+                    # broker/account gateway; otherwise a paper portfolio on a
+                    # live account can accidentally size from real account
+                    # equity or stale per-session virtual_equity.
+                    effective_eq = None
+                    if session.portfolio_id:
                         effective_eq = self._portfolio_share_equity(
                             session.portfolio_id, session.equity_share or 1.0,
                         )
+                    if effective_eq is None or effective_eq <= 0:
+                        effective_eq = self._sm.get_effective_equity(sid)
+                    if effective_eq is None or effective_eq <= 0:
+                        effective_eq = session.virtual_equity
                     if effective_eq is None or effective_eq <= 0:
                         effective_eq = (session.equity_share or 1.0) * 1_000_000
                     runner = LiveStrategyRunner(
@@ -341,6 +348,7 @@ class LivePipelineManager:
                         strategy_slug=session.strategy_slug,
                         symbol=session.symbol,
                         equity_budget=effective_eq,
+                        equity_share=session.equity_share or 1.0,
                         sizing_config=self._sizing_config,
                         sizer=self._portfolio_sizer,
                         bar_router=self._bar_router,
@@ -519,6 +527,7 @@ class LivePipelineManager:
                 )
             is_session_close = result.order.reason == "session_close"
             pnl_realized = result.metadata.get("realized_pnl", 0.0)
+            commission = float(result.metadata.get("commission", 0.0) or 0.0)
 
             # Persist fill to database
             try:
@@ -531,7 +540,7 @@ class LivePipelineManager:
                     side=result.order.side,
                     price=result.fill_price,
                     quantity=int(result.fill_qty),
-                    fee=0.0,
+                    fee=commission,
                     pnl_realized=pnl_realized,
                     is_session_close=is_session_close,
                     signal_reason=result.order.reason or "",
@@ -555,7 +564,7 @@ class LivePipelineManager:
                     "quantity": int(result.fill_qty),
                     "expected_price": result.expected_price,
                     "slippage_bps": result.slippage_bps,
-                    "fee": 0.0,
+                    "fee": commission,
                     "pnl_realized": pnl_realized,
                     "is_session_close": is_session_close,
                     "signal_reason": result.order.reason,
@@ -656,10 +665,6 @@ class LivePipelineManager:
             close_min = now.replace(hour=13, minute=44, second=0, microsecond=0)
         else:
             close_min = now.replace(hour=4, minute=59, second=0, microsecond=0)
-        synthetic_bar = MinuteBar(
-            timestamp=close_min,
-            open=0.0, high=0.0, low=0.0, close=0.0, volume=0,
-        )
         for sid, runner in self.iter_runners():
             # Strategies that declare ``force_flat_at_session_end=False`` in
             # their META manage their own end-of-session lifecycle (e.g.
@@ -676,6 +681,26 @@ class LivePipelineManager:
                     strategy=runner.strategy_slug,
                 )
                 continue
+            close_price = (
+                float(getattr(runner, "_last_bar_close", 0.0) or 0.0)
+                or float(getattr(getattr(runner, "_executor", None), "_current_price", 0.0) or 0.0)
+            )
+            if close_price <= 0:
+                logger.warning(
+                    "force_flat_timer_skipped_no_price",
+                    session_id=sid,
+                    strategy=runner.strategy_slug,
+                    ts=close_min.isoformat(),
+                )
+                continue
+            synthetic_bar = MinuteBar(
+                timestamp=close_min,
+                open=close_price,
+                high=close_price,
+                low=close_price,
+                close=close_price,
+                volume=0,
+            )
             try:
                 results = await runner._force_flat(synthetic_bar)
                 if results:
@@ -707,6 +732,8 @@ class LivePipelineManager:
         except Exception:
             return None
         if portfolio is None or not portfolio.initial_equity:
+            return None
+        if portfolio.mode != "paper":
             return None
         return float(portfolio.initial_equity) * float(equity_share)
 

@@ -18,7 +18,10 @@ import pytest
 
 from src.broker_gateway.live_bar_store import MinuteBar
 from src.core.sizing import SizingConfig
-from src.execution.live_strategy_runner import LiveStrategyRunner
+from src.execution.live_strategy_runner import (
+    LiveStrategyRunner,
+    _force_flat_enabled_for_strategy,
+)
 
 
 _TZ = timezone(timedelta(hours=8))
@@ -88,10 +91,26 @@ def test_force_flat_defaults_follow_strategy_holding_period():
         equity_budget=1_000_000.0,
         execution_mode="paper",
     )
+    compounding_runner = LiveStrategyRunner(
+        session_id="compounding-test",
+        account_id="acct",
+        strategy_slug="swing/trend_following/compounding_trend_long_mtf",
+        symbol="TMF",
+        equity_budget=1_000_000.0,
+        execution_mode="paper",
+    )
 
     assert intraday_runner.force_flat_at_session_end is True
     assert medium_runner.force_flat_at_session_end is False
     assert swing_runner.force_flat_at_session_end is False
+    assert compounding_runner.force_flat_at_session_end is False
+
+
+def test_force_flat_true_cannot_override_swing_holding_period():
+    assert _force_flat_enabled_for_strategy(
+        "swing/trend_following/vol_managed_bnh",
+        {"force_flat_at_session_end": True},
+    ) is False
 
 
 async def test_full_session_flow(runner: LiveStrategyRunner):

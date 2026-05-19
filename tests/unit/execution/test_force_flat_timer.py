@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from datetime import datetime, time as dt_time, timedelta, timezone
 
+import pytest
+
 from src.execution.live_pipeline import (
     LivePipelineManager,
     _DAY_FORCE_FLAT_TIME,
@@ -75,3 +77,28 @@ def test_next_force_flat_at_at_exact_boundary_picks_next_slot() -> None:
     next_at = LivePipelineManager._next_force_flat_at(now)
     assert next_at.time() == dt_time(13, 44, 30)
     assert next_at.date() == now.date()
+
+
+@pytest.mark.asyncio
+async def test_force_flat_timer_uses_last_price_for_synthetic_bar() -> None:
+    """The safety-net bar must have a positive close or MarketSnapshot rejects it."""
+    seen = {}
+
+    class Runner:
+        session_id = "sid"
+        strategy_slug = "short_term/trend_following/night_session_long"
+        force_flat_at_session_end = True
+        _last_bar_close = 20_123.0
+        _executor = None
+
+        async def _force_flat(self, bar):
+            seen["bar"] = bar
+            return []
+
+    mgr = object.__new__(LivePipelineManager)
+    mgr.iter_runners = lambda: [("sid", Runner())]  # type: ignore[method-assign]
+
+    await mgr._fire_force_flat()
+
+    assert seen["bar"].close == 20_123.0
+    assert seen["bar"].open == 20_123.0

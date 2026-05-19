@@ -319,3 +319,62 @@ class TestPipelineWiresNotifyCallback:
         # _notify_fills onto the runner so router-fed eval fan-outs to
         # the same persist+blotter+Telegram path as the per-1m path.
         assert runner._notify_callback == mgr._notify_fills  # noqa: SLF001
+
+    def test_sync_prefers_paper_portfolio_seed_equity(self) -> None:
+        from datetime import datetime
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+
+        from src.execution.live_pipeline import LivePipelineManager
+        from src.trading_session.session import TradingSession
+
+        sess = TradingSession(
+            session_id="sid-seed",
+            account_id="acct-1",
+            strategy_slug="medium_term/trend_following/donchian_trend_strength",
+            symbol="TMF",
+            status="active",
+            started_at=datetime(2026, 5, 19, 9, 0),
+            initial_equity=0.0,
+            peak_equity=0.0,
+            equity_share=0.25,
+            virtual_equity=7_000_000.0,
+            portfolio_id="portfolio-1",
+        )
+        sm = MagicMock()
+        sm.get_all_sessions.return_value = [sess]
+        sm.get_session.return_value = sess
+        sm.get_effective_equity.return_value = 9_000_000.0
+        portfolio_store = MagicMock()
+        portfolio_store.get.return_value = SimpleNamespace(
+            portfolio_id="portfolio-1",
+            mode="paper",
+            initial_equity=500_000.0,
+        )
+
+        created = {}
+
+        class FakeRunner:
+            def __init__(self, **kwargs):
+                created.update(kwargs)
+                self._notify_callback = None
+                self.strategy_slug = kwargs["strategy_slug"]
+                self.symbol = kwargs["symbol"]
+                self._on_resampled_bar = lambda *_a, **_k: None
+
+            def set_notify_callback(self, callback):
+                self._notify_callback = callback
+
+        mgr = LivePipelineManager(
+            session_manager=sm,
+            bar_store=MagicMock(),
+            equity_store=MagicMock(),
+            portfolio_store=portfolio_store,
+        )
+        with patch("src.execution.live_pipeline.LiveStrategyRunner", FakeRunner), \
+             patch.object(mgr, "_warmup_runner", lambda r: None), \
+             patch.object(mgr, "_maybe_register_spread_builder", lambda *_a, **_k: None):
+            mgr.sync()
+
+        assert created["equity_budget"] == 125_000.0
+        assert created["equity_share"] == 0.25

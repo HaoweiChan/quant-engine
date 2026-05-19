@@ -30,12 +30,17 @@ class PaperExecutor(ExecutionEngine):
         available_margin: float = float("inf"),
         margin_per_lot: float = 184_000.0,
         commission_per_contract_per_side: float = 0.0,
+        slippage_bps: float | None = None,
     ) -> None:
         super().__init__()
         self._slippage_points = slippage_points
         self._current_price = current_price
         self._available_margin = available_margin
         self._margin_per_lot = margin_per_lot
+        # Optional percent-of-price slippage for live/backtest parity. When
+        # provided it takes precedence over the legacy fixed-points model and
+        # matches MarketImpactFillModel's spread_bps fallback.
+        self._slippage_bps = slippage_bps
         # Stored as NT dollars per contract per side. Caller passes
         # `instrument_cost_config.commission_per_contract / 2` to convert
         # the round-trip number to a per-side number, since each fill is
@@ -96,12 +101,16 @@ class PaperExecutor(ExecutionEngine):
                     rejection_reason="insufficient_margin",
                 )
 
-        # Simulate fill with adverse slippage
+        # Simulate fill with adverse slippage.
         expected = self._current_price
-        if order.side == "buy":
-            fill_price = expected + self._slippage_points
+        if self._slippage_bps is not None:
+            slippage_points = abs(expected) * self._slippage_bps / 10_000.0
         else:
-            fill_price = expected - self._slippage_points
+            slippage_points = self._slippage_points
+        if order.side == "buy":
+            fill_price = expected + slippage_points
+        else:
+            fill_price = expected - slippage_points
         slippage = fill_price - expected
         # Per-fill commission in NT dollars. Recorded under metadata so
         # callers can sum it across results without re-deriving the cost
@@ -109,9 +118,14 @@ class PaperExecutor(ExecutionEngine):
         # this directly to MarketImpactFillModel's commission.
         commission_nt = order.lots * self._commission_per_contract_per_side
 
+        slippage_bps = 0.0
+        if expected:
+            slippage_bps = abs(slippage) / abs(expected) * 10_000.0
+
         return ExecutionResult(
             order=order, status="filled",
             fill_price=fill_price, expected_price=expected,
             slippage=slippage, fill_qty=order.lots, remaining_qty=0.0,
             metadata={"commission": commission_nt},
+            slippage_bps=slippage_bps,
         )

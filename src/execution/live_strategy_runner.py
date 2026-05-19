@@ -52,6 +52,32 @@ def _parse_hhmm_to_minutes(value: Any) -> int | None:
     return h * 60 + m
 
 
+def _force_flat_enabled_for_strategy(strategy_slug: str, meta: dict[str, Any]) -> bool:
+    """Return live session-close behavior using the backtest holding rule.
+
+    The invariant is holding-period driven: only intraday strategies may be
+    force-flattened at TAIFEX session boundaries. ``force_flat_at_session_end``
+    can opt an intraday strategy out (for special day-trade handling), but it
+    cannot opt a medium/swing strategy into session-close liquidation.
+    """
+    from src.strategies.registry import is_intraday_strategy
+
+    intraday = is_intraday_strategy(strategy_slug)
+    explicit = meta.get("force_flat_at_session_end")
+    if not intraday:
+        if explicit is True:
+            logger.warning(
+                "live_runner_ignored_non_intraday_force_flat_true",
+                strategy=strategy_slug,
+                note=(
+                    "session-close flattening is driven by stop_architecture; "
+                    "non-intraday strategies must carry across sessions"
+                ),
+            )
+        return False
+    return explicit is not False
+
+
 class LiveStrategyRunner:
     """Drives a single strategy session: receives completed bars, evaluates
     the PositionEngine, and executes paper orders.
@@ -66,6 +92,7 @@ class LiveStrategyRunner:
         strategy_slug: str,
         symbol: str,
         equity_budget: float,
+        equity_share: float = 1.0,
         strategy_params: dict[str, Any] | None = None,
         sizing_config: SizingConfig | None = None,
         sizer: PortfolioSizer | None = None,
@@ -102,6 +129,7 @@ class LiveStrategyRunner:
         self.strategy_slug = strategy_slug
         self.symbol = symbol
         self._equity_budget = equity_budget
+        self._equity_share = equity_share
         self._realized_pnl = 0.0
         self._fill_history: list[ExecutionResult] = []
         self._last_bar_ts: datetime | None = None
@@ -153,16 +181,13 @@ class LiveStrategyRunner:
         # holding-period semantics: intraday strategies flatten, swing/medium
         # strategies carry. A strategy may still explicitly override this in
         # STRATEGY_META, e.g. intraday_max_long keeps half past session close.
-        from src.strategies.registry import get_info, is_intraday_strategy
+        from src.strategies.registry import get_info
         try:
             _info = get_info(strategy_slug)
             _meta = _info.meta or {}
         except Exception:
             _meta = {}
-        _default_force_flat = is_intraday_strategy(strategy_slug)
-        self._meta_force_flat: bool = bool(
-            _meta.get("force_flat_at_session_end", _default_force_flat)
-        )
+        self._meta_force_flat = _force_flat_enabled_for_strategy(strategy_slug, _meta)
         self._meta_daytrade: bool = bool(_meta.get("daytrade", False))
         self._meta_half_exit_at_min: int | None = _parse_hhmm_to_minutes(
             _meta.get("half_exit_at"),
@@ -379,10 +404,8 @@ class LiveStrategyRunner:
             if isinstance(intraday_margin, (int, float)) and intraday_margin > 0:
                 paper_margin = float(intraday_margin)
             executor: _AnyExecutor = PaperExecutor(
-                slippage_points=(
-                    cost.slippage_bps * specs.point_value / 10000
-                    if cost.slippage_bps else 1.0
-                ),
+                slippage_points=0.0 if cost.slippage_bps else 1.0,
+                slippage_bps=cost.slippage_bps if cost.slippage_bps else None,
                 current_price=0.0,
                 available_margin=self._equity_budget,
                 margin_per_lot=paper_margin,
@@ -1052,41 +1075,79 @@ class LiveStrategyRunner:
         return sum(trs) / len(trs)
 
     @staticmethod
-    def _compute_daily_atr(symbol: str, day, lookback: int = 14) -> float:
+    def _compute_daily_atr(symbol: str, day, lookback: int = 14, db_path=None) -> float:
         """Return the mean True Range over the last ``lookback`` TAIFEX
-        trading days, aggregated from 1h bars in market.db.
+        trading days, aggregated from market.db OHLC bars.
 
         market.db has no daily table — only ohlcv_bars (1m), ohlcv_5m,
         ohlcv_1h. Earlier versions queried a non-existent
         ``timeframe_minutes=1440`` filter and silently fell back to
         100.0, which pinned trail stops to ~70 pts and caused every
-        donchian entry to exit on the very next 1m bar. Aggregate from
-        ohlcv_1h grouped by TAIFEX ``trading_day()`` so weekend gaps
-        and the night-spans-midnight quirk are handled correctly.
+        donchian entry to exit on the very next 1m bar.
+
+        Prefer 1h rows for speed, but fall back to 5m and then 1m rows.
+        This matters in live: the 1m table can be current while derived
+        aggregation tables are stale or empty after a restart.
         """
         import sqlite3
         from pathlib import Path
 
-        db_path = Path(__file__).resolve().parent.parent.parent / "data" / "market.db"
+        if db_path is None:
+            db_path = Path(__file__).resolve().parent.parent.parent / "data" / "market.db"
+        else:
+            db_path = Path(db_path)
         if not db_path.exists():
             return 100.0
         conn = sqlite3.connect(str(db_path))
         try:
-            # Pull enough 1h bars to cover ~lookback * 2 trading days.
-            # A TAIFEX trading day spans ~19 hours of bars, so ~50/day
-            # is a safe upper bound after weekends/holidays.
-            rows = conn.execute(
-                """
-                SELECT timestamp, high, low, close FROM ohlcv_1h
-                WHERE symbol = ? AND date(timestamp) <= date(?)
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (symbol, day.isoformat(), lookback * 50),
-            ).fetchall()
+            table_limits = (
+                ("ohlcv_1h", lookback * 50),
+                ("ohlcv_5m", lookback * 600),
+                ("ohlcv_bars", lookback * 3_000),
+            )
+            for table, limit in table_limits:
+                exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if not exists:
+                    continue
+                rows = conn.execute(
+                    f"""
+                    SELECT timestamp, high, low, close FROM {table}
+                    WHERE symbol = ? AND date(timestamp) <= date(?)
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                    """,
+                    (symbol, day.isoformat(), limit),
+                ).fetchall()
+                if LiveStrategyRunner._row_trading_day_count(rows) >= 2:
+                    return LiveStrategyRunner._atr_from_hourly_rows(rows, lookback)
         finally:
             conn.close()
-        return LiveStrategyRunner._atr_from_hourly_rows(rows, lookback)
+        logger.warning(
+            "live_runner_daily_atr_fallback_100",
+            symbol=symbol,
+            day=day.isoformat(),
+            lookback=lookback,
+            note="no usable OHLC rows in ohlcv_1h/ohlcv_5m/ohlcv_bars",
+        )
+        return 100.0
+
+    @staticmethod
+    def _row_trading_day_count(rows: list[tuple[str, float, float, float]]) -> int:
+        """Count distinct TAIFEX trading days represented in OHLC rows."""
+        from datetime import datetime
+
+        from src.data.session_utils import trading_day
+
+        days = set()
+        for ts_str, *_ in rows:
+            try:
+                days.add(trading_day(datetime.fromisoformat(ts_str)))
+            except Exception:
+                continue
+        return len(days)
 
     def _make_account(self, snapshot: MarketSnapshot) -> AccountState:
         state = self._engine.get_state()
@@ -1115,6 +1176,7 @@ class LiveStrategyRunner:
                 continue
             self._fill_history.append(r)
             fill_pnl = 0.0
+            commission = float((r.metadata or {}).get("commission", 0.0) or 0.0)
 
             # Record entry guard for DB persistence (survives runner recreation).
             # Key is scoped by (session_id, session_date) so the guard expires
@@ -1150,10 +1212,15 @@ class LiveStrategyRunner:
                         fill_pnl = (r.fill_price - entry_price) * r.fill_qty * pv
                     else:  # Closing a short
                         fill_pnl = (entry_price - r.fill_price) * r.fill_qty * pv
-                    self._realized_pnl += fill_pnl
-                # Store realized PnL in result metadata for notifications
-                r.metadata["realized_pnl"] = fill_pnl
                 r.metadata["entry_price"] = entry_price
+            if commission:
+                fill_pnl -= commission
+            self._realized_pnl += fill_pnl
+            # Store realized PnL in result metadata for notifications and DB
+            # persistence. Entries show their commission as a small realized
+            # cost, matching BacktestRunner's per-fill accounting.
+            r.metadata["realized_pnl"] = fill_pnl
+            r.metadata["commission"] = commission
             logger.info(
                 "live_fill",
                 session_id=self.session_id,
@@ -1163,6 +1230,7 @@ class LiveStrategyRunner:
                 slippage=r.slippage,
                 reason=r.order.reason,
                 realized_pnl=fill_pnl,
+                commission=commission,
             )
 
             # Log to activity log for portfolio/strategy tracking

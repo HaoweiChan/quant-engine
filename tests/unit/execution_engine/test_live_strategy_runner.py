@@ -9,7 +9,13 @@ Assertions:
 from __future__ import annotations
 
 import inspect
+import sqlite3
+from datetime import date
+from datetime import datetime
 
+from src.broker_gateway.live_bar_store import MinuteBar
+from src.core.types import Order
+from src.execution.engine import ExecutionResult
 from src.execution import live_strategy_runner as runner_module
 
 
@@ -76,6 +82,31 @@ class TestDailyAtrFromHourlyRows:
         atr = runner_module.LiveStrategyRunner._atr_from_hourly_rows(rows, lookback=14)
         assert atr == 250.0
 
+    def test_compute_daily_atr_falls_back_to_1m_when_1h_missing(self, tmp_path) -> None:
+        """Live ATR must not return 100.0 just because derived 1h bars are stale.
+
+        The live bar store updates ``ohlcv_bars`` first; aggregation tables can
+        lag. This pins the May-2026 failure mode where a missing derived table
+        quietly tightened ATR stops to 70 points.
+        """
+        db_path = tmp_path / "market.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE ohlcv_bars (symbol TEXT, timestamp TEXT, high REAL, low REAL, close REAL)"
+        )
+        rows = [
+            ("TMF", "2026-05-10 10:00:00", 20100.0, 20000.0, 20050.0),
+            ("TMF", "2026-05-11 10:00:00", 20300.0, 20050.0, 20250.0),
+        ]
+        conn.executemany("INSERT INTO ohlcv_bars VALUES (?, ?, ?, ?, ?)", rows)
+        conn.commit()
+        conn.close()
+
+        atr = runner_module.LiveStrategyRunner._compute_daily_atr(
+            "TMF", date(2026, 5, 11), lookback=14, db_path=db_path,
+        )
+        assert atr == 250.0
+
 
 class TestAddSizerWired:
     def test_runner_attaches_add_sizer_via_init(self) -> None:
@@ -92,3 +123,59 @@ class TestAddSizerWired:
             "LiveStrategyRunner.__init__ must call _attach_add_sizer so live "
             "runs resolve exposure_multiplier metadata."
         )
+
+
+class TestLiveRunnerPnlAccounting:
+    def test_process_fills_deducts_executor_commission(self, monkeypatch) -> None:
+        class _NoopActivityLogger:
+            def log_trade(self, **_kwargs) -> None:
+                return None
+
+        monkeypatch.setattr(
+            "src.trading_session.store.ActivityLogger",
+            lambda: _NoopActivityLogger(),
+        )
+        runner = runner_module.LiveStrategyRunner(
+            session_id="pnl-test",
+            account_id="acct",
+            strategy_slug="medium_term/trend_following/donchian_trend_strength",
+            symbol="TMF",
+            equity_budget=500_000.0,
+            execution_mode="paper",
+        )
+        snapshot = runner._bar_to_snapshot(
+            MinuteBar(
+                timestamp=datetime(2026, 5, 19, 10, 0),
+                open=20_100.0,
+                high=20_100.0,
+                low=20_100.0,
+                close=20_100.0,
+                volume=100,
+            )
+        )
+        order = Order(
+            order_type="market",
+            side="sell",
+            symbol="TMF",
+            contract_type="large",
+            lots=2,
+            price=None,
+            stop_price=None,
+            reason="trailing_stop",
+            metadata={"entry_price": 20_000.0},
+        )
+        result = ExecutionResult(
+            order=order,
+            status="filled",
+            fill_price=20_100.0,
+            expected_price=20_100.0,
+            slippage=0.0,
+            fill_qty=2,
+            remaining_qty=0.0,
+            metadata={"commission": 40.0},
+        )
+
+        runner._process_fills([result], snapshot)
+
+        assert result.metadata["realized_pnl"] == 1_960.0
+        assert runner._realized_pnl == 1_960.0

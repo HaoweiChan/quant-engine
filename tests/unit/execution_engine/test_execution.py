@@ -37,6 +37,18 @@ class TestPaperExecutor:
         assert results[0].slippage == -2.0
 
     @pytest.mark.asyncio
+    async def test_bps_slippage_matches_backtest_spread_model(self) -> None:
+        executor = PaperExecutor(
+            slippage_points=99.0,
+            slippage_bps=1.0,
+            current_price=20000.0,
+        )
+        results = await executor.execute([_make_order("buy")])
+        assert results[0].fill_price == 20002.0
+        assert results[0].slippage == 2.0
+        assert results[0].slippage_bps == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
     async def test_empty_orders(self) -> None:
         executor = PaperExecutor(current_price=20000.0)
         results = await executor.execute([])
