@@ -63,6 +63,37 @@ def test_runner_meta_loaded_from_strategy(runner: LiveStrategyRunner):
     assert runner.force_flat_at_session_end is False
 
 
+def test_force_flat_defaults_follow_strategy_holding_period():
+    intraday_runner = LiveStrategyRunner(
+        session_id="night-session-test",
+        account_id="acct",
+        strategy_slug="short_term/trend_following/night_session_long",
+        symbol="TMF",
+        equity_budget=1_000_000.0,
+        execution_mode="paper",
+    )
+    medium_runner = LiveStrategyRunner(
+        session_id="donchian-test",
+        account_id="acct",
+        strategy_slug="medium_term/trend_following/donchian_trend_strength",
+        symbol="TMF",
+        equity_budget=1_000_000.0,
+        execution_mode="paper",
+    )
+    swing_runner = LiveStrategyRunner(
+        session_id="vol-bnh-test",
+        account_id="acct",
+        strategy_slug="swing/trend_following/vol_managed_bnh",
+        symbol="TMF",
+        equity_budget=1_000_000.0,
+        execution_mode="paper",
+    )
+
+    assert intraday_runner.force_flat_at_session_end is True
+    assert medium_runner.force_flat_at_session_end is False
+    assert swing_runner.force_flat_at_session_end is False
+
+
 async def test_full_session_flow(runner: LiveStrategyRunner):
     # 08:50 entry — full position, daytrade-flagged
     res = await runner.on_bar_complete("TX", _bar(8, 50, close=20_005.0))
