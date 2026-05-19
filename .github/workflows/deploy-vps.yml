@@ -1,0 +1,168 @@
+name: Deploy VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      force_session:
+        description: "Deploy even during an active TAIFEX session"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quant-vps-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy main to quant-vps
+    runs-on:
+      - self-hosted
+      - quant-vps
+    timeout-minutes: 30
+    env:
+      DEPLOY_DIR: /home/openclaw/.openclaw/workspace/quant-engine
+      SERVICE_NAME: quant-engine-api
+      TAILSCALE_URL: https://quant-vps.taild2baa3.ts.net
+      FORCE_SESSION: ${{ github.event_name == 'workflow_dispatch' && inputs.force_session || false }}
+
+    steps:
+      - name: Refuse active TAIFEX session
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$FORCE_SESSION" = "true" ]; then
+            echo "force_session=true; skipping TAIFEX session guard."
+            exit 0
+          fi
+          HHMM=$((10#$(TZ=Asia/Taipei date +%H%M)))
+          in_session=0
+          if [ "$HHMM" -ge 845 ] && [ "$HHMM" -le 1345 ]; then in_session=1; fi
+          if [ "$HHMM" -ge 1500 ] || [ "$HHMM" -le 500 ]; then in_session=1; fi
+          if [ "$in_session" = "1" ]; then
+            printf 'Refusing to deploy during active TAIFEX session (%04d TPE).\n' "$HHMM" >&2
+            exit 1
+          fi
+
+      - name: Audit current VPS checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          audit_dir="data/deploy-audit/$(TZ=Asia/Taipei date +%Y%m%d-%H%M%S)-${GITHUB_SHA:0:7}"
+          mkdir -p "$audit_dir"
+          git status --porcelain=v1 > "$audit_dir/status-pre.txt"
+          git rev-parse HEAD > "$audit_dir/head-pre.txt"
+          git diff > "$audit_dir/tracked-diff-pre.patch" || true
+          if [ -s "$audit_dir/tracked-diff-pre.patch" ]; then
+            echo "::warning::Tracked VPS diff archived to $audit_dir/tracked-diff-pre.patch before reset."
+          fi
+          echo "audit_dir=$audit_dir" >> "$GITHUB_ENV"
+
+      - name: Check out exact main SHA in deploy directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          git fetch --prune origin +refs/heads/main:refs/remotes/origin/main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "origin/main ($(git rev-parse origin/main)) does not match workflow SHA ($GITHUB_SHA)." >&2
+            exit 1
+          fi
+          git reset --hard "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Install backend and build frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          "$HOME/.local/bin/uv" pip install --python .venv/bin/python -e . --quiet
+          cd frontend
+          npm ci --include=optional
+          if [ ! -d node_modules/@rolldown/binding-linux-x64-gnu ]; then
+            binding_version="$(node -p "require('./package-lock.json').packages['node_modules/@rolldown/binding-linux-x64-gnu'].version")"
+            npm install --no-save --package-lock=false "@rolldown/binding-linux-x64-gnu@$binding_version"
+          fi
+          npm run build
+          npx playwright install chromium
+
+      - name: Restart API service
+        shell: bash
+        run: |
+          set -euo pipefail
+          pre_pid="$(systemctl --user show "$SERVICE_NAME" -p MainPID --value || true)"
+          systemctl --user restart "$SERVICE_NAME"
+          sleep 8
+          if ! systemctl --user is-active --quiet "$SERVICE_NAME"; then
+            systemctl --user status --no-pager "$SERVICE_NAME" || true
+            exit 1
+          fi
+          post_pid="$(systemctl --user show "$SERVICE_NAME" -p MainPID --value)"
+          if [ -n "$pre_pid" ] && [ "$pre_pid" != "0" ] && [ "$post_pid" = "$pre_pid" ]; then
+            echo "Service MainPID did not change after restart: $post_pid" >&2
+            exit 1
+          fi
+          echo "Service restarted: ${pre_pid:-none} -> $post_pid"
+
+      - name: Verify local API and deployed SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 8 http://127.0.0.1:8000/api/health >/tmp/quant-health.json
+          python - "$GITHUB_SHA" <<'PY'
+          import json
+          import sys
+          import urllib.request
+
+          expected = sys.argv[1][:7]
+          with urllib.request.urlopen("http://127.0.0.1:8000/api/meta", timeout=8) as response:
+              actual = json.load(response).get("git_commit")
+          if actual != expected:
+              raise SystemExit(f"/api/meta git_commit {actual!r} != expected {expected!r}")
+          print(f"/api/meta git_commit verified: {actual}")
+          PY
+
+      - name: Run playback verification tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          target_date="$(TZ=Asia/Taipei date +%F)"
+          .venv/bin/python scripts/verify_strict.py "$target_date"
+          .venv/bin/python scripts/verify_playback.py --from-journal "$target_date"
+
+      - name: Verify Tailscale HTTPS WebUI
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -kfsS --max-time 12 "$TAILSCALE_URL/api/health" >/tmp/quant-tailscale-health.json
+          curl -kfsS --max-time 12 "$TAILSCALE_URL/api/meta" >/tmp/quant-tailscale-meta.json
+          curl -kfsS --max-time 12 "$TAILSCALE_URL/" >/tmp/quant-tailscale-root.html
+          grep -Eq '<div id="root"|</html>' /tmp/quant-tailscale-root.html
+
+      - name: Playwright smoke against Tailscale URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR/frontend"
+          PLAYWRIGHT_BASE_URL="$TAILSCALE_URL" \
+            npx playwright test e2e/quant-vps-smoke.spec.ts --browser=chromium
+
+      - name: Verify VPS tracked worktree is clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_DIR"
+          status="$(git status --porcelain=v1 --untracked-files=no)"
+          if [ -n "$status" ]; then
+            echo "$status" >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
