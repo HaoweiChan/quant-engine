@@ -175,7 +175,11 @@ async def main(target_date: str, start: str, end: str) -> None:
             print(f"   LIVE {ts_s}  {side:4} qty={qty:>5} @ {price:>9.3f} {reason}")
 
 
-def fetch_bars_from_journal(session_id: str, target_date: str) -> list[MinuteBar]:
+def fetch_bars_from_journal(
+    session_id: str,
+    target_date: str,
+    symbol: str | None = None,
+) -> list[MinuteBar]:
     """Reconstruct the exact bar stream the live runner saw on target_date by
     grepping the journal for runner_bar_seen records. Returns bars in arrival
     order. Requires the runner-instrumentation log line in
@@ -202,6 +206,8 @@ def fetch_bars_from_journal(session_id: str, target_date: str) -> list[MinuteBar
         except Exception:
             continue
         if d.get("event") != "runner_bar_seen" or d.get("session_id") != session_id:
+            continue
+        if symbol is not None and d.get("symbol") != symbol:
             continue
         try:
             t = datetime.fromisoformat(d["bar_ts"])
@@ -337,7 +343,7 @@ async def main_from_journal(target_date: str) -> None:
     print("-" * 116)
     for account_id, strategy, symbol, equity, sid in sessions:
         short = f"{account_id}/{strategy.split('/')[-1]}"
-        bars = fetch_bars_from_journal(sid, target_date)
+        bars = fetch_bars_from_journal(sid, target_date, symbol)
         if not bars:
             print(f"{short:45} {symbol:4} {0:>5} (no journal records — needs runner instrumentation deployed)")
             continue
@@ -422,8 +428,8 @@ async def main_from_journal_window(target_date: str, win_filter_start: str | Non
     global fetch_bars_from_journal
     cutoff = datetime.fromisoformat(f"{target_date}T{win_filter_start}")
     orig = fetch_bars_from_journal
-    def filtered(session_id, td):
-        bs = orig(session_id, td)
+    def filtered(session_id, td, symbol=None):
+        bs = orig(session_id, td, symbol)
         return [b for b in bs if b.timestamp >= cutoff]
     fetch_bars_from_journal = filtered
     try:
