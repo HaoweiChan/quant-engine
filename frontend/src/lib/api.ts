@@ -876,6 +876,12 @@ export interface OptionStrike {
   oi: number | null;
   iv: number | null;
   delta: number | null;
+  // Pack 2 additions
+  gamma?: number | null;
+  theta?: number | null;          // annual theta; UI divides by 365 for daily
+  vega?: number | null;
+  bid_ask_spread_pct?: number | null;
+  iv_smile_resid?: number | null; // IV minus quadratic-smile fit
 }
 
 export interface ExpirySlice {
@@ -894,6 +900,9 @@ export interface ScreenerResult {
   underlying_price: number;
   timestamp: string;
   expiries: ExpirySlice[];
+  as_of_freshness_seconds?: number | null;
+  rv_estimator?: string;
+  coverage_warning?: string | null;
 }
 
 export interface IVHistoryPoint {
@@ -953,6 +962,139 @@ export interface OptionPosition {
   quantity: number;
   avg_price: number;
   status: string;
+  // Pack 4 mark-to-market additions
+  mark_price?: number | null;
+  unrealized_pnl?: number | null;
+  multiplier?: number | null;
+}
+
+// --- Pack 3: scenarios + portfolio greeks ---
+
+export interface ScenarioLeg {
+  option_type: "C" | "P";
+  strike: number;
+  side: "buy" | "sell";
+  qty: number;
+  price: number;
+  multiplier?: number;
+}
+
+export interface PnlPoint {
+  S: number;
+  pnl: number;
+}
+
+export interface ScenarioResult {
+  breakeven: number[];
+  max_loss: number;
+  max_profit: number | "inf" | null;
+  premium: number;
+  margin_estimate: number;
+  pnl_curve: PnlPoint[];
+  dte_days: number;
+}
+
+export async function computeScenarios(params: {
+  legs: ScenarioLeg[];
+  S_now: number;
+  dte_days: number;
+  sigma?: number;
+  r?: number;
+  q?: number;
+}): Promise<ScenarioResult> {
+  return fetchJSON("/api/options/scenarios", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+}
+
+export interface PortfolioGreeks {
+  net_delta: number;
+  net_gamma: number;
+  net_theta: number;
+  net_vega: number;
+  n_legs: number;
+  missing_codes: string[];
+}
+
+export async function fetchPortfolioGreeks(): Promise<PortfolioGreeks> {
+  return fetchJSON("/api/options/portfolio-greeks");
+}
+
+// --- Pack 4: working orders ---
+
+export interface OpenOrder {
+  order_id: string;
+  contract_code: string;
+  strike: number;
+  option_type: string;
+  expiry: string;
+  side: string;
+  quantity: number;
+  filled_quantity?: number;
+  price: number;
+  order_type: string;
+  status: string;
+  gateway_id: string;
+}
+
+export async function fetchOpenOrders(): Promise<OpenOrder[]> {
+  return fetchJSON("/api/options/orders");
+}
+
+export async function cancelOpenOrder(orderId: string, gatewayId: string): Promise<{ status: string; order_id: string }> {
+  return fetchJSON(
+    `/api/options/orders/${encodeURIComponent(orderId)}/cancel?gateway_id=${encodeURIComponent(gatewayId)}`,
+    { method: "POST" },
+  );
+}
+
+export async function amendOpenOrder(
+  orderId: string,
+  gatewayId: string,
+  body: { price?: number; quantity?: number },
+): Promise<{ status: string; order_id: string; price?: number; quantity?: number }> {
+  return fetchJSON(
+    `/api/options/orders/${encodeURIComponent(orderId)}?gateway_id=${encodeURIComponent(gatewayId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+// --- Pack 5: combo orders ---
+
+export interface ComboOrderLeg {
+  contract_code: string;
+  side: "buy" | "sell";
+  quantity: number;
+  price: number;
+  order_type?: string;
+}
+
+export interface ComboPlaceResult {
+  status: string;
+  combo: { name: string; confidence: number; notes?: string };
+  mode?: "atomic" | "sequenced";
+  combo_id?: string;
+  legs?: Array<{ order_id?: string; contract_code: string; side: string; quantity: number; price: number; status?: string }>;
+  failed_at?: number;
+  error?: string;
+}
+
+export async function placeComboOrder(params: {
+  account_id: string;
+  legs: ComboOrderLeg[];
+  dry_run?: boolean;
+}): Promise<ComboPlaceResult> {
+  return fetchJSON("/api/options/orders/combo", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
 }
 
 export async function fetchTradingAccounts(): Promise<TradingAccount[]> {

@@ -106,7 +106,12 @@ def crawl_option_chain_snapshot(
                         multiplier=multiplier,
                     ))
 
-                # Add quote
+                # Add quote.
+                # open_interest is hard-coded None: shioaji api.snapshots() does not
+                # expose OI for options contracts (verified in docs/txo_screener_design.md).
+                # The screener detects all-None OI and sets coverage_warning=
+                # "open_interest_unavailable" so the UI can surface this honestly
+                # rather than silently showing zero or empty OI columns.
                 session.add(OptionQuote(
                     contract_code=code,
                     timestamp=now_str,

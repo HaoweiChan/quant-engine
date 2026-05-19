@@ -512,6 +512,77 @@ class SinopacGateway(BrokerGateway):
             "status": status,
         }
 
+    def place_combo_order(self, legs: list[dict[str, Any]]) -> dict[str, Any]:
+        """Place a combo (multi-leg) option order.
+
+        Each leg dict: {contract_code, side ('buy'|'sell'), quantity, price,
+        order_type ('limit'|'market')}.
+
+        Shioaji has no native multi-leg combo endpoint as of the current SDK;
+        orders are sequenced one by one. If a future SDK version adds
+        place_combo_order or place_strategy_order we probe for it first and
+        prefer the atomic path.
+
+        Returns:
+            mode='atomic'    — native broker combo (future-proof path)
+            mode='sequenced' — legs placed one by one; partial fills possible.
+            If a leg fails mid-way: failed_at index and error key are included
+            so the caller can surface the partial state honestly.
+        """
+        if not self._connected or not self._api:
+            raise RuntimeError("Gateway not connected")
+
+        # Probe for a native combo endpoint (shioaji does not have one yet,
+        # but check defensively so we can adopt it without code changes).
+        native_fn = getattr(self._api, "place_combo_order", None) or getattr(
+            self._api, "place_strategy_order", None
+        )
+        if native_fn is not None:
+            try:
+                result = native_fn(legs)
+                combo_id = getattr(result, "id", str(id(result)))
+                logger.info("sinopac_combo_atomic", combo_id=combo_id, n_legs=len(legs))
+                return {
+                    "mode": "atomic",
+                    "combo_id": combo_id,
+                    "legs": [dict(L) for L in legs],
+                }
+            except Exception as exc:
+                logger.warning(
+                    "sinopac_combo_atomic_failed_falling_back",
+                    error=str(exc),
+                    n_legs=len(legs),
+                )
+
+        # Sequenced fallback: place each leg independently.
+        placed: list[dict[str, Any]] = []
+        for idx, leg in enumerate(legs):
+            try:
+                leg_result = self.place_option_order(
+                    contract_code=leg["contract_code"],
+                    side=leg["side"],
+                    quantity=int(leg.get("quantity", 1)),
+                    price=float(leg.get("price", 0.0)),
+                    order_type=leg.get("order_type", "limit"),
+                )
+                placed.append(leg_result)
+            except Exception as exc:
+                logger.warning(
+                    "sinopac_combo_leg_failed",
+                    idx=idx,
+                    contract_code=leg.get("contract_code"),
+                    error=str(exc),
+                )
+                return {
+                    "mode": "sequenced",
+                    "legs": placed,
+                    "failed_at": idx,
+                    "error": str(exc),
+                }
+
+        logger.info("sinopac_combo_sequenced", n_legs=len(legs))
+        return {"mode": "sequenced", "legs": placed}
+
     def poll_fills(self) -> list[dict[str, Any]]:
         """Poll for new fills since the last check. Returns list of new fill dicts."""
         if not self._connected or not self._api:
@@ -695,6 +766,182 @@ class SinopacGateway(BrokerGateway):
         except Exception as exc:
             self._connect_error = f"Reconnect failed: {exc}"
             logger.warning("sinopac_reconnect_failed", account_id=self._account_id, error=str(exc))
+
+    # ------------------------------------------------------------------ #
+    # Order lifecycle — list / cancel / amend                             #
+    # ------------------------------------------------------------------ #
+
+    _OPEN_STATUSES = frozenset({
+        "PendingSubmit", "PreSubmitted", "Submitted", "PartFilled",
+    })
+
+    def list_open_orders(self) -> list[dict[str, Any]]:
+        """Return all non-terminal TXO option orders for the futopt account.
+
+        Uses update_status + list_trades and filters TXO contracts whose
+        status is one of: PendingSubmit, PreSubmitted, Submitted, PartFilled.
+        Returns [] on any error and logs a warning. Never raises.
+        """
+        if not self._connected or not self._api:
+            return []
+        try:
+            update_fn = getattr(self._api, "update_status", None)
+            if update_fn is not None:
+                try:
+                    update_fn(self._api.futopt_account)
+                except Exception as exc:
+                    logger.debug("list_open_orders_update_status_failed", error=str(exc))
+            trades = self._api.list_trades()
+        except Exception as exc:
+            logger.warning("list_open_orders_failed", error=str(exc))
+            return []
+
+        result: list[dict[str, Any]] = []
+        for trade in trades:
+            order = getattr(trade, "order", None)
+            if order is None:
+                continue
+            status = getattr(trade, "status", None)
+            status_value = str(getattr(status, "status", ""))
+            if status_value not in self._OPEN_STATUSES:
+                continue
+            contract = getattr(trade, "contract", None)
+            code = str(getattr(contract, "code", "") or getattr(order, "code", ""))
+            if not code.startswith("TXO"):
+                continue
+            quantity = int(getattr(order, "quantity", 0) or 0)
+            deal_quantity = int(getattr(status, "deal_quantity", 0) or 0) if status else 0
+            result.append({
+                "order_id": str(getattr(order, "id", "")),
+                "contract_code": code,
+                "strike": float(getattr(contract, "strike_price", 0) or 0) if contract else 0.0,
+                "option_type": str(getattr(contract, "option_right", "") or "") if contract else "",
+                "expiry": (
+                    (getattr(contract, "delivery_date", "") or "").replace("/", "-")
+                    if contract else ""
+                ),
+                "side": str(getattr(order, "action", "")),
+                "quantity": quantity,
+                "filled_quantity": deal_quantity,
+                "price": float(getattr(order, "price", 0) or 0),
+                "order_type": str(getattr(order, "order_type", "") or ""),
+                "status": status_value,
+            })
+        return result
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        """Cancel an order by id.
+
+        Raises ValueError if not found, RuntimeError on shioaji failure.
+        """
+        if not self._connected or not self._api:
+            raise RuntimeError("Gateway not connected")
+
+        cancel_fn = getattr(self._api, "cancel_order", None)
+        if cancel_fn is None:
+            raise RuntimeError("shioaji instance has no cancel_order method")
+
+        # Locate the trade object for the given order_id.
+        try:
+            trades = self._api.list_trades()
+        except Exception as exc:
+            raise RuntimeError(f"list_trades failed: {exc}") from exc
+
+        target_trade = None
+        for trade in trades:
+            order = getattr(trade, "order", None)
+            if order is not None and str(getattr(order, "id", "")) == order_id:
+                target_trade = trade
+                break
+
+        if target_trade is None:
+            raise ValueError(f"Order not found: {order_id}")
+
+        try:
+            result = cancel_fn(target_trade)
+        except Exception as exc:
+            raise RuntimeError(f"cancel_order failed: {exc}") from exc
+
+        # result may be a Trade or a status-like object — extract status safely.
+        new_status = "Cancelled"
+        if result is not None:
+            new_status = str(
+                getattr(getattr(result, "status", None), "status", None)
+                or getattr(result, "status", "Cancelled")
+            )
+        logger.info("sinopac_order_cancelled", order_id=order_id, status=new_status)
+        return {"order_id": order_id, "status": new_status}
+
+    def amend_order(
+        self,
+        order_id: str,
+        price: float | None = None,
+        qty: int | None = None,
+    ) -> dict[str, Any]:
+        """Amend price and/or qty of an open order.
+
+        Raises ValueError if not found or both price and qty are None.
+        Raises RuntimeError on shioaji failure.
+        """
+        if price is None and qty is None:
+            raise ValueError("Provide at least one of price or qty")
+        if not self._connected or not self._api:
+            raise RuntimeError("Gateway not connected")
+
+        update_order_fn = getattr(self._api, "update_order", None)
+        if update_order_fn is None:
+            raise RuntimeError("shioaji instance has no update_order method")
+
+        try:
+            trades = self._api.list_trades()
+        except Exception as exc:
+            raise RuntimeError(f"list_trades failed: {exc}") from exc
+
+        target_trade = None
+        for trade in trades:
+            order = getattr(trade, "order", None)
+            if order is not None and str(getattr(order, "id", "")) == order_id:
+                target_trade = trade
+                break
+
+        if target_trade is None:
+            raise ValueError(f"Order not found: {order_id}")
+
+        kwargs: dict[str, Any] = {}
+        if price is not None:
+            kwargs["price"] = price
+        if qty is not None:
+            kwargs["qty"] = qty
+
+        try:
+            result = update_order_fn(target_trade, **kwargs)
+        except Exception as exc:
+            raise RuntimeError(f"update_order failed: {exc}") from exc
+
+        # Reflect updated values from the returned object or fall back to inputs.
+        updated_order = getattr(result, "order", None) if result is not None else None
+        new_status = str(
+            getattr(getattr(result, "status", None), "status", None)
+            or "Submitted"
+        ) if result is not None else "Submitted"
+        new_price = (
+            float(getattr(updated_order, "price", price) or price or 0)
+            if updated_order else (price or 0.0)
+        )
+        new_qty = (
+            int(getattr(updated_order, "quantity", qty) or qty or 0)
+            if updated_order else (qty or 0)
+        )
+        logger.info(
+            "sinopac_order_amended",
+            order_id=order_id, price=new_price, qty=new_qty, status=new_status,
+        )
+        return {
+            "order_id": order_id,
+            "status": new_status,
+            "price": new_price,
+            "quantity": new_qty,
+        }
 
 
 def _point_value_for(code: str) -> float:

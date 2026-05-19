@@ -161,3 +161,143 @@ class TestG6_NoLookAheadIVRank:
         pctile = iv_percentile(current, window)
         expected = np.mean(window < current)
         assert abs(pctile - expected) < 1e-6
+
+
+class TestPack1_VRPNonzero:
+    """Pack 1 regression — VRP must be nonzero when IV diverges from RV."""
+
+    def test_vrp_nonzero_when_iv_diverges_from_rv(self):
+        import datetime as dt
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from src.data.db import Base, OptionContract, OptionQuote
+        from src.analytics.options.screener import build_screener
+        from src.analytics.options.pricing import bs_price
+
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+
+        expiry = (dt.date.today() + dt.timedelta(days=60)).isoformat()
+        underlying = 20000.0
+        strike = 20000.0
+        # High IV (0.35) → high option price
+        T = 60 / 365.0
+        high_iv = 0.35
+        price = bs_price(underlying, strike, T, 0.0175, 0.0, high_iv, "C")
+
+        with Session() as s:
+            s.add(OptionContract(
+                contract_code="TXO20000C0715",
+                underlying_symbol="TX",
+                expiry_date=expiry,
+                strike=strike,
+                option_type="C",
+                multiplier=50.0,
+            ))
+            s.add(OptionQuote(
+                contract_code="TXO20000C0715",
+                timestamp="2026-05-07 14:00:00",
+                bid=price * 0.99,
+                ask=price * 1.01,
+                last=price,
+                volume=100,
+                open_interest=None,
+                underlying_price=underlying,
+            ))
+            s.commit()
+
+        db_url = "sqlite:///:memory:"
+        # Construct Database with the already-created engine via monkey-patch
+        from src.data.db import Database
+        db = Database.__new__(Database)
+        db._engine = engine
+        Base.metadata.create_all(db._engine)
+        db._session_factory = Session
+
+        # Low RV: near-constant prices → RV ≈ 0
+        n = 40
+        closes = np.full(n, underlying)
+        highs = closes + 5.0   # tiny range keeps Parkinson RV near zero
+        lows = closes - 5.0
+
+        result = build_screener(
+            db,
+            underlying_closes=closes,
+            underlying_highs=highs,
+            underlying_lows=lows,
+            auto_load_underlying=False,
+        )
+
+        assert result.expiries, "Expected at least one expiry slice"
+        vrp = result.expiries[0].vrp
+        assert vrp != 0, f"VRP should be nonzero when IV diverges from RV, got {vrp}"
+        assert abs(vrp) > 0.05, f"Expected |VRP| > 0.05, got {vrp}"
+
+
+class TestPack1_ATMIVHistoryDedup:
+    """Pack 1 regression — ATM IV history must yield one data point per calendar date."""
+
+    def test_atm_iv_history_dedup_one_per_date(self):
+        import datetime as dt
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from src.data.db import Base, OptionContract, OptionQuote, Database
+        from src.analytics.options.screener import _load_atm_iv_history
+        from src.analytics.options.pricing import bs_price
+
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+
+        underlying = 20000.0
+        strike = 20000.0
+        # Expiry far enough in the future that DTE > 0 for all test timestamps
+        expiry_date = (dt.date.today() + dt.timedelta(days=70)).isoformat()
+        T = 60 / 365.0
+        iv = 0.20
+        price = bs_price(underlying, strike, T, 0.0175, 0.0, iv, "C")
+
+        # Use dates 5 and 6 days ago so they always fall within any reasonable window
+        day1 = (dt.date.today() - dt.timedelta(days=6)).isoformat()
+        day2 = (dt.date.today() - dt.timedelta(days=5)).isoformat()
+        timestamps = [
+            f"{day1} 09:00:00",
+            f"{day1} 14:00:00",
+            f"{day1} 22:30:00",  # latest on day1 — deduper must keep this one
+            f"{day2} 14:00:00",
+        ]
+
+        with Session() as s:
+            s.add(OptionContract(
+                contract_code="TXO20000C_DEDUP",
+                underlying_symbol="TX",
+                expiry_date=expiry_date,
+                strike=strike,
+                option_type="C",
+                multiplier=50.0,
+            ))
+            for ts in timestamps:
+                s.add(OptionQuote(
+                    contract_code="TXO20000C_DEDUP",
+                    timestamp=ts,
+                    bid=price * 0.99,
+                    ask=price * 1.01,
+                    last=price,
+                    volume=50,
+                    open_interest=None,
+                    underlying_price=underlying,
+                ))
+            s.commit()
+
+        db = Database.__new__(Database)
+        db._engine = engine
+        Base.metadata.create_all(db._engine)
+        db._session_factory = Session
+
+        iv_history = _load_atm_iv_history(db, 10, 0.0175, 0.0)
+
+        assert len(iv_history) <= 2, (
+            f"Expected ≤ 2 entries (one per date), got {len(iv_history)}"
+        )
+        assert len(iv_history) >= 1, "Expected at least one IV entry from the two dates"

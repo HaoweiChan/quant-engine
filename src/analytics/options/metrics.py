@@ -115,6 +115,44 @@ def skew_25_delta(
     return iv_put - iv_call
 
 
+def smile_residuals(S: float, strikes: np.ndarray, ivs: np.ndarray) -> np.ndarray:
+    """Residuals of each strike's IV relative to a quadratic smile fit.
+
+    Fits a quadratic in log(K/S) to the (strike, iv) pairs and returns
+    (actual_iv - fitted_iv) per strike.
+
+    Why this matters: the existing ivDeviationColor in the frontend compares
+    to ATM IV (a flat baseline), but real mispricing is relative to the smile
+    shape — a 25Δ wing being elevated relative to ATM is normal; relative to
+    the fitted smile is signal.
+
+    NaN-safe: NaN ivs are excluded from the fit; output rows whose iv was
+    NaN return NaN.
+
+    Args:
+        S: Spot price.
+        strikes: Array of strike prices (length N).
+        ivs: Array of implied vols (length N, may contain NaN).
+
+    Returns:
+        Array of residuals (length N). NaN where input iv was NaN.
+    """
+    out = np.full(len(strikes), float("nan"))
+    x = np.log(np.asarray(strikes, dtype=float) / S)
+    ivs = np.asarray(ivs, dtype=float)
+    valid = ~np.isnan(ivs)
+    if valid.sum() < 3:
+        # Not enough points to fit a quadratic; return NaN for all
+        return out
+    x_v = x[valid]
+    y_v = ivs[valid]
+    design = np.column_stack([np.ones_like(x_v), x_v, x_v ** 2])
+    coeffs, _, _, _ = np.linalg.lstsq(design, y_v, rcond=None)
+    fitted_all = coeffs[0] + coeffs[1] * x + coeffs[2] * x ** 2
+    out[valid] = ivs[valid] - fitted_all[valid]
+    return out
+
+
 def check_smile_sanity(
     strikes: np.ndarray,
     ivs: np.ndarray,

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatCard, StatRow } from "@/components/StatCard";
 import {
@@ -7,9 +7,32 @@ import {
   fetchTradingAccounts,
   placeOptionOrder,
   fetchOptionPositions,
+  fetchOpenOrders,
 } from "@/lib/api";
-import type { ScreenerResult, ExpirySlice, OptionStrike, TradingAccount, OptionPosition } from "@/lib/api";
+import type {
+  ScreenerResult,
+  ExpirySlice,
+  OptionStrike,
+  TradingAccount,
+  OptionPosition,
+  OpenOrder,
+  PortfolioGreeks,
+} from "@/lib/api";
 import { colors } from "@/lib/theme";
+import {
+  LiquidityBadge,
+  FilterChips,
+  DEFAULT_FILTERS,
+  passesFilter,
+  BestOpportunities,
+  ScenarioPanel,
+  PortfolioImpact,
+  loadPortfolioGreeks,
+  WorkingOrdersPanel,
+  BuilderPane,
+  useAutoRefresh,
+} from "./options/extras";
+import type { ChainFilters, BuilderLeg } from "./options/extras";
 
 
 function fmt(v: number | null | undefined, decimals = 2): string {
@@ -171,6 +194,8 @@ function OrderDialog({
   onAccountChange,
   onClose,
   onSubmit,
+  S_now,
+  portfolioGreeks,
 }: {
   target: OrderTarget;
   accounts: TradingAccount[];
@@ -178,6 +203,8 @@ function OrderDialog({
   onAccountChange: (id: string) => void;
   onClose: () => void;
   onSubmit: (order: { account_id: string; contract_code: string; side: string; quantity: number; price: number }) => void;
+  S_now: number;
+  portfolioGreeks: PortfolioGreeks | null;
 }) {
   const { strike, side, expiry } = target;
   const guidance = computePriceGuidance(strike.bid, strike.ask, side);
@@ -191,6 +218,61 @@ function OrderDialog({
   const priceInRange = price >= guidance.rangeMin && price <= guidance.rangeMax;
   const priceWarn = !priceInRange && price > 0;
 
+  // Pack 3: scenario inputs
+  const dteDays = useMemo(() => {
+    try {
+      const d = new Date(expiry);
+      const diffMs = d.getTime() - Date.now();
+      return Math.max(1, Math.round(diffMs / (1000 * 60 * 60 * 24)));
+    } catch {
+      return 30;
+    }
+  }, [expiry]);
+  const scenarioLeg = useMemo(
+    () =>
+      price > 0
+        ? {
+            option_type: strike.option_type,
+            strike: strike.strike,
+            side,
+            qty: quantity,
+            price,
+            multiplier: 50,
+          }
+        : null,
+    [price, strike, side, quantity],
+  );
+  const sigmaForScenarios = strike.iv && strike.iv > 0 ? strike.iv : 0.2;
+  // Pack 3: portfolio impact contribution from this prospective leg
+  const sideSign = side === "buy" ? 1 : -1;
+  const legContribution = strike.delta != null
+    ? {
+        delta: (strike.delta ?? 0) * sideSign * quantity * 50,
+        gamma: (strike.gamma ?? 0) * sideSign * quantity * 50,
+        theta: (strike.theta ?? 0) * sideSign * quantity * 50,
+        vega: (strike.vega ?? 0) * sideSign * quantity * 50,
+      }
+    : null;
+
+  // Fill probability heuristic
+  const fillHint = useMemo(() => {
+    if (price <= 0 || guidance.spread <= 0) return null;
+    const distFromMid = Math.abs(price - guidance.midpoint);
+    const ratio = distFromMid / (guidance.spread / 2);
+    if (side === "buy") {
+      // Higher price = closer to ask = better fill
+      const aboveMid = price > guidance.midpoint;
+      if (!aboveMid) return { color: colors.red, text: "Below mid · slow fill" };
+      if (ratio > 0.5) return { color: colors.green, text: "Aggressive · likely fill" };
+      return { color: colors.gold, text: "Patient · medium fill chance" };
+    } else {
+      const belowMid = price < guidance.midpoint;
+      if (!belowMid) return { color: colors.red, text: "Above mid · slow fill" };
+      if (ratio > 0.5) return { color: colors.green, text: "Aggressive · likely fill" };
+      return { color: colors.gold, text: "Patient · medium fill chance" };
+    }
+  }, [price, side, guidance]);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
@@ -198,7 +280,7 @@ function OrderDialog({
       onClick={onClose}
     >
       <div
-        className="rounded-lg p-5 w-[420px]"
+        className="rounded-lg p-5 w-[480px] max-h-[90vh] overflow-y-auto"
         style={{ background: "#1a1d28", border: `2px solid ${sideColor}55`, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -241,6 +323,17 @@ function OrderDialog({
           <span style={{ color: colors.muted }}>Delta</span>
           <span style={{ color: colors.text }}>{strike.delta !== null ? fmt(strike.delta, 3) : "—"}</span>
         </div>
+
+        {/* Pack 3: Scenario panel */}
+        <ScenarioPanel
+          leg={scenarioLeg}
+          S_now={S_now}
+          dte_days={dteDays}
+          sigma={sigmaForScenarios}
+        />
+
+        {/* Pack 3: Portfolio impact */}
+        <PortfolioImpact before={portfolioGreeks} legContribution={legContribution} />
 
         {/* Price guidance */}
         <div
@@ -433,6 +526,35 @@ function OrderDialog({
           </div>
         </div>
 
+        {/* Pack 3: Sizing presets + fill-probability hint */}
+        <div className="flex items-center gap-2 mb-3 flex-wrap" style={{ fontFamily: "var(--font-mono)" }}>
+          <span className="text-[10px]" style={{ color: colors.muted }}>Quick size:</span>
+          {[1, 5, 10, 25].map((n) => (
+            <button
+              key={n}
+              onClick={() => setQuantity(n)}
+              className="text-[10px] px-2 py-0.5 rounded"
+              style={{
+                background: quantity === n ? colors.blue : "transparent",
+                color: quantity === n ? "#fff" : colors.muted,
+                border: `1px solid ${quantity === n ? colors.blue : "#353849"}`,
+                cursor: "pointer",
+              }}
+            >
+              {n}
+            </button>
+          ))}
+          {fillHint && (
+            <span
+              className="ml-auto text-[10px] px-2 py-0.5 rounded"
+              style={{ color: fillHint.color, border: `1px solid ${fillHint.color}55` }}
+              title="Heuristic fill probability based on price vs spread mid"
+            >
+              {fillHint.text}
+            </span>
+          )}
+        </div>
+
         {/* Confirm / Submit */}
         {!confirming ? (
           <button
@@ -514,7 +636,13 @@ function Toast({ message, type, onDone }: { message: string; type: "ok" | "error
 
 // --- Positions Panel ---
 
-function PositionsPanel({ positions }: { positions: OptionPosition[] }) {
+function PositionsPanel({
+  positions,
+  onClose,
+}: {
+  positions: OptionPosition[];
+  onClose: (p: OptionPosition) => void;
+}) {
   if (positions.length === 0) return null;
   return (
     <div
@@ -525,34 +653,54 @@ function PositionsPanel({ positions }: { positions: OptionPosition[] }) {
         className="text-[13px] font-semibold m-0 mb-3"
         style={{ color: colors.gold, fontFamily: "var(--font-mono)" }}
       >
-        Open Positions
+        Open Positions ({positions.length})
       </h3>
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead className="text-[10px]" style={{ color: colors.muted }}>Contract</TableHead>
-            <TableHead className="text-[10px]" style={{ color: colors.muted }}>Strike</TableHead>
-            <TableHead className="text-[10px]" style={{ color: colors.muted }}>Type</TableHead>
+            <TableHead className="text-[10px]" style={{ color: colors.muted }}>Strike/Type</TableHead>
             <TableHead className="text-[10px]" style={{ color: colors.muted }}>Expiry</TableHead>
             <TableHead className="text-[10px]" style={{ color: colors.muted }}>Side</TableHead>
             <TableHead className="text-right text-[10px]" style={{ color: colors.muted }}>Qty</TableHead>
-            <TableHead className="text-right text-[10px]" style={{ color: colors.muted }}>Avg Price</TableHead>
+            <TableHead className="text-right text-[10px]" style={{ color: colors.muted }}>Avg</TableHead>
+            <TableHead className="text-right text-[10px]" style={{ color: colors.muted }}>Mark</TableHead>
+            <TableHead className="text-right text-[10px]" style={{ color: colors.muted }}>Unrealized PnL</TableHead>
             <TableHead className="text-[10px]" style={{ color: colors.muted }}>Account</TableHead>
+            <TableHead className="text-right text-[10px]" style={{ color: colors.muted }}>Action</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
           {positions.map((p, i) => {
             const sideColor = p.side.toLowerCase().includes("buy") ? colors.green : colors.red;
+            const pnl = p.unrealized_pnl;
+            const pnlColor = pnl == null ? colors.muted : pnl >= 0 ? colors.green : colors.red;
+            const mono = { fontFamily: "var(--font-mono)" as const };
             return (
               <TableRow key={`${p.contract_code}-${i}`}>
-                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{p.contract_code}</TableCell>
-                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{p.strike}</TableCell>
-                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{p.option_type}</TableCell>
-                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{p.expiry}</TableCell>
-                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: sideColor }}>{p.side}</TableCell>
-                <TableCell className="text-right text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{p.quantity}</TableCell>
-                <TableCell className="text-right text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.text }}>{fmt(p.avg_price)}</TableCell>
-                <TableCell className="text-[11px]" style={{ fontFamily: "var(--font-mono)", color: colors.muted }}>{p.gateway_id}</TableCell>
+                <TableCell className="text-[11px]" style={{ ...mono, color: colors.text }}>
+                  {p.strike}{p.option_type === "C" || p.option_type.includes("Call") ? "C" : "P"}
+                </TableCell>
+                <TableCell className="text-[11px]" style={{ ...mono, color: colors.text }}>{p.expiry}</TableCell>
+                <TableCell className="text-[11px]" style={{ ...mono, color: sideColor }}>{p.side}</TableCell>
+                <TableCell className="text-right text-[11px]" style={{ ...mono, color: colors.text }}>{p.quantity}</TableCell>
+                <TableCell className="text-right text-[11px]" style={{ ...mono, color: colors.text }}>{fmt(p.avg_price)}</TableCell>
+                <TableCell className="text-right text-[11px]" style={{ ...mono, color: colors.text }}>
+                  {p.mark_price != null ? fmt(p.mark_price) : "—"}
+                </TableCell>
+                <TableCell className="text-right text-[11px]" style={{ ...mono, color: pnlColor }}>
+                  {pnl == null ? "—" : (pnl >= 0 ? "+" : "") + Math.round(pnl).toLocaleString()}
+                </TableCell>
+                <TableCell className="text-[11px]" style={{ ...mono, color: colors.muted }}>{p.gateway_id}</TableCell>
+                <TableCell className="text-right text-[11px]" style={mono}>
+                  <button
+                    onClick={() => onClose(p)}
+                    className="text-[10px] px-2 py-0.5 rounded"
+                    style={{ background: "transparent", color: colors.gold, border: `1px solid ${colors.gold}55`, cursor: "pointer" }}
+                    title="Open closing-leg dialog"
+                  >
+                    Close
+                  </button>
+                </TableCell>
               </TableRow>
             );
           })}
@@ -655,7 +803,7 @@ function PriceCell({
       style={{ color: colors.text, transition: "color 0.15s" }}
       onMouseEnter={(e) => (e.currentTarget.style.color = hoverColor)}
       onMouseLeave={(e) => (e.currentTarget.style.color = colors.text)}
-      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      onClick={onClick}
       title={side === "bid" ? `Sell ${optionType === "C" ? "Call" : "Put"} @ ${fmt(value)}` : `Buy ${optionType === "C" ? "Call" : "Put"} @ ${fmt(value)}`}
     >
       {fmt(value)}
@@ -669,13 +817,20 @@ function ExpiryPanel({
   slice,
   underlying,
   onClickPrice,
+  filters,
+  jumpHighlight,
 }: {
   slice: ExpirySlice;
   underlying: number;
-  onClickPrice: (strike: OptionStrike, side: "buy" | "sell", expiry: string) => void;
+  onClickPrice: (strike: OptionStrike, side: "buy" | "sell", expiry: string, addToBuilder?: boolean) => void;
+  filters: ChainFilters;
+  jumpHighlight: string | null;
 }) {
-  const calls = slice.strikes.filter((s) => s.option_type === "C");
-  const puts = slice.strikes.filter((s) => s.option_type === "P");
+  const allCalls = slice.strikes.filter((s) => s.option_type === "C");
+  const allPuts = slice.strikes.filter((s) => s.option_type === "P");
+  // Apply filters; we keep call/put parallel so the strike row is intact
+  const calls = allCalls.filter((s) => passesFilter(s, slice.expiry, filters));
+  const puts = allPuts.filter((s) => passesFilter(s, slice.expiry, filters));
   const strikeSet = [...new Set([...calls.map((c) => c.strike), ...puts.map((p) => p.strike)])].sort(
     (a, b) => a - b,
   );
@@ -684,6 +839,12 @@ function ExpiryPanel({
   const maxCallVol = Math.max(...calls.map((c) => c.volume ?? 0), 1);
   const maxPutVol = Math.max(...puts.map((p) => p.volume ?? 0), 1);
   const vrpSig = vrpSignal(slice.vrp);
+  const showGreeks = filters.showGreeks;
+  // Wrap click handler to peek at shift-key for builder add
+  const click = (s: OptionStrike, side: "buy" | "sell") => (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onClickPrice(s, side, slice.expiry, e.shiftKey);
+  };
 
   return (
     <div
@@ -724,6 +885,13 @@ function ExpiryPanel({
           <TableHeader>
             <TableRow>
               <TableHead className="text-right text-[10px]" style={{ color: colors.green, width: 40 }}>Vol</TableHead>
+              {showGreeks && (
+                <>
+                  <TableHead className="text-right text-[10px]" style={{ color: colors.green }} title="Gamma">Γ</TableHead>
+                  <TableHead className="text-right text-[10px]" style={{ color: colors.green }} title="Theta (daily)">Θ/d</TableHead>
+                  <TableHead className="text-right text-[10px]" style={{ color: colors.green }} title="Vega">ν</TableHead>
+                </>
+              )}
               <TableHead className="text-right text-[10px]" style={{ color: colors.green }}>IV</TableHead>
               <TableHead className="text-right text-[10px]" style={{ color: colors.green }}>Delta</TableHead>
               <TableHead className="text-right text-[10px]" style={{ color: colors.green }}>Bid</TableHead>
@@ -735,6 +903,13 @@ function ExpiryPanel({
               <TableHead className="text-right text-[10px]" style={{ color: colors.red }}>Ask</TableHead>
               <TableHead className="text-right text-[10px]" style={{ color: colors.red }}>Delta</TableHead>
               <TableHead className="text-right text-[10px]" style={{ color: colors.red }}>IV</TableHead>
+              {showGreeks && (
+                <>
+                  <TableHead className="text-right text-[10px]" style={{ color: colors.red }} title="Vega">ν</TableHead>
+                  <TableHead className="text-right text-[10px]" style={{ color: colors.red }} title="Theta (daily)">Θ/d</TableHead>
+                  <TableHead className="text-right text-[10px]" style={{ color: colors.red }} title="Gamma">Γ</TableHead>
+                </>
+              )}
               <TableHead className="text-right text-[10px]" style={{ color: colors.red, width: 40 }}>Vol</TableHead>
             </TableRow>
           </TableHeader>
@@ -745,29 +920,60 @@ function ExpiryPanel({
               const atm = isAtm(strike, underlying);
               const rowBg = atm ? "#2a2d1a" : "transparent";
               const rowBorder = atm ? `1px solid ${colors.gold}44` : "none";
-              const mono = { fontFamily: "var(--font-mono)" };
+              const mono = { fontFamily: "var(--font-mono)" as const };
+              const highlighted = jumpHighlight && (c?.contract_code === jumpHighlight || p?.contract_code === jumpHighlight);
+              const ringStyle = highlighted ? { outline: `2px solid ${colors.gold}`, outlineOffset: -2 } : {};
+              // Smile-relative IV color (Pack 2): if iv_smile_resid available, use it; else fall back to ATM-relative
+              const callIvColor = c && c.iv_smile_resid != null
+                ? (c.iv_smile_resid > 0.015 ? colors.red
+                  : c.iv_smile_resid > 0.005 ? colors.orange
+                  : c.iv_smile_resid < -0.015 ? colors.green
+                  : c.iv_smile_resid < -0.005 ? "#8bc34a"
+                  : colors.muted)
+                : ivDeviationColor(c?.iv ?? null, slice.atm_iv);
+              const putIvColor = p && p.iv_smile_resid != null
+                ? (p.iv_smile_resid > 0.015 ? colors.red
+                  : p.iv_smile_resid > 0.005 ? colors.orange
+                  : p.iv_smile_resid < -0.015 ? colors.green
+                  : p.iv_smile_resid < -0.005 ? "#8bc34a"
+                  : colors.muted)
+                : ivDeviationColor(p?.iv ?? null, slice.atm_iv);
               return (
-                <TableRow key={strike} style={{ background: rowBg, borderTop: rowBorder, borderBottom: rowBorder }}>
+                <TableRow key={strike} style={{ background: rowBg, borderTop: rowBorder, borderBottom: rowBorder, ...ringStyle }}>
                   <TableCell className="text-right text-[10px] p-0.5" style={mono}>
                     <div className="flex items-center gap-1 justify-end">
+                      <LiquidityBadge spreadPct={c?.bid_ask_spread_pct} volume={c?.volume} />
                       <VolBar intensity={volIntensity(c?.volume ?? null, maxCallVol)} side="call" />
                       <span className="min-w-[28px] text-right" style={{ color: colors.muted, fontSize: 10 }}>
                         {c?.volume ?? ""}
                       </span>
                     </div>
                   </TableCell>
-                  <TableCell className="text-right text-[11px]" style={{ ...mono, color: ivDeviationColor(c?.iv ?? null, slice.atm_iv) }}>
+                  {showGreeks && (
+                    <>
+                      <TableCell className="text-right text-[10px]" style={{ ...mono, color: colors.muted }}>
+                        {c?.gamma != null ? c.gamma.toExponential(1) : "—"}
+                      </TableCell>
+                      <TableCell className="text-right text-[10px]" style={{ ...mono, color: colors.muted }}>
+                        {c?.theta != null ? (c.theta / 365).toFixed(1) : "—"}
+                      </TableCell>
+                      <TableCell className="text-right text-[10px]" style={{ ...mono, color: colors.muted }}>
+                        {c?.vega != null ? c.vega.toFixed(1) : "—"}
+                      </TableCell>
+                    </>
+                  )}
+                  <TableCell className="text-right text-[11px]" style={{ ...mono, color: callIvColor }}>
                     {c ? pct(c.iv) : "—"}
                   </TableCell>
                   <TableCell className="text-right text-[11px]" style={{ ...mono, color: colors.muted }}>
                     {c ? fmt(c.delta, 3) : "—"}
                   </TableCell>
-                  {/* Call Bid — click to SELL call */}
+                  {/* Call Bid — click to SELL call (Shift+Click adds to builder) */}
                   <TableCell
                     className="text-right text-[11px] cursor-pointer hover:bg-[#ffffff08]"
                     style={mono}
-                    onClick={c && c.bid ? () => onClickPrice(c, "sell", slice.expiry) : undefined}
-                    title={c?.bid ? `Sell Call @ ${fmt(c.bid)}` : undefined}
+                    onClick={c && c.bid ? click(c, "sell") : undefined}
+                    title={c?.bid ? `Sell Call @ ${fmt(c.bid)} · Shift+Click adds to builder` : undefined}
                   >
                     {c ? <PriceCell value={c.bid} side="bid" optionType="C" onClick={() => {}} /> : "—"}
                   </TableCell>
@@ -775,8 +981,8 @@ function ExpiryPanel({
                   <TableCell
                     className="text-right text-[11px] cursor-pointer hover:bg-[#ffffff08]"
                     style={mono}
-                    onClick={c && c.ask ? () => onClickPrice(c, "buy", slice.expiry) : undefined}
-                    title={c?.ask ? `Buy Call @ ${fmt(c.ask)}` : undefined}
+                    onClick={c && c.ask ? click(c, "buy") : undefined}
+                    title={c?.ask ? `Buy Call @ ${fmt(c.ask)} · Shift+Click adds to builder` : undefined}
                   >
                     {c ? <PriceCell value={c.ask} side="ask" optionType="C" onClick={() => {}} /> : "—"}
                   </TableCell>
@@ -795,8 +1001,8 @@ function ExpiryPanel({
                   <TableCell
                     className="text-right text-[11px] cursor-pointer hover:bg-[#ffffff08]"
                     style={mono}
-                    onClick={p && p.bid ? () => onClickPrice(p, "sell", slice.expiry) : undefined}
-                    title={p?.bid ? `Sell Put @ ${fmt(p.bid)}` : undefined}
+                    onClick={p && p.bid ? click(p, "sell") : undefined}
+                    title={p?.bid ? `Sell Put @ ${fmt(p.bid)} · Shift+Click adds to builder` : undefined}
                   >
                     {p ? <PriceCell value={p.bid} side="bid" optionType="P" onClick={() => {}} /> : "—"}
                   </TableCell>
@@ -804,23 +1010,37 @@ function ExpiryPanel({
                   <TableCell
                     className="text-right text-[11px] cursor-pointer hover:bg-[#ffffff08]"
                     style={mono}
-                    onClick={p && p.ask ? () => onClickPrice(p, "buy", slice.expiry) : undefined}
-                    title={p?.ask ? `Buy Put @ ${fmt(p.ask)}` : undefined}
+                    onClick={p && p.ask ? click(p, "buy") : undefined}
+                    title={p?.ask ? `Buy Put @ ${fmt(p.ask)} · Shift+Click adds to builder` : undefined}
                   >
                     {p ? <PriceCell value={p.ask} side="ask" optionType="P" onClick={() => {}} /> : "—"}
                   </TableCell>
                   <TableCell className="text-right text-[11px]" style={{ ...mono, color: colors.muted }}>
                     {p ? fmt(p.delta, 3) : "—"}
                   </TableCell>
-                  <TableCell className="text-right text-[11px]" style={{ ...mono, color: ivDeviationColor(p?.iv ?? null, slice.atm_iv) }}>
+                  <TableCell className="text-right text-[11px]" style={{ ...mono, color: putIvColor }}>
                     {p ? pct(p.iv) : "—"}
                   </TableCell>
+                  {showGreeks && (
+                    <>
+                      <TableCell className="text-right text-[10px]" style={{ ...mono, color: colors.muted }}>
+                        {p?.vega != null ? p.vega.toFixed(1) : "—"}
+                      </TableCell>
+                      <TableCell className="text-right text-[10px]" style={{ ...mono, color: colors.muted }}>
+                        {p?.theta != null ? (p.theta / 365).toFixed(1) : "—"}
+                      </TableCell>
+                      <TableCell className="text-right text-[10px]" style={{ ...mono, color: colors.muted }}>
+                        {p?.gamma != null ? p.gamma.toExponential(1) : "—"}
+                      </TableCell>
+                    </>
+                  )}
                   <TableCell className="text-right text-[10px] p-0.5" style={mono}>
                     <div className="flex items-center gap-1">
                       <span className="min-w-[28px] text-left" style={{ color: colors.muted, fontSize: 10 }}>
                         {p?.volume ?? ""}
                       </span>
                       <VolBar intensity={volIntensity(p?.volume ?? null, maxPutVol)} side="put" />
+                      <LiquidityBadge spreadPct={p?.bid_ask_spread_pct} volume={p?.volume} />
                     </div>
                   </TableCell>
                 </TableRow>
@@ -846,7 +1066,18 @@ export function Options() {
   const [orderTarget, setOrderTarget] = useState<OrderTarget | null>(null);
   const [positions, setPositions] = useState<OptionPosition[]>([]);
   const [toast, setToast] = useState<{ message: string; type: "ok" | "error" } | null>(null);
-  const [, setSubmitting] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  // Pack 2: filters
+  const [filters, setFilters] = useState<ChainFilters>(DEFAULT_FILTERS);
+  // Pack 3: portfolio greeks
+  const [portfolioGreeks, setPortfolioGreeks] = useState<PortfolioGreeks | null>(null);
+  // Pack 4: working orders + auto-refresh
+  const [workingOrders, setWorkingOrders] = useState<OpenOrder[]>([]);
+  const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
+  // Pack 5: builder
+  const [builderLegs, setBuilderLegs] = useState<BuilderLeg[]>([]);
+  // Highlighted contract from BestOps click
+  const [jumpHighlight, setJumpHighlight] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -870,11 +1101,30 @@ export function Options() {
     fetchOptionPositions().then(setPositions).catch(() => {});
   }, []);
 
+  const loadOrders = useCallback(() => {
+    fetchOpenOrders().then(setWorkingOrders).catch(() => setWorkingOrders([]));
+  }, []);
+
+  const loadGreeks = useCallback(() => {
+    loadPortfolioGreeks().then(setPortfolioGreeks).catch(() => {});
+  }, []);
+
   useEffect(() => {
     load();
     loadAccounts();
     loadPositions();
-  }, [load, loadAccounts, loadPositions]);
+    loadOrders();
+    loadGreeks();
+  }, [load, loadAccounts, loadPositions, loadOrders, loadGreeks]);
+
+  // Auto-refresh during session hours (15s polling)
+  const refreshAll = useCallback(() => {
+    load();
+    loadPositions();
+    loadOrders();
+    loadGreeks();
+  }, [load, loadPositions, loadOrders, loadGreeks]);
+  useAutoRefresh(autoRefresh, 15000, refreshAll);
 
   const handleCrawl = async () => {
     setCrawling(true);
@@ -894,9 +1144,42 @@ export function Options() {
     }
   };
 
-  const handleClickPrice = (strike: OptionStrike, side: "buy" | "sell", expiry: string) => {
+  const handleClickPrice = (
+    strike: OptionStrike,
+    side: "buy" | "sell",
+    expiry: string,
+    addToBuilder = false,
+  ) => {
+    if (addToBuilder) {
+      const price = side === "buy" ? strike.ask ?? strike.last ?? 0 : strike.bid ?? strike.last ?? 0;
+      if (!price) return;
+      setBuilderLegs((prev) => [
+        ...prev,
+        {
+          contract_code: strike.contract_code,
+          strike: strike.strike,
+          option_type: strike.option_type,
+          expiry,
+          side,
+          qty: 1,
+          price,
+        },
+      ]);
+      setToast({ message: `Added leg: ${side.toUpperCase()} ${strike.strike}${strike.option_type} @ ${price}`, type: "ok" });
+      return;
+    }
     setOrderTarget({ strike, side, expiry });
   };
+
+  const removeBuilderLeg = (idx: number) =>
+    setBuilderLegs((prev) => prev.filter((_, i) => i !== idx));
+  const clearBuilder = () => setBuilderLegs([]);
+
+  const expiriesList = useMemo(() => data?.expiries.map((e) => e.expiry) ?? [], [data]);
+  const visibleExpiries = useMemo(() => {
+    if (!data) return [];
+    return data.expiries.filter((e) => filters.expiry === "ALL" || e.expiry === filters.expiry);
+  }, [data, filters.expiry]);
 
   const handleOrderSubmit = async (order: { account_id: string; contract_code: string; side: string; quantity: number; price: number }) => {
     setSubmitting(true);
@@ -908,12 +1191,16 @@ export function Options() {
       });
       setOrderTarget(null);
       loadPositions();
+      loadOrders();
     } catch (e: any) {
       setToast({ message: `Order failed: ${e.message}`, type: "error" });
     } finally {
       setSubmitting(false);
     }
   };
+
+  // Suppress submitting state warning if unused
+  void submitting;
 
   const front = data?.expiries?.[0];
   const regime = front ? volRegime(front.iv_rank_val) : null;
@@ -945,6 +1232,37 @@ export function Options() {
           >
             ?
           </button>
+          {/* Freshness chip */}
+          {(() => {
+            const n = data?.as_of_freshness_seconds;
+            if (n === null || n === undefined) return null;
+            let chipColor: string;
+            let label: string;
+            if (n <= 60) {
+              chipColor = colors.green;
+              label = `FRESH · ${n}s`;
+            } else if (n <= 300) {
+              chipColor = colors.gold;
+              label = `${Math.round(n / 60)}m old`;
+            } else {
+              chipColor = colors.red;
+              label = `${Math.round(n / 60)}m old · STALE`;
+            }
+            return (
+              <span
+                className="text-[10px] px-2 py-0.5 rounded"
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  color: chipColor,
+                  border: `1px solid ${chipColor}55`,
+                  background: `${chipColor}11`,
+                }}
+                title="Snapshot freshness — click Fetch Live to refresh"
+              >
+                {label}
+              </span>
+            );
+          })()}
         </div>
         <div className="flex items-center gap-3">
           {/* Account selector in header */}
@@ -1012,6 +1330,8 @@ export function Options() {
           onAccountChange={setSelectedAccount}
           onClose={() => setOrderTarget(null)}
           onSubmit={handleOrderSubmit}
+          S_now={data?.underlying_price ?? 0}
+          portfolioGreeks={portfolioGreeks}
         />
       )}
 
@@ -1051,6 +1371,21 @@ export function Options() {
                   VRP <span style={{ color: vrpSig.color }}>{pct(front!.vrp)}</span>
                 </span>
               </div>
+            </div>
+          )}
+
+          {/* Coverage warning banner */}
+          {data?.coverage_warning === "open_interest_unavailable" && (
+            <div
+              className="text-[11px] px-3 py-1.5 rounded mb-3"
+              style={{
+                fontFamily: "var(--font-mono)",
+                color: colors.gold,
+                background: `${colors.gold}11`,
+                border: `1px solid ${colors.gold}44`,
+              }}
+            >
+              ⚠ Open Interest unavailable — liquidity gating uses bid-ask spread + volume only
             </div>
           )}
 
@@ -1099,7 +1434,7 @@ export function Options() {
               <span style={{ color: colors.gold }}>ATM</span> = at-the-money row
             </span>
             <span>Vol bars = relative volume</span>
-            <span>Click Bid/Ask to trade</span>
+            <span>Click Bid/Ask to trade · <span style={{ color: colors.gold }}>Shift+Click</span> to add to builder</span>
             <span
               className="cursor-pointer underline"
               style={{ color: colors.blue }}
@@ -1107,13 +1442,76 @@ export function Options() {
             >
               Full guide →
             </span>
+            <label className="ml-auto inline-flex items-center gap-1 cursor-pointer" data-testid="auto-refresh-toggle">
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={(e) => setAutoRefresh(e.target.checked)}
+                style={{ cursor: "pointer" }}
+              />
+              <span style={{ color: autoRefresh ? colors.green : colors.muted }}>
+                Auto-refresh 15s
+              </span>
+            </label>
           </div>
 
-          {/* Positions */}
-          <PositionsPanel positions={positions} />
+          {/* Pack 2: Best Opportunities strip */}
+          <BestOpportunities
+            expiries={data.expiries}
+            onJump={(code) => {
+              setJumpHighlight(code);
+              setTimeout(() => setJumpHighlight(null), 2500);
+            }}
+          />
 
-          {data.expiries.map((exp) => (
-            <ExpiryPanel key={exp.expiry} slice={exp} underlying={data.underlying_price} onClickPrice={handleClickPrice} />
+          {/* Pack 5: Multi-leg builder */}
+          <BuilderPane
+            legs={builderLegs}
+            onRemove={removeBuilderLeg}
+            onClear={clearBuilder}
+            S_now={data.underlying_price}
+            dte_days={data.expiries[0]?.dte ?? 30}
+            sigma={data.expiries[0]?.atm_iv ?? 0.2}
+            accountId={selectedAccount}
+            onPlaced={(message, ok) => setToast({ message, type: ok ? "ok" : "error" })}
+          />
+
+          {/* Pack 4: Working orders panel */}
+          <WorkingOrdersPanel orders={workingOrders} onCancelled={loadOrders} onAmended={loadOrders} />
+
+          {/* Positions (extended with mark/PnL/close) */}
+          <PositionsPanel
+            positions={positions}
+            onClose={(p) => {
+              const oppositeSide = p.side.toLowerCase().includes("buy") ? "sell" : "buy";
+              const placeholder: OptionStrike = {
+                strike: p.strike,
+                option_type: (p.option_type === "C" || p.option_type.includes("Call") ? "C" : "P") as "C" | "P",
+                contract_code: p.contract_code,
+                bid: p.mark_price ?? null,
+                ask: p.mark_price ?? null,
+                last: p.mark_price ?? null,
+                volume: null,
+                oi: null,
+                iv: null,
+                delta: null,
+              };
+              setOrderTarget({ strike: placeholder, side: oppositeSide, expiry: p.expiry });
+            }}
+          />
+
+          {/* Pack 2: Filters above the chain */}
+          <FilterChips filters={filters} onChange={setFilters} expiries={expiriesList} />
+
+          {visibleExpiries.map((exp) => (
+            <ExpiryPanel
+              key={exp.expiry}
+              slice={exp}
+              underlying={data.underlying_price}
+              onClickPrice={handleClickPrice}
+              filters={filters}
+              jumpHighlight={jumpHighlight}
+            />
           ))}
 
           {data.expiries.length === 0 && (
