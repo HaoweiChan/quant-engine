@@ -91,6 +91,45 @@ class TestBarRouterWiring:
         assert runner._bar_router is None  # noqa: SLF001
         assert runner._bar_buffer == []  # noqa: SLF001
 
+    def test_plain_runner_rejects_next_month_bars(self) -> None:
+        from src.execution.live_strategy_runner import LiveStrategyRunner
+
+        runner = LiveStrategyRunner(
+            session_id="sess",
+            account_id="acct",
+            strategy_slug="medium_term/trend_following/ema_trend_pullback",
+            symbol="TMF",
+            equity_budget=1_000_000.0,
+            bar_router=None,
+        )
+
+        assert runner._matches_symbol("TMF") is True  # noqa: SLF001
+        assert runner._matches_symbol("TMFR1") is True  # noqa: SLF001
+        assert runner._matches_symbol("TMF202506") is True  # noqa: SLF001
+        assert runner._matches_symbol("TMF_R2") is False  # noqa: SLF001
+        assert runner._matches_symbol("TMFR2") is False  # noqa: SLF001
+        assert runner._matches_symbol("MTX") is False  # noqa: SLF001
+
+    def test_next_month_runner_matches_only_next_month_aliases(self) -> None:
+        from src.execution.live_strategy_runner import LiveStrategyRunner
+
+        runner = LiveStrategyRunner(
+            session_id="sess-r2",
+            account_id="acct",
+            strategy_slug="medium_term/trend_following/ema_trend_pullback",
+            symbol="TMF",
+            equity_budget=1_000_000.0,
+            bar_router=None,
+        )
+        # Direct R2 strategy sessions are not deployed today, but the matcher
+        # still supports the symbol form for any future explicit R2 runner.
+        runner.symbol = "TMF_R2"
+
+        assert runner._matches_symbol("TMF_R2") is True  # noqa: SLF001
+        assert runner._matches_symbol("TMFR2") is True  # noqa: SLF001
+        assert runner._matches_symbol("TMF") is False  # noqa: SLF001
+        assert runner._matches_symbol("TMFR1") is False  # noqa: SLF001
+
 
 class TestResampledFillsNotifyCallback:
     """Pin the 2026-05-13 regression: when the MultiTimeframeRouter is wired,

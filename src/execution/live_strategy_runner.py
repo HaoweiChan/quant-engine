@@ -149,16 +149,20 @@ class LiveStrategyRunner:
         # at the first bar at or after this time, then the rest of the
         # position rides through the session (used by the `intraday_max_long`
         # strategy that buys 當沖 max at open and keeps half overnight).
-        # ``force_flat_at_session_end=False`` opts the runner out of the
-        # 13:44 / 04:59 forced flatten that otherwise applies to every
-        # short-term strategy. Both default to the legacy behaviour.
-        from src.strategies.registry import get_info
+        # By default, session-close flattening is driven by the strategy's
+        # holding-period semantics: intraday strategies flatten, swing/medium
+        # strategies carry. A strategy may still explicitly override this in
+        # STRATEGY_META, e.g. intraday_max_long keeps half past session close.
+        from src.strategies.registry import get_info, is_intraday_strategy
         try:
             _info = get_info(strategy_slug)
             _meta = _info.meta or {}
         except Exception:
             _meta = {}
-        self._meta_force_flat: bool = bool(_meta.get("force_flat_at_session_end", True))
+        _default_force_flat = is_intraday_strategy(strategy_slug)
+        self._meta_force_flat: bool = bool(
+            _meta.get("force_flat_at_session_end", _default_force_flat)
+        )
         self._meta_daytrade: bool = bool(_meta.get("daytrade", False))
         self._meta_half_exit_at_min: int | None = _parse_hhmm_to_minutes(
             _meta.get("half_exit_at"),
@@ -928,11 +932,35 @@ class LiveStrategyRunner:
             positions[-1].lots = new_lots
 
     def _matches_symbol(self, tick_symbol: str) -> bool:
-        """Check if tick symbol matches this runner's target.
+        """Check if an incoming bar belongs to this runner's contract.
 
-        TMF ticks may arrive as "TMFR1", "TMF202506", etc.
+        The bar store normally emits canonical DB symbols (``TMF`` or
+        ``TMF_R2``), but some tests and recovery paths may pass broker-style
+        aliases such as ``TMFR1`` or ``TMF202506``. Plain front-month runners
+        must never accept next-month bars (``*_R2`` / ``*R2``), because those
+        prices can incorrectly drive live stop checks.
         """
-        return tick_symbol.startswith(self.symbol)
+        incoming = (tick_symbol or "").upper()
+        target = (self.symbol or "").upper()
+        if not incoming or not target:
+            return False
+        if incoming == target:
+            return True
+
+        if target.endswith("_R2"):
+            base = target[:-3]
+            return incoming in {f"{base}_R2", f"{base}R2", f"{base}FR2"}
+
+        if incoming.endswith("_R2") or incoming.endswith("R2"):
+            return False
+
+        if incoming in {f"{target}_R1", f"{target}R1", f"{target}FR1"}:
+            return True
+        if incoming.startswith(f"{target}F") and incoming[len(target) + 1:].isdigit():
+            return True
+        if incoming.startswith(target) and incoming[len(target):].isdigit():
+            return True
+        return False
 
     def _bar_to_snapshot(self, bar: MinuteBar) -> MarketSnapshot:
         snap = self._adapter.to_snapshot({
