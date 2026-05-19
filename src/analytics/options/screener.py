@@ -7,22 +7,24 @@ from __future__ import annotations
 
 import math
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field, asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 from sqlalchemy import select, func
 
-from src.data.db import Database, OptionContract, OptionQuote
-from src.analytics.options.pricing import implied_vol, bs_delta
-from src.analytics.options.realized_vol import rv_parkinson, rv_close_to_close
 from src.analytics.options.metrics import (
-    iv_rank,
-    iv_percentile,
-    variance_risk_premium,
-    skew_25_delta,
     atm_iv,
+    iv_percentile,
+    iv_rank,
+    skew_25_delta,
+    smile_residuals,
+    variance_risk_premium,
 )
+from src.analytics.options.pricing import bs_greeks_vec, implied_vol
+from src.analytics.options.realized_vol import rv_parkinson, rv_close_to_close
+from src.data.db import Database, OHLCVBar, OptionContract, OptionQuote
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,8 @@ _DEFAULT_R = 0.0175
 _DEFAULT_Q = 0.0
 _DEFAULT_IV_RANK_WINDOW = 252
 _DEFAULT_RV_WINDOW = 30
+_DEFAULT_UNDERLYING_SYMBOL = "TX"
+_TAIPEI_TZ = timezone(timedelta(hours=8))
 
 
 @dataclass
@@ -53,6 +57,10 @@ class ScreenerResult:
     underlying_price: float
     timestamp: str
     expiries: list[ExpirySlice] = field(default_factory=list)
+    # Pack 1: data-quality metadata so the UI can warn the user
+    as_of_freshness_seconds: int | None = None  # seconds since latest snapshot
+    rv_estimator: str = "parkinson"              # which RV estimator was used
+    coverage_warning: str | None = None          # e.g. "open_interest_unavailable"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -67,6 +75,8 @@ def build_screener(
     q: float = _DEFAULT_Q,
     iv_rank_window: int = _DEFAULT_IV_RANK_WINDOW,
     rv_window: int = _DEFAULT_RV_WINDOW,
+    auto_load_underlying: bool = True,
+    underlying_symbol: str = _DEFAULT_UNDERLYING_SYMBOL,
 ) -> ScreenerResult:
     """Build the full IV screener snapshot from latest DB data.
 
@@ -77,8 +87,15 @@ def build_screener(
         r, q: Risk-free rate and dividend yield.
         iv_rank_window: Days of ATM IV history for rank/percentile.
         rv_window: Days for realized vol estimation.
+        auto_load_underlying: If True (default) and underlying arrays are not
+            supplied, daily highs/lows/closes are aggregated from `ohlcv_bars`
+            for the past ``iv_rank_window`` days. This makes ``vrp`` non-zero
+            in production calls; pass False for synthetic/unit-test cases.
+        underlying_symbol: DB symbol for the underlying (default ``"TX"``).
     """
     today = date.today()
+    rv_estimator_used = "parkinson"
+    coverage_warning: str | None = None
 
     with db.session() as session:
         # Get latest timestamp
@@ -106,13 +123,36 @@ def build_screener(
     for oq, oc in quotes:
         by_expiry.setdefault(oc.expiry_date, []).append((oq, oc))
 
-    # Compute RV from underlying closes
+    # Auto-load underlying daily history if caller didn't supply it.
+    # Without this, RV is NaN -> VRP rounds to 0 and the page silently lies.
+    if (
+        auto_load_underlying
+        and underlying_closes is None
+        and underlying_highs is None
+        and underlying_lows is None
+    ):
+        underlying_closes, underlying_highs, underlying_lows = _load_underlying_daily_history(
+            db, underlying_symbol, iv_rank_window
+        )
+
+    # Compute RV from underlying closes; prefer Parkinson, fall back to C2C.
     rv_val = float("nan")
     if underlying_closes is not None and len(underlying_closes) > rv_window:
-        if underlying_highs is not None and underlying_lows is not None:
+        if (
+            underlying_highs is not None
+            and underlying_lows is not None
+            and len(underlying_highs) >= rv_window
+            and len(underlying_lows) >= rv_window
+        ):
             rv_val = rv_parkinson(underlying_highs, underlying_lows, rv_window)
-        else:
+            rv_estimator_used = "parkinson"
+        if math.isnan(rv_val):
             rv_val = rv_close_to_close(underlying_closes, rv_window)
+            rv_estimator_used = "close_to_close"
+
+    # OI coverage check — surface honestly when the crawler couldn't capture OI
+    if quotes and all(oq.open_interest is None for oq, _ in quotes):
+        coverage_warning = "open_interest_unavailable"
 
     # Historical ATM IVs for rank/percentile
     atm_iv_history = _load_atm_iv_history(db, iv_rank_window, r, q)
@@ -137,24 +177,58 @@ def build_screener(
         ])
         all_types = np.array([oc.option_type for _, oc in chain])
 
+        # Compute IVs first so we can batch-compute Greeks via vectorized helper
+        iv_vals: list[float] = []
         for oq, oc in chain:
             mid = _mid_price(oq)
             if mid <= 0:
-                iv_val = float("nan")
+                iv_vals.append(float("nan"))
             else:
-                iv_val = implied_vol(mid, underlying_price, oc.strike, T, r, q, oc.option_type)
-            delta = bs_delta(underlying_price, oc.strike, T, r, q, max(iv_val, 0.01) if not math.isnan(iv_val) else 0.2, oc.option_type)
+                iv_vals.append(implied_vol(mid, underlying_price, oc.strike, T, r, q, oc.option_type))
+
+        iv_arr = np.array(iv_vals, dtype=float)
+        # Use 0.01 floor for sigma in Greeks (avoid div-by-zero); NaN stays NaN
+        sigma_for_greeks = np.where(np.isnan(iv_arr), float("nan"), np.maximum(iv_arr, 0.01))
+        # Replace remaining NaN sigmas with 0.2 fallback for delta (matches original behavior)
+        sigma_delta = np.where(np.isnan(sigma_for_greeks), 0.2, sigma_for_greeks)
+        greeks = bs_greeks_vec(underlying_price, all_strikes, T, r, q, sigma_delta, all_types)
+
+        # Compute smile residuals for this expiry slice (all calls + puts together)
+        resid_arr = smile_residuals(underlying_price, all_strikes, iv_arr)
+
+        for i, (oq, oc) in enumerate(chain):
+            iv_val = iv_vals[i]
+            delta = greeks["delta"][i]
+            gamma = greeks["gamma"][i]
+            theta = greeks["theta"][i]
+            vega = greeks["vega"][i]
+            resid = resid_arr[i]
+
+            # bid_ask_spread_pct: (ask - bid) / mid * 100
+            bid = oq.bid
+            ask = oq.ask
+            mid = _mid_price(oq)
+            if bid is not None and ask is not None and bid > 0 and ask > 0 and mid > 0:
+                spread_pct: float | None = round((ask - bid) / mid * 100, 1)
+            else:
+                spread_pct = None
+
             strike_data.append({
                 "strike": oc.strike,
                 "option_type": oc.option_type,
                 "contract_code": oc.contract_code,
-                "bid": oq.bid,
-                "ask": oq.ask,
+                "bid": bid,
+                "ask": ask,
                 "last": oq.last,
                 "volume": oq.volume,
                 "oi": oq.open_interest,
                 "iv": round(iv_val, 4) if not math.isnan(iv_val) else None,
                 "delta": round(delta, 4) if not math.isnan(delta) else None,
+                "gamma": round(gamma, 6) if not math.isnan(gamma) else None,
+                "theta": round(theta, 4) if not math.isnan(theta) else None,
+                "vega": round(vega, 4) if not math.isnan(vega) else None,
+                "bid_ask_spread_pct": spread_pct,
+                "iv_smile_resid": round(float(resid), 4) if not math.isnan(resid) else None,
             })
 
         # ATM IV for this expiry
@@ -195,11 +269,82 @@ def build_screener(
             strikes=sorted(strike_data, key=lambda d: d["strike"]),
         ))
 
+    freshness = _freshness_seconds(latest_ts)
+
     return ScreenerResult(
         underlying_price=underlying_price,
         timestamp=latest_ts,
         expiries=expiry_slices,
+        as_of_freshness_seconds=freshness,
+        rv_estimator=rv_estimator_used,
+        coverage_warning=coverage_warning,
     )
+
+
+def _freshness_seconds(latest_ts: str) -> int | None:
+    """Seconds between now (Taipei) and the snapshot timestamp.
+
+    Returns None if the timestamp is unparseable. Negative values are
+    clamped to 0 (the snapshot can be a few seconds in the future due
+    to clock skew).
+    """
+    if not latest_ts:
+        return None
+    try:
+        # Stored format: "YYYY-MM-DD HH:MM:SS" in Taipei TZ (see options_crawl)
+        ts = datetime.strptime(latest_ts[:19], "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=_TAIPEI_TZ
+        )
+    except ValueError:
+        return None
+    delta = (datetime.now(_TAIPEI_TZ) - ts).total_seconds()
+    return max(0, int(delta))
+
+
+def _load_underlying_daily_history(
+    db: Database,
+    symbol: str,
+    days: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Roll up 1-minute ohlcv_bars into daily highs/lows/closes for the past N days.
+
+    Returns (closes, highs, lows). Empty arrays if no data.
+    """
+    end = datetime.now()
+    start = end - timedelta(days=days + 5)  # slack for weekends/holidays
+    with db.session() as session:
+        rows = (
+            session.query(OHLCVBar)
+            .filter(
+                OHLCVBar.symbol == symbol,
+                OHLCVBar.timestamp >= start,
+                OHLCVBar.timestamp <= end,
+            )
+            .order_by(OHLCVBar.timestamp.asc())
+            .all()
+        )
+    if not rows:
+        empty = np.array([], dtype=float)
+        return empty, empty, empty
+
+    # Aggregate to daily using session date (Taipei). Use last close, max high, min low.
+    daily: dict[str, dict[str, float]] = OrderedDict()
+    for bar in rows:
+        d = bar.timestamp.strftime("%Y-%m-%d")
+        if d not in daily:
+            daily[d] = {"high": bar.high, "low": bar.low, "close": bar.close}
+        else:
+            agg = daily[d]
+            if bar.high > agg["high"]:
+                agg["high"] = bar.high
+            if bar.low < agg["low"]:
+                agg["low"] = bar.low
+            agg["close"] = bar.close  # rows are timestamp-ascending → last bar wins
+
+    closes = np.array([d["close"] for d in daily.values()], dtype=float)
+    highs = np.array([d["high"] for d in daily.values()], dtype=float)
+    lows = np.array([d["low"] for d in daily.values()], dtype=float)
+    return closes, highs, lows
 
 
 def _mid_price(oq: OptionQuote) -> float:
@@ -220,7 +365,9 @@ def _load_atm_iv_history(
     """Load historical daily ATM IV values for rank/percentile.
 
     Finds the closest-to-ATM option for each past snapshot day and
-    computes its IV.
+    computes its IV. To avoid intraday-snapshot contamination of the
+    252-day min/max range, we keep only the **last timestamp per
+    calendar date** — one ATM IV point per trading day.
     """
     cutoff = (date.today() - timedelta(days=window_days)).isoformat()
     with db.session() as session:
@@ -235,8 +382,15 @@ def _load_atm_iv_history(
     if not ts_rows:
         return np.array([])
 
-    iv_vals: list[float] = []
+    # Dedup by date — keep the last timestamp of each calendar day so
+    # intraday crawls during a vol spike don't poison the 252-day range.
+    by_date: "OrderedDict[str, str]" = OrderedDict()
     for ts in ts_rows:
+        by_date[ts[:10]] = ts  # later timestamps overwrite earlier ones
+    daily_ts = list(by_date.values())
+
+    iv_vals: list[float] = []
+    for ts in daily_ts:
         with db.session() as session:
             rows = session.execute(
                 select(OptionQuote, OptionContract)

@@ -173,6 +173,123 @@ def bs_price_vec(
     return np.where(is_call, call_price, put_price)
 
 
+def bs_gamma(S: float, K: float, T: float, r: float, q: float, sigma: float) -> float:
+    """BS gamma: d²Price/dS².
+
+    Formula: e^(-qT) * N'(d1) / (S * sigma * sqrt(T))
+    Returns 0 if T <= 0 or sigma <= 0.
+    """
+    if T <= 0 or sigma <= 0:
+        return 0.0
+    F = S * math.exp((r - q) * T)
+    sqrt_T = math.sqrt(T)
+    d1 = (math.log(F / K) + 0.5 * sigma ** 2 * T) / (sigma * sqrt_T)
+    return math.exp(-q * T) * norm.pdf(d1) / (S * sigma * sqrt_T)
+
+
+def bs_theta(
+    S: float,
+    K: float,
+    T: float,
+    r: float,
+    q: float,
+    sigma: float,
+    option_type: str = "C",
+) -> float:
+    """BS theta: dPrice/dT (annual, not daily).
+
+    Returns the ANNUAL rate of time decay. To get daily theta, divide by 365.
+    A long option position always has negative theta (value decays over time).
+    Returns 0 if T <= 0 or sigma <= 0.
+
+    Call: -S*e^(-qT)*N'(d1)*sigma/(2*sqrt(T)) - r*K*e^(-rT)*N(d2) + q*S*e^(-qT)*N(d1)
+    Put:  -S*e^(-qT)*N'(d1)*sigma/(2*sqrt(T)) + r*K*e^(-rT)*N(-d2) - q*S*e^(-qT)*N(-d1)
+    """
+    if T <= 0 or sigma <= 0:
+        return 0.0
+    F = S * math.exp((r - q) * T)
+    sqrt_T = math.sqrt(T)
+    d1 = (math.log(F / K) + 0.5 * sigma ** 2 * T) / (sigma * sqrt_T)
+    d2 = d1 - sigma * sqrt_T
+    decay_term = -S * math.exp(-q * T) * norm.pdf(d1) * sigma / (2.0 * sqrt_T)
+    if option_type == "C":
+        return decay_term - r * K * math.exp(-r * T) * norm.cdf(d2) + q * S * math.exp(-q * T) * norm.cdf(d1)
+    return decay_term + r * K * math.exp(-r * T) * norm.cdf(-d2) - q * S * math.exp(-q * T) * norm.cdf(-d1)
+
+
+def bs_greeks_vec(
+    S: float,
+    K_arr: np.ndarray,
+    T: float,
+    r: float,
+    q: float,
+    sigma_arr: np.ndarray,
+    type_arr: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Vectorized BS Greeks over arrays of strikes, sigmas, and option types.
+
+    Args:
+        S: Spot price (scalar).
+        K_arr: Array of strike prices.
+        T: Time to expiry in years (scalar).
+        r: Risk-free rate (scalar).
+        q: Dividend yield (scalar).
+        sigma_arr: Array of implied vols, one per strike.
+        type_arr: Array of option types ("C" or "P"), one per strike.
+
+    Returns:
+        Dict with keys 'delta', 'gamma', 'theta', 'vega'. Theta is ANNUAL.
+        Each array has the same length as K_arr.
+    """
+    n = len(K_arr)
+    delta_out = np.zeros(n)
+    gamma_out = np.zeros(n)
+    theta_out = np.zeros(n)
+    vega_out = np.zeros(n)
+
+    if T <= 0:
+        for i in range(n):
+            ot = str(type_arr[i])
+            k = float(K_arr[i])
+            if ot == "C":
+                delta_out[i] = 1.0 if S > k else 0.0
+            else:
+                delta_out[i] = -1.0 if S < k else 0.0
+        return {"delta": delta_out, "gamma": gamma_out, "theta": theta_out, "vega": vega_out}
+
+    sqrt_T = math.sqrt(T)
+    eq_T = math.exp(-q * T)
+    er_T = math.exp(-r * T)
+
+    for i in range(n):
+        k = float(K_arr[i])
+        sig = float(sigma_arr[i])
+        ot = str(type_arr[i])
+        if sig <= 0 or math.isnan(sig):
+            if ot == "C":
+                delta_out[i] = 1.0 if S > k else 0.0
+            else:
+                delta_out[i] = -1.0 if S < k else 0.0
+            continue
+        F = S * math.exp((r - q) * T)
+        d1 = (math.log(F / k) + 0.5 * sig ** 2 * T) / (sig * sqrt_T)
+        d2 = d1 - sig * sqrt_T
+        pdf_d1 = norm.pdf(d1)
+        if ot == "C":
+            delta_out[i] = eq_T * norm.cdf(d1)
+        else:
+            delta_out[i] = eq_T * (norm.cdf(d1) - 1.0)
+        gamma_out[i] = eq_T * pdf_d1 / (S * sig * sqrt_T)
+        decay_term = -S * eq_T * pdf_d1 * sig / (2.0 * sqrt_T)
+        if ot == "C":
+            theta_out[i] = decay_term - r * k * er_T * norm.cdf(d2) + q * S * eq_T * norm.cdf(d1)
+        else:
+            theta_out[i] = decay_term + r * k * er_T * norm.cdf(-d2) - q * S * eq_T * norm.cdf(-d1)
+        vega_out[i] = S * eq_T * pdf_d1 * sqrt_T
+
+    return {"delta": delta_out, "gamma": gamma_out, "theta": theta_out, "vega": vega_out}
+
+
 def implied_vol_vec(
     prices: np.ndarray,
     S: float,
